@@ -46,7 +46,7 @@ const DEFAULT_MAX_MESSAGE: usize = 64 * 1024 * 1024;
 ///   max_message 单条消息上限，缺省 64 MiB
 #[derive(Default, cosmos::FromLua)]
 #[lua(default)]
-pub(crate) struct WsOptions {
+struct WsOptions {
     headers: Headers,
     timeout: Option<i64>,
     ctx: Option<ClientCfg>,
@@ -55,7 +55,7 @@ pub(crate) struct WsOptions {
 
 /// 客户端入口：静态方法
 ///   Ws.connect(url, opts?) → conn
-pub struct Ws;
+pub(crate) struct Ws;
 
 #[cosmos::userdata(name = "network.websocket")]
 impl Ws {

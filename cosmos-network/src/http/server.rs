@@ -65,7 +65,7 @@ where
 /// listen 的第四个参数（options table），逐字段读取由 derive(FromLua) 生成
 #[derive(Default, cosmos::FromLua)]
 #[lua(default)]
-pub(crate) struct ServerOptions {
+struct ServerOptions {
     max_body: Option<i64>,
     tls: Option<ServerCfg>,
     ws_max_message: Option<i64>,
@@ -160,7 +160,7 @@ impl HttpRequest {
 /// 给了 websocket 函数则改走 101 升级（忽略 status/headers/body）
 #[derive(cosmos::FromLua)]
 #[lua(default)]
-pub(crate) struct RespSpec {
+struct RespSpec {
     status: u16,
     headers: Headers,
     body: LuaBytes,
@@ -377,7 +377,7 @@ where
 /// 服务端句柄：close() 停止 accept（已有连接继续跑到结束）。
 /// 与 C++ 一致：句柄被 GC 回收不等于 close（accept 任务持有自己的 Rc），
 /// 只有显式 close() 或进程退出才停止监听
-pub struct HttpServerHandle {
+pub(crate) struct HttpServerHandle {
     task: Option<JoinHandle<()>>,
     port: u16,
 }
@@ -398,7 +398,7 @@ impl HttpServerHandle {
 
 /// 服务端入口：静态方法
 ///   HttpServer.listen(host, port, handler, opts?) → handle
-pub struct HttpServer;
+pub(crate) struct HttpServer;
 
 #[cosmos::userdata(name = "network.http.server")]
 impl HttpServer {

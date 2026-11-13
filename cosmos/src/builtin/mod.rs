@@ -1,6 +1,6 @@
 //! cosmos 内建模块：统一安装时间函数、轻线程和协程同步接口。
 
-pub mod light_thread;
+mod light_thread;
 mod sync;
 mod time;
 
@@ -11,7 +11,7 @@ use crate::userdata::{push_module, register};
 ///
 /// # Safety
 /// lua_state 必须属于已打开标准库并完成 userdata::init 的存活 VM，且由当前线程独占操作。
-pub unsafe fn open(lua_state: *mut lua_State) {
+pub(crate) unsafe fn open(lua_state: *mut lua_State) {
     register::<time::Time>(lua_state);
     light_thread::register_types(lua_state);
     sync::register_types(lua_state);

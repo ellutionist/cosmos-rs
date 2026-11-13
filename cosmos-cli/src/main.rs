@@ -1,3 +1,5 @@
+#![warn(unreachable_pub)]
+
 use std::ffi::OsString;
 use std::io;
 use std::path::{Path, PathBuf};

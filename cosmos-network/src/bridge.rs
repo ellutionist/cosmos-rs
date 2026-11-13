@@ -107,7 +107,7 @@ const UPVALUE_1: c_int = cosmos::ffi::LUA_GLOBALSINDEX - 1;
 unsafe extern "C" fn until_call(lua_state: *mut lua_State) -> c_int {
     trampoline(lua_state, |lua_state| unsafe {
         let mut this = try_check::<TcpUntil>(lua_state, UPVALUE_1)?;
-        Ok(cosmos::light_thread::yield_with(
+        Ok(cosmos::userdata::yield_with(
             lua_state,
             Box::pin(async move { this.next().await }),
         ))

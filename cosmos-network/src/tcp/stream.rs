@@ -6,7 +6,7 @@
 //! 连接生命周期建模为 State 枚举（Connected/Closed）。connect 是阻塞式异步调用，
 //! 返回时必然已连通或失败，因此没有可观察的 Connecting 中间态。
 //! split() 把 TcpStream 拆成 reader/writer 两个独立 userdata（各占一个 RefCell），
-//! 因此两个协程可以同时一个读一个写——共享的只有 Rc<Cell<State>> 连接状态。
+//! 因此两个协程可以同时一个读一个写——共享的只有 `Rc<Cell<State>>` 连接状态。
 //!
 //! receive 语义对齐 OpenResty tcpsock:receive（'*' 前缀可省略，同 LuaSocket）：
 //!   receive()      等价 "*l"（缺省按行读）
@@ -61,20 +61,20 @@ pub(crate) fn timeout_from_ms(ms: i64) -> Option<Duration> {
 }
 
 /// setbufsize 的字节参数：<= 0 表示不限（None）
-pub(crate) fn size_limit(n: i64) -> Option<usize> {
+pub(super) fn size_limit(n: i64) -> Option<usize> {
     (n > 0).then_some(n as usize)
 }
 
 /// 连接状态（Lua 侧 state() 返回对应的整数）
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum State {
+pub(super) enum State {
     Connected = 0,
     Closed = 1,
 }
 
 /// split 后的读半：明文流或 TLS 流，统一实现 AsyncRead，
 /// 让 reader 的 receive 状态机对两种连接只有一份实现
-pub enum ReadSide {
+pub(super) enum ReadSide {
     Plain(OwnedReadHalf),
     Tls(tokio::io::ReadHalf<TlsIo>),
 }
@@ -93,7 +93,7 @@ impl AsyncRead for ReadSide {
 }
 
 /// split 后的写半：对应 ReadSide
-pub enum WriteSide {
+pub(super) enum WriteSide {
     Plain(OwnedWriteHalf),
     Tls(tokio::io::WriteHalf<TlsIo>),
 }
@@ -126,7 +126,7 @@ impl AsyncWrite for WriteSide {
 }
 
 /// 连接入口：静态方法 Tcp.connect / Tcp.listen
-pub struct Tcp;
+pub(crate) struct Tcp;
 
 #[cosmos::userdata(name = "network.tcp.stream")]
 impl Tcp {
@@ -159,7 +159,7 @@ impl Tcp {
 }
 
 /// TCP 监听器：accept 出普通 TcpConn（close 后 accept 返回 nil,"closed"）
-pub struct TcpListener {
+pub(crate) struct TcpListener {
     listener: Option<tokio::net::TcpListener>,
     timeout: Option<Duration>,
 }
@@ -190,7 +190,7 @@ impl TcpListener {
     }
 }
 
-pub struct TcpConn {
+pub(crate) struct TcpConn {
     stream: Option<TcpStream>,
     state: Rc<Cell<State>>,
     /// 读写超时；split 时传递给 reader/writer（对齐 OpenResty settimeout）
@@ -243,7 +243,7 @@ impl TcpConn {
 }
 
 /// receive 的读取模式（OpenResty tcpsock:receive 的参数，'*' 前缀可省略）
-pub enum ReceivePattern {
+pub(crate) enum ReceivePattern {
     All,          // "*a"
     Line,         // "*l"：去掉行尾 \n 与 \r
     LineKeep,     // "*L"：保留行尾 \n
@@ -256,7 +256,7 @@ pub enum ReceivePattern {
 ///   Eof         → nil
 ///   Closed/…    → nil, reason, partial
 #[derive(cosmos::PushLua)]
-pub enum ReceiveOutcome {
+pub(crate) enum ReceiveOutcome {
     Data(Vec<u8>),
     Eof(Nil),
     Closed(Nil, &'static str, Vec<u8>),
@@ -265,14 +265,14 @@ pub enum ReceiveOutcome {
     Error(Nil, String, Vec<u8>),
 }
 
-pub struct TcpReader {
-    pub(crate) inner: Option<BufReader<ReadSide>>,
-    pub(crate) state: Rc<Cell<State>>,
+pub(crate) struct TcpReader {
+    pub(super) inner: Option<BufReader<ReadSide>>,
+    pub(super) state: Rc<Cell<State>>,
     /// 内置读缓冲：跨 fill 复用，返回时 mem::take 零拷贝移出
-    pub(crate) buf: Vec<u8>,
-    pub(crate) timeout: Option<Duration>,
+    pub(super) buf: Vec<u8>,
+    pub(super) timeout: Option<Duration>,
     /// *a/*l/*L/receiveuntil 的累积上限；None 不限
-    pub(crate) max_buf: Option<usize>,
+    pub(super) max_buf: Option<usize>,
 }
 
 #[cosmos::userdata(name = "network.tcp.stream.reader")]
@@ -449,7 +449,7 @@ impl TcpReader {
 }
 
 /// receiveuntil 迭代器的状态：独占 reader 的流，每次 next() 读一段
-pub struct TcpUntil {
+pub(crate) struct TcpUntil {
     inner: Option<BufReader<ReadSide>>,
     state: Rc<Cell<State>>,
     delim: Vec<u8>,
@@ -466,7 +466,7 @@ impl TcpUntil {}
 
 /// 迭代器返回值：压栈时构造 TcpUntil userdata，再包成 Lua 闭包（upvalue = userdata）。
 /// Lua 用法：local iter = reader:receiveuntil("--"); local data, err, partial = iter()
-pub struct UntilIter(pub(crate) TcpUntil);
+pub(crate) struct UntilIter(pub(crate) TcpUntil);
 
 impl TcpUntil {
     /// 读到分隔符或出错为止；分隔符可跨分块边界。
@@ -578,10 +578,10 @@ async fn read_chunk(
     }
 }
 
-pub struct TcpWriter {
-    pub(crate) inner: Option<WriteSide>,
-    pub(crate) state: Rc<Cell<State>>,
-    pub(crate) timeout: Option<Duration>,
+pub(crate) struct TcpWriter {
+    pub(super) inner: Option<WriteSide>,
+    pub(super) state: Rc<Cell<State>>,
+    pub(super) timeout: Option<Duration>,
 }
 
 #[cosmos::userdata(name = "network.tcp.stream.writer")]

@@ -108,7 +108,7 @@ impl tower_service::Service<Uri> for Connector {
 /// 构造时固定的 TLS 配置，由该 client 的全部请求与重定向共用。
 #[derive(Default, cosmos::FromLua)]
 #[lua(default)]
-pub(crate) struct ClientOptions {
+struct ClientOptions {
     ctx: Option<ClientCfg>,
 }
 
@@ -117,7 +117,7 @@ pub(crate) struct ClientOptions {
 /// `#[lua(default)]` 表示整张表缺省时按 `Default` 取同名字段。
 #[derive(cosmos::FromLua)]
 #[lua(default)]
-pub(crate) struct RequestOptions {
+struct RequestOptions {
     headers: Headers,
     body: LuaBytes,
     timeout: Option<i64>,
@@ -142,7 +142,7 @@ impl Default for RequestOptions {
 
 /// 客户端响应（Lua 侧 table），压栈由 `#[derive(PushLua)]` 生成
 #[derive(cosmos::PushLua)]
-pub(crate) struct ClientResponse {
+struct ClientResponse {
     status: u16,
     version: i64,
     headers: Headers,
@@ -151,7 +151,7 @@ pub(crate) struct ClientResponse {
 
 /// 一个 client 对应一个连接池；拥有型句柄让并发请求不占用 userdata 借用。
 #[derive(Clone)]
-pub struct HttpClient {
+pub(crate) struct HttpClient {
     pool: HttpPool,
 }
 

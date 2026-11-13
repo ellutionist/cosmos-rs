@@ -33,7 +33,7 @@ type WsMessage = (&'static str, LuaBytes);
 
 /// 连接对象：帧流放在共享槽里，服务端在 handler 协程结束后要能强制关闭，
 /// 因此 run_conn 与 userdata 持有同一个 Rc
-pub struct WsConn {
+pub(crate) struct WsConn {
     ws: Rc<RefCell<Option<WsStream>>>,
     timeout: Option<Duration>,
 }

@@ -567,3 +567,49 @@
 - 按用户要求，将统一 LightThread、Execution/Control 分层、取消/等待语义、回归用例和配套文档提交到本地 Git。
 - 提交前差异检查通过，沿用已完成的构建、32 项测试、2 项 !Send 检查、严格 Clippy 与 examples 回归结果，不 push。
 - 下一步逐个检查 workspace crate 的可见性，重点收窄 cosmos 内部类型、函数与模块，同时保留宏展开和插件所需的跨 crate 桥接接口。
+
+## 2026-11-13 收窄各 crate 的 Rust 可见性
+
+### 核心逻辑
+
+- 前一轮 LightThread 合并已按用户要求提交为 3bd7ea1，不 push；本轮可见性修改继续留在工作区，未自动提交。
+- cosmos 的 builtin/light_thread/stack 实现模块改为私有；libs 仅 cfg(test) 编译，正式加载入口保持 Machine::load。
+  保留 Machine/Module、LightThread 句柄、userdata 桥接和最小 ffi 公开面。
+- VM 创建/关闭/恢复、registry 操作、userdata 初始化/清理/裸注册/push 收为 pub(crate)；
+  main_state、MethodTable::new 与字符串拷贝阈值为私有。LuaStr 改为公开但字段私有的类型，
+  内部存储枚举与 StrAnchor 不再公开，FromLua 和 Deref<str> 行为保持不变。
+- 宏与叶子桥接所需的 yield_with、PendingOp/PendingFuture、abs_index 通过 userdata 统一公开导出；
+  更新宏与 network bridge 的路径，避免为了外部宏展开而公开整个运行时/栈模块。
+- ffi 仅保留实际供宏/叶子转换使用的 9 个函数及必要类型/常量公开；其他声明限 crate 内，
+  luaL_loadstring/lua_pcall 仅测试编译，删除未使用的 luaL_newmetatable 声明。
+- cosmos-network 的协议实体与共享转换类型限 crate 内，本文件使用的 options/response 类型私有，
+  TCP/TLS 共用的状态、读写半、缓冲字段及 size_limit 限 tcp 模块，Headers::get/version_num 私有。
+  Rust 外部入口仍仅为 Network，Lua require 路径与方法不变。
+- cosmos-macros 仅保留必需的 3 个过程宏入口公开；CLI 的函数与 Args 原本已私有。
+  四个 crate 均启用 unreachable_pub，防止借私有父模块掩盖过宽的 pub 声明。
+
+### 踩坑、验证与下一步
+
+- 过程宏在调用方 crate 中展开，桥接函数不能直接全部改为 pub(crate)；逐项核对生成代码和跨 crate 使用方后，
+  保留最小公开桥接。LuaStrMap 字段等确实由外部叶子转换组合使用的值接口保留公开。
+- all-targets 构建、32 项测试、Machine/LightThread 的 2 项 !Send 检查及严格 Clippy 全部通过。
+- 独立 rustc 消费者实际编译并运行 Module 注入、FromLua/PushLua derive、异步 userdata、
+  8/4096/4097/8192 字节参数与 GC；15 项内部模块、VM 操作、锚点、阈值、私有字段/构造访问均按预期编译失败。
+- 实际运行 http/websocket/spawn/sleep/sync/machine、TCP/TLS 双进程与 Rust Machine 示例全部通过。
+- 用生成文档核对公开面：cosmos 仅公开 ffi/userdata 模块及宿主入口，network 仅公开 Network。
+  修复检查发现的属性宏链接歧义和泛型 HTML 格式警告，严格 rustdoc（-D warnings）与差异检查通过。
+- 更新 AGENTS.md/HANDOFF.md 的可见性约定、桥接入口和源码地图；后续新增接口按实际调用范围选择 private/pub(super)/pub(crate)，
+  仅宿主 API 和外部桥接使用 pub，不自动 commit / push。
+
+## 2026-11-13 明确 AGENTS.md 的可见性约束
+
+- 按用户要求，将此前的简要可见性说明整理为独立的核心约束章节，明确默认私有、最近共同祖先范围、
+  字段与表示封装、各 crate 公开边界，以及宏展开所需桥接的例外和验证要求。
+- 补充不能借私有父模块或无必要的公开重导出掩盖过宽声明；移除工程约定中的重复说明。
+- 本轮仅修改文档，差异检查通过，不重复运行代码测试，未 commit / push。后续实现遵守该章节。
+
+## 2026-11-13 提交可见性收窄与工程约束
+
+- 按用户要求，先提交各 crate 的可见性收窄、LuaStr 表示封装、宏桥接导出、文档及 AGENTS.md 可见性核心约束。
+- 提交前差异检查通过，沿用已完成的构建、32 项测试、2 项 !Send 检查、严格 Clippy/rustdoc、外部插件和 15 项访问拒绝验证，不 push。
+- 下一步按已确认方案改造受控读写/调用上下文，迁移宏及 network bridge，最后将 ffi 完全设为内部模块。

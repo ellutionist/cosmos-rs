@@ -78,10 +78,10 @@ impl Connection for Conn {
 
 /// 头表：保持顺序，名字统一小写
 #[derive(Clone, Default)]
-pub struct Headers(pub Vec<(String, String)>);
+pub(crate) struct Headers(pub(crate) Vec<(String, String)>);
 
 impl Headers {
-    pub fn get(&self, name: &str) -> Option<&str> {
+    fn get(&self, name: &str) -> Option<&str> {
         self.0
             .iter()
             .find(|(k, _)| k.eq_ignore_ascii_case(name))
@@ -92,10 +92,10 @@ impl Headers {
 /// 二进制安全的 Lua 字符串 ↔ Bytes（body 可能是任意字节）。
 /// 持有 Bytes 是为了多次取值时零拷贝（clone 只是引用计数）
 #[derive(Default)]
-pub struct LuaBytes(pub bytes::Bytes);
+pub(crate) struct LuaBytes(pub(crate) bytes::Bytes);
 
 /// HTTP 版本 → Lua 侧数字（10 / 11 / 20 / 30）
-pub(crate) fn version_num(v: hyper::Version) -> i64 {
+fn version_num(v: hyper::Version) -> i64 {
     match v {
         hyper::Version::HTTP_10 => 10,
         hyper::Version::HTTP_11 => 11,

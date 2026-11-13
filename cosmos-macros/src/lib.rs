@@ -1,4 +1,4 @@
-//! #[cosmos::userdata]：把 impl 块里的方法自动桥接进 Lua metatable。
+//! `#[cosmos::userdata]`：把 impl 块里的方法自动桥接进 Lua metatable。
 //!
 //! 用法：
 //! ```ignore
@@ -14,6 +14,8 @@
 //! `impl cosmos::userdata::UserData` 把它们注册进 MethodTable。
 //! `__gc` 不需要宏处理：运行时用 `ptr::drop_in_place` 统一生成，
 //! 对没有 Drop 的类型同样是合法空操作。
+
+#![warn(unreachable_pub)]
 
 use proc_macro::TokenStream;
 use proc_macro2::Literal;
@@ -236,7 +238,7 @@ fn gen_method(
                 cosmos::userdata::trampoline(lua_state, |lua_state| unsafe {
                     #self_binding
                     #(#arg_conversions)*
-                    Ok(cosmos::light_thread::yield_with(
+                    Ok(cosmos::userdata::yield_with(
                         lua_state,
                         Box::pin(async move { #call.await }),
                     ))
@@ -488,7 +490,7 @@ fn expand_from_lua(input: &DeriveInput) -> syn::Result<proc_macro2::TokenStream>
                 lua_state: *mut cosmos::ffi::lua_State,
                 idx: cosmos::ffi::c_int,
             ) -> ::core::result::Result<Self, ::std::string::String> {
-                let idx = cosmos::stack::abs_index(lua_state, idx);
+                let idx = cosmos::userdata::abs_index(lua_state, idx);
                 let __cosmos_top = cosmos::ffi::lua_gettop(lua_state);
                 if cosmos::ffi::lua_type(lua_state, idx) != cosmos::ffi::LUA_TTABLE {
                     return ::core::result::Result::Err(::std::format!(
@@ -610,7 +612,7 @@ fn expand_from_lua_enum(input: &DeriveInput) -> syn::Result<proc_macro2::TokenSt
                 lua_state: *mut cosmos::ffi::lua_State,
                 idx: cosmos::ffi::c_int,
             ) -> ::core::result::Result<Self, ::std::string::String> {
-                let idx = cosmos::stack::abs_index(lua_state, idx);
+                let idx = cosmos::userdata::abs_index(lua_state, idx);
                 let __cosmos_top = cosmos::ffi::lua_gettop(lua_state);
                 let __cosmos_result = (|| {
                     match cosmos::ffi::lua_type(lua_state, idx) {

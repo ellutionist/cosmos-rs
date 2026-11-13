@@ -4,7 +4,7 @@ use crate::ffi::*;
 ///
 /// # Safety
 /// lua_state 必须是当前线程上的有效状态，栈顶保留待读取的 Lua 错误值。
-pub unsafe fn err_message(lua_state: *mut lua_State) -> String {
+pub(crate) unsafe fn err_message(lua_state: *mut lua_State) -> String {
     let mut len = 0usize;
     let p = lua_tolstring(lua_state, -1, &mut len);
     if p.is_null() {

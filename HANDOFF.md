@@ -52,7 +52,7 @@ cosmos-rs/
   `tcp/mod.rs`、`tcp/stream.rs`、`tcp/tls.rs` 及 `websocket/mod.rs`、`websocket/conn.rs`，
   Rust 引用同步更新，Lua require 路径保持原样；目录整理已提交为 `6c0067a`。
 
-- 本次命名整理提交：`Thread` → `LightThread`，`thread.rs` → `light_thread.rs`；当前统一类型为 `cosmos::LightThread`（模块 `cosmos::light_thread`），Lua 类型表为 `cosmos.LightThread`。
+- 本次命名整理提交：`Thread` → `LightThread`，`thread.rs` → `light_thread.rs`；当前统一类型为 `cosmos::LightThread`（实现模块 `light_thread` 为私有），Lua 类型表为 `cosmos.LightThread`。
 - Lua 状态指针（含宏生成代码）已从 `L` 改为 `lua_state`，未使用参数为 `_lua_state`。
 - 其余 Clippy 诊断已修复，公开裸指针桥接 API 已明确 unsafe 契约；严格 Clippy、构建、15 项测试和 examples 通过。
 
@@ -183,6 +183,22 @@ local response, err = client:request("GET", url, {
 - 分配变化：统一共享状态增加一个 Rc 状态分配，直接执行不增加 Tokio 任务；后台任务去掉 oneshot，等待登记按需分配。
   异步操作仍只装箱 Future 本身，原生返回值继续共用 PushLua，不增加返回值闭包装箱。
 
+### 4.7 Rust 可见性边界
+
+- cosmos 公开宿主入口 Machine/Module、可克隆的 LightThread 句柄，以及 userdata/ffi 桥接协议；
+  builtin、light_thread、stack 实现模块均为私有，libs 仅测试构建存在。
+- VM 创建/关闭/恢复、registry 操作与 userdata 初始化/清理/裸注册/底层 push 均限 crate 内；
+  main_state、MethodTable::new、字符串锚点及拷贝阈值为私有。
+- LuaStr 是私有字段的公开类型，仅提供 FromLua 和 Deref<str>；外部不能匹配或构造内部拷贝/锚定分支。
+- 宏与叶子桥接所需的 yield_with、PendingOp/PendingFuture、abs_index 经 cosmos::userdata 公开导出；
+  宏生成代码与 network bridge 统一使用该桥接入口，不访问私有运行时模块。
+- ffi 只公开宏/叶子转换实际需要的函数与类型/常量；luaL_loadstring、lua_pcall 仅测试编译，
+  未使用的 luaL_newmetatable 声明已删除。外部不能绕过 Machine 直接管理 VM 生命周期。
+- cosmos-network 仅公开 Network；协议实体和跨功能模块转换类型限 crate 内，
+  仅本文件使用的选项/响应类型为私有，TCP/TLS 共用的状态、读写半和字段限 tcp 模块。
+- cosmos-macros 仅保留 3 个过程宏入口公开；CLI 函数与 Args 均私有。四个 crate 都启用 unreachable_pub。
+- 可见性调整不改变 Lua require 路径或方法语义；Rust 外部代码应使用上述公开入口，不依赖实现模块。
+
 ## 5. 本轮完成：统一 `PushLua`
 
 - 删除 `IntoOutput` trait、derive、全部 impl，以及 `AsyncOutput` 枚举。
@@ -204,7 +220,7 @@ local response, err = client:request("GET", url, {
   类型错误和借用冲突均不直接调用 `lua_error`。借用守卫受调用栈/协程锚点保护，不能作为拥有型回调结果。
 - 同步/异步宏、TCP until、sleep、thread.spawn/wait 共用 `userdata::trampoline`；
   参数解析和守卫获取失败先释放 Rust 局部值，再压错误串，释放该串后才调用 `lua_error`。
-- `FromLua` 及其 derive 在成功、失败时恢复入口栈高度；相对索引先通过 `stack::abs_index` 固定。
+- `FromLua` 及其 derive 在成功、失败时恢复入口栈高度；宏中的相对索引通过公开桥接 `userdata::abs_index` 固定，底层 stack 模块保持私有。
 - userdata 注册恢复入口栈高度，`push` 只增加一个值；类型表与模块路径对应的表复用。
 - 移除了无调用方的 `with_alpn_server`、`LuaFunction::registry_ref/main/push_to`、`UserData::type_name`，
   旧 throwing check、重复 raise、状态别名与示例注册包装。
@@ -226,7 +242,7 @@ local response, err = client:request("GET", url, {
   宿主随后 add_module(Network) 并按需注册自定义类型；CLI 不注册示例类型。
   `builtin::open` 自行注册 LightThread，宿主不再单独调用线程注册函数。
 - Lua 时间入口为 `cosmos.time.sleep/now_ms/now_us`，轻线程入口为 `cosmos.thread.spawn/wait`，类型表为 `cosmos.LightThread`。
-- `libs.rs` 仅保留 `run_lua_source`，不再承担内建模块实现或注册。
+- `libs.rs` 及其 `run_lua_source` 仅在 cfg(test) 下作为内部同步测试工具编译；正式源码加载走 Machine::load。
 
 ### 时间模块：cosmos.time
 
@@ -296,7 +312,7 @@ assert(err == nil, err)
 
 | 文件 | 职责 |
 |---|---|
-| `cosmos/src/ffi.rs` | LuaJIT C API 声明（唯一 FFI 声明处） |
+| `cosmos/src/ffi.rs` | LuaJIT C API 声明；仅宏/叶子转换所需的类型、常量和 9 个函数公开，其余限 crate 内 |
 | `cosmos/src/machine.rs` | Machine/Module、安全嵌入 API、Handle 注入、LocalSet 与 VM 生命周期 |
 | `cosmos/src/userdata.rs` | 桥接核心：`UserData`/`PushLua`/`FromLua`、userdata 存放与 GC、类型化 `LuaFunction::call`、fallible userdata 借用、`Nil`/`LuaStrMap`/`LuaValue`、derive 单元测试 |
 | `cosmos/src/light_thread/mod.rs` | 统一 LightThread、唯一执行权、直接/后台调度与执行守卫 |
@@ -306,8 +322,8 @@ assert(err == nil, err)
 | `cosmos/src/builtin/time.rs` | 声明 cosmos.time 模块，sleep、now_ms、now_us 通过宏生成桥接 |
 | `cosmos/src/builtin/light_thread.rs` | Lua spawn/wait/join/kill 参数与结果桥接、类型注册，不定义第二个线程实体 |
 | `cosmos/src/builtin/sync/` | channel、notify、semaphore、mutex 及统一超时转换；mod.rs 只注册类型，模块表由声明路径自动生成 |
-| `cosmos/src/libs.rs` | 内嵌 Lua 源码加载工具 |
-| `cosmos/src/stack.rs` | 栈辅助：`err_message`、`abs_index` |
+| `cosmos/src/libs.rs` | cfg(test) 下的内部同步 Lua 测试工具，不进入正式构建 |
+| `cosmos/src/stack.rs` | 私有栈辅助；err_message 限 crate 内，abs_index 经 userdata 导出供宏使用 |
 | `cosmos-macros/src/lib.rs` | `#[userdata]`、`FromLua`/`PushLua` derive |
 | `cosmos-network/src/bridge.rs` | 本 crate 的叶子转换、`until` trampoline、注册入口 |
 | `cosmos-network/src/tcp/mod.rs` | TCP 协议族模块声明：stream 与 tls |

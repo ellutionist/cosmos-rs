@@ -1,11 +1,11 @@
 //! Rust 自定义类型 → Lua userdata 桥接。
 //!
-//! 类型注册走 #[cosmos::userdata] 属性宏：宏为 impl 块里的每个方法生成
+//! 类型注册走 `#[cosmos::userdata]` 属性宏：宏为 impl 块里的每个方法生成
 //! extern "C" trampoline（参数转换、panic 捕获、返回值压栈）并生成
 //! UserData impl（见 cosmos-macros crate）。
 //!
 //! 运行时侧：
-//! - push::<T> 把 T 包进 RefCell 后 placement-write 进 lua_newuserdata 的槽
+//! - `push::<T>` 把 T 包进 RefCell 后 placement-write 进 lua_newuserdata 的槽
 //!   （Lua GC 托管，不额外堆分配），metatable 在首次 push 时懒构建
 //! - metatable 兼任类型表：__index = 自身（静态构造 + 实例方法共用一张表）、
 //!   __gc = drop_in_place 统一生成，经 package.preload 用 require 引入
@@ -31,7 +31,11 @@ use std::time::Duration;
 
 use crate::ffi::*;
 
-/// #[cosmos::userdata] 宏为每个类型生成该 impl
+// 外部宏与叶子桥接需要 yield 协议，不公开运行时模块或执行状态。
+pub use crate::light_thread::{yield_with, PendingFuture, PendingOp};
+pub use crate::stack::abs_index;
+
+/// `#[cosmos::userdata]` 宏为每个类型生成该 impl
 pub trait UserData: 'static {
     /// Lua 侧 require 引入用的相对路径（如 sync.channel），
     /// 宏默认生成类型短名（路径最后一段）
@@ -58,7 +62,7 @@ impl<T> Default for MethodTable<T> {
 }
 
 impl<T> MethodTable<T> {
-    pub fn new() -> Self {
+    fn new() -> Self {
         Self {
             entries: Vec::new(),
             _marker: PhantomData,
@@ -142,7 +146,7 @@ impl Drop for RegistryRef {
 ///
 /// # Safety
 /// lua_state 必须是当前线程上的有效主状态，且所属 VM 在本次初始化期间保持存活。
-pub unsafe fn init(lua_state: *mut lua_State) {
+pub(crate) unsafe fn init(lua_state: *mut lua_State) {
     lua_pushlightuserdata(lua_state, lua_state);
     lua_setfield(lua_state, LUA_REGISTRYINDEX, MAIN_STATE_KEY.as_ptr());
     REGISTERED.with(|states| {
@@ -154,7 +158,7 @@ pub unsafe fn init(lua_state: *mut lua_State) {
 ///
 /// # Safety
 /// lua_state 必须指向当前线程上的有效 Lua 状态，其 registry 可访问。
-pub unsafe fn main_state(lua_state: *mut lua_State) -> *mut lua_State {
+unsafe fn main_state(lua_state: *mut lua_State) -> *mut lua_State {
     lua_getfield(lua_state, LUA_REGISTRYINDEX, MAIN_STATE_KEY.as_ptr());
     let p = lua_touserdata(lua_state, -1);
     lua_settop(lua_state, -2);
@@ -232,7 +236,7 @@ unsafe fn ensure_metatable<T: UserData>(main: *mut lua_State, lua_state: *mut lu
 ///
 /// # Safety
 /// lua_state 必须属于已初始化、已打开标准库的存活 VM，并由当前线程独占操作。
-pub unsafe fn register<T: UserData>(lua_state: *mut lua_State) {
+pub(crate) unsafe fn register<T: UserData>(lua_state: *mut lua_State) {
     let main = main_state(lua_state);
     ensure_metatable::<T>(main, lua_state);
 }
@@ -243,7 +247,7 @@ pub unsafe fn register<T: UserData>(lua_state: *mut lua_State) {
 /// # Safety
 /// lua_state 满足 register 的契约，栈可容纳模块表及注册临时值。
 /// path 必须由非空、无 NUL 的字段组成；已有路径节点必须是模块表。
-pub unsafe fn push_module(lua_state: *mut lua_State, path: &str) {
+pub(crate) unsafe fn push_module(lua_state: *mut lua_State, path: &str) {
     let top = lua_gettop(lua_state);
     lua_pushvalue(lua_state, LUA_GLOBALSINDEX);
     let mut prefix = String::new();
@@ -289,7 +293,7 @@ pub unsafe fn push_module(lua_state: *mut lua_State, path: &str) {
 ///
 /// # Safety
 /// lua_state 必须属于已初始化的存活 VM，栈有足够空间，RefCell<T> 的对齐不得超过 8 字节。
-pub unsafe fn push<T: UserData>(lua_state: *mut lua_State, value: T) {
+pub(crate) unsafe fn push<T: UserData>(lua_state: *mut lua_State, value: T) {
     unsafe {
         let main = main_state(lua_state);
         ensure_metatable::<T>(main, lua_state);
@@ -427,7 +431,7 @@ where
 ///
 /// # Safety
 /// lua_state 所属 VM 必须仍存活；全部本地任务已回收，后续只允许关闭该 VM。
-pub unsafe fn cleanup(lua_state: *mut lua_State) {
+pub(crate) unsafe fn cleanup(lua_state: *mut lua_State) {
     unsafe {
         let main = main_state(lua_state);
         REGISTERED.with(|m| {
@@ -587,9 +591,9 @@ impl FromLua for &str {
 /// 长度阈值：超过则走 registry 锚定而非拷贝。
 /// 拷贝成本 ≈ malloc(10~50ns) + memcpy(~0.1ns/字节)，锚定成本 ≈ 10 次表操作
 /// （300~800ns 固定）；二者在约 4KB 处交叉，短串拷贝更省
-pub const STR_ANCHOR_THRESHOLD: usize = 4096;
+const STR_ANCHOR_THRESHOLD: usize = 4096;
 
-/// 异步方法的字符串参数：≤阈值拷贝为 Owned，>阈值 registry 锚定借用（Borrowed）。
+/// 异步方法的字符串参数：内部按长度选择拷贝或 registry 锚定，调用方不依赖具体存储方式。
 /// 同步方法请直接用 &str（零拷贝且无需锚定）。
 /// 实现 Deref<Target=str>，方法体里当 &str 用（as_bytes/len/format 都行）。
 ///
@@ -606,7 +610,9 @@ pub const STR_ANCHOR_THRESHOLD: usize = 4096;
 ///
 /// （附注：Lua 规定字符串不从弱表移除，别用弱值表观测字符串回收；用内存计数，
 /// 或对 table/userdata 等显式构造对象做弱表观测。）
-pub enum LuaStr {
+pub struct LuaStr(LuaStrRepr);
+
+enum LuaStrRepr {
     Owned(String),
     Borrowed(StrAnchor),
 }
@@ -614,7 +620,7 @@ pub enum LuaStr {
 /// registry 锚定守卫：持有一个 luaL_ref 引用，drop 时 luaL_unref。
 /// 被锚定的字符串是 GC 根，其数据指针在守卫存活期间一直有效，
 /// 因此 s 的 'static 生命周期是 sound 的（transmute 延展）
-pub struct StrAnchor {
+struct StrAnchor {
     s: &'static str,
     anchor: RegistryRef,
 }
@@ -622,9 +628,9 @@ pub struct StrAnchor {
 impl std::ops::Deref for LuaStr {
     type Target = str;
     fn deref(&self) -> &str {
-        match self {
-            LuaStr::Owned(s) => s,
-            LuaStr::Borrowed(a) => {
+        match &self.0 {
+            LuaStrRepr::Owned(s) => s,
+            LuaStrRepr::Borrowed(a) => {
                 assert!(a.anchor.is_alive(), "Lua VM 已关闭");
                 a.s
             }
@@ -641,16 +647,18 @@ impl FromLua for LuaStr {
         let p = lua_tolstring(lua_state, idx, &mut len);
         let bytes = std::slice::from_raw_parts(p as *const u8, len);
         if len <= STR_ANCHOR_THRESHOLD {
-            Ok(LuaStr::Owned(String::from_utf8_lossy(bytes).into_owned()))
+            Ok(LuaStr(LuaStrRepr::Owned(
+                String::from_utf8_lossy(bytes).into_owned(),
+            )))
         } else {
             // 先校验 UTF-8（此时字符串还在栈上、锚定前不会被 GC），再锚定
             let s = std::str::from_utf8(bytes)
                 .map_err(|_| format!("argument {idx}: invalid UTF-8 string"))?;
             lua_pushvalue(lua_state, idx);
-            Ok(LuaStr::Borrowed(StrAnchor {
+            Ok(LuaStr(LuaStrRepr::Borrowed(StrAnchor {
                 s: std::mem::transmute::<&str, &'static str>(s),
                 anchor: RegistryRef::new(lua_state),
-            }))
+            })))
         }
     }
 }

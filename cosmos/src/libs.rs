@@ -1,4 +1,4 @@
-//! 内嵌 Lua 源码的运行时加载工具。
+//! 桥接单元测试使用的同步 Lua 源码执行工具；正式加载入口为 Machine::load。
 
 use crate::ffi::*;
 
@@ -8,7 +8,7 @@ use crate::ffi::*;
 ///
 /// # Safety
 /// lua_state 必须属于存活的 VM，相关类型已注册；源码在主状态同步执行，不得 yield。
-pub unsafe fn run_lua_source(
+pub(crate) unsafe fn run_lua_source(
     lua_state: *mut lua_State,
     name: &str,
     src: &str,

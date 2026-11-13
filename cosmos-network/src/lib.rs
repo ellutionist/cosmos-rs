@@ -3,6 +3,8 @@
 //! 分层：功能模块（tcp / tls / http / websocket）只描述协议与状态机；
 //! 所有直接接触 lua_State 的代码集中在 bridge 模块。
 
+#![warn(unreachable_pub)]
+
 mod bridge;
 mod error;
 mod http;

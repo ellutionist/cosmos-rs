@@ -54,7 +54,7 @@ fn default_client_config() -> Arc<ClientConfig> {
 
 /// TLS 流：客户端和服务端的 tokio-rustls 流是两个类型，统一成一个枚举，
 /// 让 split 后的读写半（ReadSide/WriteSide::Tls）只有一种类型
-pub enum TlsIo {
+pub(crate) enum TlsIo {
     Client(ClientTlsStream<TcpStream>),
     Server(ServerTlsStream<TcpStream>),
 }
@@ -121,7 +121,7 @@ impl AsyncWrite for TlsIo {
 /// 连接入口：静态方法
 ///   Tls.connect(host, port, timeout_ms?, ctx?)  → TlsConn
 ///   Tls.listen(port, ctx?, timeout_ms?)         → TlsListener
-pub struct Tls;
+pub(crate) struct Tls;
 
 #[cosmos::userdata(name = "network.tcp.tls")]
 impl Tls {
@@ -204,7 +204,7 @@ pub(crate) async fn connect_tls_io(
 
 /// 配置对象（对应 C++ ssl_ctx）：所有 setter 都会让已构建的配置失效，
 /// 下次 connect/listen 时重建并缓存。
-pub struct TlsContext {
+pub(crate) struct TlsContext {
     roots: RootCertStore,
     verify: bool,
     certs: Option<Vec<CertificateDer<'static>>>,
@@ -477,7 +477,7 @@ impl ServerCertVerifier for NoVerify {
     }
 }
 
-pub struct TlsConn {
+pub(crate) struct TlsConn {
     stream: Option<TlsIo>,
     state: Rc<Cell<State>>,
     timeout: Option<Duration>,
@@ -538,7 +538,7 @@ impl TlsConn {
 }
 
 /// TLS 监听器：accept() 返回与客户端同构的 TlsConn（内部为服务端 TLS 流）
-pub struct TlsListener {
+pub(crate) struct TlsListener {
     listener: Option<tokio::net::TcpListener>,
     acceptor: TlsAcceptor,
     timeout: Option<Duration>,
