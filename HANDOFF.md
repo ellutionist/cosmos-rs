@@ -15,7 +15,7 @@
 
 ```
 cosmos-rs/
-  cosmos/            # 运行时 + 桥接层：ffi / userdata / coroutine / stack / libs / light_thread
+  cosmos/            # 运行时 + 桥接层：ffi / userdata / coroutine / stack / libs / builtin
   cosmos-macros/     # #[userdata]、#[derive(FromLua/PushLua)]，生成全部 trampoline
   cosmos-network/    # 功能模块：tcp / tls / http / websocket + bridge.rs（叶子转换）
   src/main.rs        # 宿主：建 VM、跑脚本、关 VM；demo.rs 是 userdata 示例
@@ -39,8 +39,11 @@ cosmos-rs/
 
 ## 3. 工作区现状
 
-- 本次命名整理提交：`Thread` → `LightThread`，`thread.rs` → `light_thread.rs`；Rust 模块为 `cosmos::light_thread`，Lua 类型表为 `cosmos.LightThread`。
+- time/thread 内建功能已集中到 `cosmos/src/builtin`，由 `builtin::open` 统一初始化；Lua 调用入口保持原样。
+
+- 本次命名整理提交：`Thread` → `LightThread`，`thread.rs` → `light_thread.rs`；当前 Rust 模块为 `cosmos::builtin::light_thread`，Lua 类型表为 `cosmos.LightThread`。
 - Lua 状态指针（含宏生成代码和外部扩展）已从 `L` 改为 `lua_state`，未使用参数为 `_lua_state`。
+- 其余 Clippy 诊断已修复，公开裸指针桥接 API 已明确 unsafe 契约；严格 Clippy、构建、15 项测试和 examples 通过。
 
 - 已提交基线：WebSocket、桥接分层重构、VM 生命周期修复与项目约定。
 - 本次提交范围：统一 `PushLua`、类型化 Lua 回调、枚举 `FromLua`、userdata fallible 借用、统一错误边界、冗余清理与回归记录。
@@ -128,6 +131,23 @@ lua_close(lua_state);
 - 移除了无调用方的 `with_alpn_server`、`LuaFunction::registry_ref/main/push_to`、`UserData::type_name`，
   旧 throwing check、重复 raise、状态别名与示例注册包装；Counter 注册直接放在宿主入口。
 
+### Clippy 与底层安全契约
+
+- `PushLua::push_lua`、`PendingOp::poll_push`、`yield_with`、userdata 的注册/压栈/trampoline/cleanup
+  均为 unsafe 接口；调用方必须保证状态有效、线程亲和、栈空间与 VM 生命周期。具体约束见各接口的 `# Safety`。
+- derive 会生成匹配的 unsafe 实现；功能模块继续只描述值，裸指针操作留在运行时/桥接层。
+- 验证命令：`cargo clippy --workspace --all-targets -- -D warnings`。
+- 两项局部例外带有明确理由：Conn 内联 TLS 流避免额外 Box；回归测试故意保持 RefCell 借用跨 await。
+
+### 内建模块初始化
+
+- Rust 布局：`builtin/mod.rs` 负责启动，`builtin/time.rs` 负责时间函数，
+  `builtin/light_thread.rs` 负责轻线程；底层 `LuaCoroutine` 留在 `coroutine.rs`。
+- 宿主顺序：`luaL_openlibs` → `userdata::init` → `builtin::open` → 注册外部扩展和网络类型。
+  `builtin::open` 自行注册 LightThread，宿主不再单独调用线程注册函数。
+- Lua 入口仍为 `cosmos.sleep/now_ms/now_us`、`cosmos.thread.spawn/wait`，类型表为 `cosmos.LightThread`。
+- `libs.rs` 仅保留 `run_lua_source`，不再承担内建模块实现或注册。
+
 ### 尚未排期
 
 - UDP / unix socket：优先级待用户确认，勿主动开工。
@@ -141,7 +161,10 @@ lua_close(lua_state);
 | `cosmos/src/ffi.rs` | LuaJIT C API 声明（唯一 FFI 声明处） |
 | `cosmos/src/userdata.rs` | 桥接核心：`UserData`/`PushLua`/`FromLua`、userdata 存放与 GC、类型化 `LuaFunction::call`、fallible userdata 借用、`Nil`/`LuaStrMap`、derive 单元测试 |
 | `cosmos/src/coroutine.rs` | `LuaCoroutine`（Future）、`PendingOp`/`PendingFuture`、TLS yield 通道、`yield_with` |
-| `cosmos/src/light_thread.rs` | `LightThread` 句柄、spawn/wait/join/kill 与类型注册 |
+| `cosmos/src/builtin/mod.rs` | time/thread 内建功能统一初始化与 LightThread 类型注册 |
+| `cosmos/src/builtin/time.rs` | sleep、now_ms、now_us 时间功能 |
+| `cosmos/src/builtin/light_thread.rs` | `LightThread` 句柄、spawn/wait/join/kill |
+| `cosmos/src/libs.rs` | 内嵌 Lua 源码加载工具 |
 | `cosmos/src/stack.rs` | 栈辅助：`err_message`、`abs_index` |
 | `cosmos-macros/src/lib.rs` | `#[userdata]`、`FromLua`/`PushLua` derive |
 | `cosmos-network/src/bridge.rs` | 本 crate 的叶子转换、`until` trampoline、注册入口 |

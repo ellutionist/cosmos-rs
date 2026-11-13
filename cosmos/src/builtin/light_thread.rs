@@ -8,7 +8,7 @@
 //!                                             失败返回 nil, err, 下标
 //!
 //! 每个轻线程是一个 lua_State 协程 + 一个 tokio 本地任务：
-//! 协程挂起时把待处理的 future 交给 LuaCoroutine 驱动（见 coroutine.rs），
+//! 协程挂起时把待处理的 future 交给 LuaCoroutine 驱动（见 crate::coroutine），
 //! 多个任务在同一个 current_thread runtime 的 LocalSet 上并发推进。
 //! 未 join 的线程出错会打印到 stderr（避免静默丢失）。
 
@@ -151,8 +151,11 @@ unsafe extern "C" fn wait_impl(lua_state: *mut lua_State) -> c_int {
     })
 }
 
-/// 构造 cosmos.thread 表（open_cosmos 里挂到 cosmos 表下）
-pub unsafe fn open(lua_state: *mut lua_State) {
+/// 构造 cosmos.thread 表，由 builtin::open 挂到 cosmos 表下。
+///
+/// # Safety
+/// lua_state 必须是当前线程上的有效状态，其栈可接受新建的模块表。
+pub(super) unsafe fn open(lua_state: *mut lua_State) {
     lua_createtable(lua_state, 0, 2);
     lua_pushcclosure(lua_state, spawn_impl, 0);
     lua_setfield(lua_state, -2, c"spawn".as_ptr());
@@ -161,6 +164,9 @@ pub unsafe fn open(lua_state: *mut lua_State) {
 }
 
 /// 启动时注册 LightThread userdata（require("cosmos.LightThread")）
-pub unsafe fn register_types(lua_state: *mut lua_State) {
+///
+/// # Safety
+/// lua_state 必须属于已初始化、已打开标准库的存活 VM，并由当前线程独占操作。
+pub(super) unsafe fn register_types(lua_state: *mut lua_State) {
     register::<LightThread>(lua_state);
 }

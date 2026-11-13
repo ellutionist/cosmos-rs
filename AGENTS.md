@@ -24,7 +24,7 @@
 
 允许出现裸 FFI 的位置仅限：
 
-- cosmos 的运行时/桥接层（`ffi` / `userdata` / `coroutine` / `stack` / `libs` / `light_thread`
+- cosmos 的运行时/桥接层（`ffi` / `userdata` / `coroutine` / `stack` / `libs` / `builtin`
   以及 `#[cosmos::userdata]` 生成的 trampoline）；
 - `cosmos-network/src/bridge.rs`：只放无法下沉到 cosmos 的叶子转换
   （如 `Bytes` ↔ Lua 字符串）、C 闭包 trampoline 与类型注册；

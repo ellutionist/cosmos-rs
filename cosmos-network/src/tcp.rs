@@ -392,7 +392,6 @@ impl TcpReader {
                 }
             }
             ReceivePattern::Size(n) => {
-                let n = n.max(0) as usize;
                 self.buf.resize(n, 0); // 用时扩展
                 let mut filled = 0usize;
                 while filled < n {
@@ -546,10 +545,10 @@ enum FillError {
 
 /// 取 BufReader 内部缓冲的下一段（空切片 = EOF）；deadline 到点返回 Timeout。
 /// 只借用不消费：调用方按需 extend 到自己的 buf 后再 consume。
-async fn fill<'a>(
+async fn fill(
     deadline: Option<Instant>,
-    inner: &'a mut BufReader<ReadSide>,
-) -> Result<&'a [u8], FillError> {
+    inner: &mut BufReader<ReadSide>,
+) -> Result<&[u8], FillError> {
     match with_deadline(deadline, inner.fill_buf()).await {
         Ok(Ok(b)) => Ok(b),
         Ok(Err(e)) => Err(FillError::Io(e)),

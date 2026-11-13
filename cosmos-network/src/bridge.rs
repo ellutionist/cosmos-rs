@@ -38,14 +38,14 @@ impl FromLua for Headers {
 }
 
 impl PushLua for Headers {
-    fn push_lua(self, lua_state: *mut lua_State) -> i32 {
+    unsafe fn push_lua(self, lua_state: *mut lua_State) -> i32 {
         LuaStrMap(self.0).push_lua(lua_state)
     }
 }
 
 /// Bytes ↔ Lua 字符串（持有 Bytes 零拷贝，push 时拷进 Lua）
 impl PushLua for LuaBytes {
-    fn push_lua(self, lua_state: *mut lua_State) -> i32 {
+    unsafe fn push_lua(self, lua_state: *mut lua_State) -> i32 {
         unsafe { lua_pushlstring(lua_state, self.0.as_ptr() as *const c_char, self.0.len()) };
         1
     }
@@ -92,7 +92,7 @@ impl FromLua for ReceivePattern {
 /// receiveuntil 返回的迭代器：压栈时构造 TcpUntil userdata 并包成 Lua 闭包
 /// （upvalue = userdata）。Lua 用法：local iter = reader:receiveuntil("--"); iter()
 impl PushLua for UntilIter {
-    fn push_lua(self, lua_state: *mut lua_State) -> i32 {
+    unsafe fn push_lua(self, lua_state: *mut lua_State) -> i32 {
         unsafe { push_closure::<TcpUntil>(lua_state, until_call, self.0) };
         1
     }
@@ -135,6 +135,10 @@ impl FromLua for ServerCfg {
 // 类型注册
 // ---------------------------------------------------------------------------
 
+/// 注册全部网络 userdata 类型。
+///
+/// # Safety
+/// lua_state 必须属于已初始化、已打开标准库的存活 VM，并由当前线程独占操作。
 pub unsafe fn register(lua_state: *mut lua_State) {
     cosmos::userdata::register::<Tcp>(lua_state);
     cosmos::userdata::register::<TcpConn>(lua_state);

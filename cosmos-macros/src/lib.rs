@@ -185,32 +185,28 @@ fn gen_method(
 
     let mut arg_idents = Vec::new();
     let mut arg_conversions = Vec::new();
-    let mut stack_idx: i32 = if is_static { 1 } else { 2 };
-    let mut arg_n: usize = 0;
+    let stack_base: i32 = if is_static { 1 } else { 2 };
     let mut inputs = sig.inputs.iter();
     if !is_static {
         inputs.next(); // 跳过 receiver
     }
-    for arg in inputs {
+    for (arg_n, arg) in inputs.enumerate() {
         let FnArg::Typed(PatType { ty: arg_ty, .. }) = arg else {
             return err(arg, "self must be the first argument");
         };
-        if is_async {
-            if matches!(arg_ty.as_ref(), Type::Reference(_)) {
-                return err(
-                    arg_ty,
-                    "async methods cannot borrow Lua arguments across yield; \
+        if is_async && matches!(arg_ty.as_ref(), Type::Reference(_)) {
+            return err(
+                arg_ty,
+                "async methods cannot borrow Lua arguments across yield; \
                      use owned types (e.g. String instead of &str)",
-                );
-            }
+            );
         }
+        let stack_idx = stack_base + arg_n as i32;
         let ident = format_ident!("arg{arg_n}");
-        arg_n += 1;
         arg_idents.push(ident.clone());
         arg_conversions.push(quote! {
             let #ident = <#arg_ty as cosmos::userdata::FromLua>::from_lua(lua_state, #stack_idx)?;
         });
-        stack_idx += 1;
     }
 
     // 静态方法按关联函数调用 Type::method(...)，实例方法走 this.method(...)
@@ -668,7 +664,7 @@ fn expand_push_lua(input: &DeriveInput) -> syn::Result<proc_macro2::TokenStream>
 
     Ok(quote! {
         impl cosmos::userdata::PushLua for #name {
-            fn push_lua(self, lua_state: *mut cosmos::ffi::lua_State) -> cosmos::ffi::c_int {
+            unsafe fn push_lua(self, lua_state: *mut cosmos::ffi::lua_State) -> cosmos::ffi::c_int {
                 unsafe {
                     cosmos::ffi::lua_createtable(lua_state, 0, #n as cosmos::ffi::c_int);
                     #(#sets)*
@@ -730,7 +726,7 @@ fn expand_push_lua_enum(input: &DeriveInput) -> syn::Result<proc_macro2::TokenSt
 
     Ok(quote! {
         impl #impl_generics cosmos::userdata::PushLua for #name #ty_generics #where_clause {
-            fn push_lua(self, lua_state: *mut cosmos::ffi::lua_State) -> cosmos::ffi::c_int {
+            unsafe fn push_lua(self, lua_state: *mut cosmos::ffi::lua_State) -> cosmos::ffi::c_int {
                 match self {
                     #(#arms),*
                 }

@@ -199,3 +199,64 @@
 - 按用户要求，先将 LightThread 类型/文件重命名、lua_state 变量命名及相关文档提交到本地 Git。
 - 提交前差异检查通过；构建、15 项单元测试和 examples 回归沿用上一轮已完成的结果。
 - 外部扩展示例的同步改动不属于本仓库；本次未 push。下一步检查并修复剩余 Clippy 诊断。
+
+
+## 2026-11-13 修复剩余 Clippy 诊断
+
+### 核心逻辑
+
+- 已先按用户要求提交命名整理：`738dfeb`（LightThread 与 lua_state），未 push。
+- 将操作公开 Lua 裸指针的 `PushLua::push_lua`、`PendingOp::poll_push`、`yield_with`、
+  userdata 注册/压栈/trampoline/cleanup 标为 unsafe；derive 同步生成 unsafe 方法。
+  调用方在原有运行时/桥接层履行安全契约，功能模块仍只构造普通值。
+- 为公开 unsafe 接口补齐标准 `# Safety` 章节，明确 VM 存活、线程亲和、栈空间、索引/锚点及
+  关闭顺序要求；外部扩展示例的注册入口同步补充说明。
+- MethodTable 增加 Default；宏参数处理改用 enumerate；合并嵌套判断，移除重复导入、
+  不必要的生命周期及同类型转换。receive(n) 的 n 已是 usize，移除无效的 max(0) 和转换。
+
+### 有意保留的设计
+
+- HTTP Conn 内联保存 TLS 流，避免每条连接新增 Box；仅在该枚举上说明并允许 large_enum_variant。
+- 一项回归专门验证 userdata 借用跨 await 保活及完成后释放，因此仅在该测试上说明并允许
+  await_holding_refcell_ref。生产 API 的错误与安全契约均实际修复，没有全局关闭 lint。
+- 桥接 API 的 Rust 调用签名发生变化：手写 PushLua 实现需声明 unsafe fn，调用这些底层接口需
+  在满足契约的 unsafe 边界内；Lua API、返回值、单线程模型与分配策略保持原样。
+
+### 验证与下一步
+
+- `cargo clippy --workspace --all-targets -- -D warnings` 通过，没有使用临时 -A 参数。
+- `cargo build`、`cargo test --workspace`（15 项）通过。
+- 实际运行 websocket、http、userdata、spawn、ext、sleep、TCP/TLS 单进程与双进程回归全部通过；
+  error.lua 按预期退出 1。
+- 已更新 HANDOFF.md。本轮 Clippy 修复尚未 commit / push，等待用户安排。
+
+
+## 2026-11-13 将 time/thread 收拢为 builtin 模块
+
+### 核心逻辑
+
+- 新建 `cosmos/src/builtin/mod.rs` 与 `time.rs`，将 `light_thread.rs` 移入 builtin 目录。
+  原有 LuaCoroutine 驱动和 LightThread 句柄实现保持分离，未引入新包装或依赖。
+- 时间功能从 libs.rs 拆出，保留 sleep/now_ms/now_us 的实现和行为；libs.rs 仅保留 Lua 源码加载工具。
+- `builtin::open` 统一创建 cosmos 表、安装时间函数与 thread 表、注册 LightThread 类型。
+  宿主先执行 userdata::init，再调用 builtin::open，无需另行注册线程类型。
+- LightThread 的 Rust 路径变为 `cosmos::builtin::light_thread::LightThread`；模块内部的 open/register_types
+  收紧为 pub(super)，统一初始化入口对外公开。现有 Lua API 和 cosmos.LightThread 类型表保持原样。
+- 更新宿主、类型化回调测试、AGENTS.md 的运行时模块列表以及 HANDOFF.md 代码地图。
+- 保留上一轮未提交的 Clippy 修复，本轮未 commit / push。
+
+### 验证与下一步
+
+- `cargo clippy --workspace --all-targets -- -D warnings`、`cargo build`、
+  `cargo test --workspace`（15 项）通过。
+- 实际验证时间函数、thread 入口以及 require("cosmos.LightThread") 对应 spawn 返回类型，join 正常。
+- websocket/http/userdata/spawn/ext/sleep、TCP/TLS 单进程及双进程用例全部通过；
+  error.lua 按预期退出 1。
+- 当前没有旧 open_cosmos 或根模块 light_thread 的 Rust 引用；下一步等待用户安排。
+
+## 2026-11-13 提交 builtin 整理与 Clippy 修复
+
+- 按用户要求，将 builtin 目录整理、Clippy 修复及配套文档一起提交到本地 Git；不 push。
+- 提交前差异检查通过，沿用上一轮严格 Clippy、构建、15 项测试及 examples 的完整验证结果。
+- 外部目录 `../cosmos-ext-demo` 的配套修改不在本次仓库提交范围内。
+- 后续 builtin 优先考虑与协程调度直接相关的同步原语；本轮只评估方向，不新增模块。

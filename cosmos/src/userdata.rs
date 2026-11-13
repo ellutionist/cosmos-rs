@@ -49,6 +49,12 @@ pub struct MethodTable<T> {
     _marker: PhantomData<fn(T)>,
 }
 
+impl<T> Default for MethodTable<T> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl<T> MethodTable<T> {
     pub fn new() -> Self {
         Self {
@@ -82,12 +88,19 @@ pub(crate) fn vm_alive() -> bool {
 }
 
 /// 状态初始化：把主状态指针锚定进 registry，必须早于任何 push 调用
+///
+/// # Safety
+/// lua_state 必须是当前线程上的有效主状态，且所属 VM 在本次初始化期间保持存活。
 pub unsafe fn init(lua_state: *mut lua_State) {
-    lua_pushlightuserdata(lua_state, lua_state as *mut c_void);
+    lua_pushlightuserdata(lua_state, lua_state);
     lua_setfield(lua_state, LUA_REGISTRYINDEX, MAIN_STATE_KEY.as_ptr());
     VM_ALIVE.store(true, Ordering::Relaxed);
 }
 
+/// 返回所属 VM 的主状态；未初始化时使用传入状态。
+///
+/// # Safety
+/// lua_state 必须指向当前线程上的有效 Lua 状态，其 registry 可访问。
 pub unsafe fn main_state(lua_state: *mut lua_State) -> *mut lua_State {
     lua_getfield(lua_state, LUA_REGISTRYINDEX, MAIN_STATE_KEY.as_ptr());
     let p = lua_touserdata(lua_state, -1);
@@ -114,7 +127,7 @@ fn type_cstring<T: 'static>() -> &'static CString {
     })
 }
 
-fn ensure_metatable<T: UserData>(main: *mut lua_State, lua_state: *mut lua_State) {
+unsafe fn ensure_metatable<T: UserData>(main: *mut lua_State, lua_state: *mut lua_State) {
     let registered = REGISTERED.with(|m| {
         m.borrow()
             .get(&main)
@@ -173,7 +186,10 @@ fn ensure_metatable<T: UserData>(main: *mut lua_State, lua_state: *mut lua_State
 /// 提前注册类型（构建 metatable + 挂 require 入口），
 /// 让脚本可以在任何实例产生之前 require("cosmos.Counter")。
 /// 不调用也能工作：首次 push 时会懒注册，只是 require 会晚于第一个实例
-pub fn register<T: UserData>(lua_state: *mut lua_State) {
+///
+/// # Safety
+/// lua_state 必须属于已初始化、已打开标准库的存活 VM，并由当前线程独占操作。
+pub unsafe fn register<T: UserData>(lua_state: *mut lua_State) {
     unsafe {
         let main = main_state(lua_state);
         ensure_metatable::<T>(main, lua_state);
@@ -186,7 +202,10 @@ pub fn register<T: UserData>(lua_state: *mut lua_State) {
 /// 值包在 RefCell 里存进 userdata：方法拿 &mut/& 时走 try_borrow 运行期检查，
 /// 借用冲突（重入/跨协程交错）变成 lua_error 而不是 aliasing UB——
 /// Rust 的编译期独占性在 Lua 边界降级为运行期检查
-pub fn push<T: UserData>(lua_state: *mut lua_State, value: T) {
+///
+/// # Safety
+/// lua_state 必须属于已初始化的存活 VM，栈有足够空间，RefCell<T> 的对齐不得超过 8 字节。
+pub unsafe fn push<T: UserData>(lua_state: *mut lua_State, value: T) {
     unsafe {
         let main = main_state(lua_state);
         ensure_metatable::<T>(main, lua_state);
@@ -202,6 +221,9 @@ pub fn push<T: UserData>(lua_state: *mut lua_State, value: T) {
 
 /// 把 C 函数包成带一个 userdata upvalue 的闭包（压栈 1 个值）。
 /// 用于"读端返回迭代器闭包"这类需要把 Rust 状态挂成 upvalue 的场景。
+///
+/// # Safety
+/// lua_state 满足 push 的契约；func 必须遵守 Lua C 函数约定，并正确处理捕获的 upvalue。
 pub unsafe fn push_closure<T: UserData>(
     lua_state: *mut lua_State,
     func: lua_CFunction,
@@ -236,6 +258,10 @@ unsafe fn userdata_ptr<T: UserData>(
 
 /// 守卫的地址由 Lua userdata 保持稳定；生命周期由调用栈或协程的 registry 锚点保证。
 /// 借用跨 await 时留在同一线程，类型或借用冲突均返回 Err，由最外层 trampoline 处理。
+///
+/// # Safety
+/// lua_state 和 idx 必须有效；返回守卫使用期间，对应 userdata 必须由调用栈或 registry 锚点保活，
+/// 且 VM 不得关闭。守卫不得跨线程移动。
 pub unsafe fn try_check<T: UserData>(
     lua_state: *mut lua_State,
     idx: c_int,
@@ -251,6 +277,10 @@ pub unsafe fn try_check<T: UserData>(
 
 /// 共享借用与独占借用共用类型校验及错误协议。
 /// 守卫借用 Lua 托管的内存，只能用于受调用栈/协程锚点保护的调用期间，不能作为回调的拥有型结果。
+///
+/// # Safety
+/// lua_state 和 idx 必须有效；返回守卫使用期间，对应 userdata 必须保持锚定且 VM 仍存活，
+/// 守卫不得跨线程移动。
 pub unsafe fn try_check_shared<T: UserData>(
     lua_state: *mut lua_State,
     idx: c_int,
@@ -281,7 +311,11 @@ unsafe extern "C" fn preload_factory(lua_state: *mut lua_State) -> c_int {
 /// 方法 trampoline 外壳：捕获 panic、把 Err 转成 lua_error。
 /// 只允许在 lua_resume 的保护帧内调用（即从 Lua 方法路径进入），
 /// 否则 lua_error 没有 setjmp 目标会 PANIC
-pub fn trampoline<F>(lua_state: *mut lua_State, f: F) -> c_int
+///
+/// # Safety
+/// lua_state 必须是当前 Lua C 回调的有效状态，且回调位于 lua_resume 或 lua_pcall 的保护帧内。
+/// f 不得自行调用 lua_error；错误必须通过 Result 返回，以先释放 Rust 局部资源。
+pub unsafe fn trampoline<F>(lua_state: *mut lua_State, f: F) -> c_int
 where
     F: FnOnce(*mut lua_State) -> Result<i32, String>,
 {
@@ -306,7 +340,10 @@ where
 }
 
 /// lua_close 前调用，清掉该状态的注册缓存（否则线程本地 map 会残留死键）
-pub fn cleanup(lua_state: *mut lua_State) {
+///
+/// # Safety
+/// lua_state 所属 VM 必须仍存活；全部本地任务已回收，后续只允许关闭该 VM。
+pub unsafe fn cleanup(lua_state: *mut lua_State) {
     unsafe {
         let main = main_state(lua_state);
         REGISTERED.with(|m| {
@@ -403,7 +440,7 @@ impl FromLua for LuaStrMap {
 }
 
 impl PushLua for LuaStrMap {
-    fn push_lua(self, lua_state: *mut lua_State) -> i32 {
+    unsafe fn push_lua(self, lua_state: *mut lua_State) -> i32 {
         unsafe {
             lua_createtable(lua_state, 0, self.0.len() as c_int);
             for (k, v) in self.0 {
@@ -431,7 +468,7 @@ impl FromLua for String {
 /// 只能用于同步方法（方法体在 lua_resume 内执行完，字符串被栈锚定不会被 GC）；
 /// 异步方法不得使用——future 跨 yield 后栈帧已丢弃，借用会悬垂（宏会拒绝）。
 /// 异步方法要用字符串请用 LuaStr（按长度拷贝或锚定）
-impl<'a> FromLua for &'a str {
+impl FromLua for &str {
     unsafe fn from_lua(lua_state: *mut lua_State, idx: c_int) -> Result<Self, String> {
         if lua_type(lua_state, idx) != LUA_TSTRING {
             return Err(format!("argument {idx}: expected string"));
@@ -590,47 +627,52 @@ impl Drop for LuaFunction {
 /// 安全约定：压栈在 lua_resume 之间也合法；实现里不得调用 lua_error
 /// （那需要 lua_resume 的保护帧，错误应返回 Err 由 trampoline 转换）
 pub trait PushLua {
-    fn push_lua(self, lua_state: *mut lua_State) -> i32;
+    /// 将值压入所属 VM 的栈，并返回压入的值数。
+    ///
+    /// # Safety
+    /// lua_state 必须指向当前线程上仍存活的 VM，且栈有足够空间。
+    /// 值持有的 Lua 引用必须属于该 VM；调用期间 VM 及其资源必须保持有效。
+    unsafe fn push_lua(self, lua_state: *mut lua_State) -> i32;
 }
 
 impl PushLua for () {
-    fn push_lua(self, _lua_state: *mut lua_State) -> i32 {
+    unsafe fn push_lua(self, _lua_state: *mut lua_State) -> i32 {
         0
     }
 }
 impl PushLua for i64 {
-    fn push_lua(self, lua_state: *mut lua_State) -> i32 {
+    unsafe fn push_lua(self, lua_state: *mut lua_State) -> i32 {
         unsafe { lua_pushinteger(lua_state, self as lua_Integer) };
         1
     }
 }
 impl PushLua for u16 {
-    fn push_lua(self, lua_state: *mut lua_State) -> i32 {
+    unsafe fn push_lua(self, lua_state: *mut lua_State) -> i32 {
         unsafe { lua_pushinteger(lua_state, self as lua_Integer) };
         1
     }
 }
 impl PushLua for f64 {
-    fn push_lua(self, lua_state: *mut lua_State) -> i32 {
+    unsafe fn push_lua(self, lua_state: *mut lua_State) -> i32 {
         unsafe { lua_pushnumber(lua_state, self) };
         1
     }
 }
 impl PushLua for bool {
-    fn push_lua(self, lua_state: *mut lua_State) -> i32 {
+    unsafe fn push_lua(self, lua_state: *mut lua_State) -> i32 {
         unsafe { lua_pushboolean(lua_state, self as c_int) };
         1
     }
 }
 impl PushLua for String {
-    fn push_lua(self, lua_state: *mut lua_State) -> i32 {
+    unsafe fn push_lua(self, lua_state: *mut lua_State) -> i32 {
         unsafe { lua_pushlstring(lua_state, self.as_ptr() as *const c_char, self.len()) };
         1
     }
 }
 /// 原始字节 → Lua 字符串（二进制安全，不做 UTF-8 校验）
 impl PushLua for Vec<u8> {
-    fn push_lua(self, lua_state: *mut lua_State) -> i32 {
+    unsafe fn push_lua(self, lua_state: *mut lua_State) -> i32 {
         unsafe { lua_pushlstring(lua_state, self.as_ptr() as *const c_char, self.len()) };
         1
     }
@@ -656,13 +698,13 @@ impl FromLua for () {
 }
 
 impl PushLua for Nil {
-    fn push_lua(self, lua_state: *mut lua_State) -> i32 {
+    unsafe fn push_lua(self, lua_state: *mut lua_State) -> i32 {
         unsafe { lua_pushnil(lua_state) };
         1
     }
 }
 impl<T: PushLua> PushLua for Option<T> {
-    fn push_lua(self, lua_state: *mut lua_State) -> i32 {
+    unsafe fn push_lua(self, lua_state: *mut lua_State) -> i32 {
         match self {
             Some(v) => v.push_lua(lua_state),
             // None 压一个 nil：作为表字段时与 setfield 配对，
@@ -676,7 +718,7 @@ impl<T: PushLua> PushLua for Option<T> {
 }
 /// userdata 返回：直接构造压栈，无需为返回值单独装箱
 impl<T: UserData> PushLua for T {
-    fn push_lua(self, lua_state: *mut lua_State) -> i32 {
+    unsafe fn push_lua(self, lua_state: *mut lua_State) -> i32 {
         push::<T>(lua_state, self);
         1
     }
@@ -684,7 +726,7 @@ impl<T: UserData> PushLua for T {
 
 /// 多返回值：2 元组依次压栈（split 这类"一次返回多个 userdata"的同步方法用）
 impl<A: PushLua, B: PushLua> PushLua for (A, B) {
-    fn push_lua(self, lua_state: *mut lua_State) -> i32 {
+    unsafe fn push_lua(self, lua_state: *mut lua_State) -> i32 {
         let (a, b) = self;
         a.push_lua(lua_state) + b.push_lua(lua_state)
     }
@@ -692,7 +734,7 @@ impl<A: PushLua, B: PushLua> PushLua for (A, B) {
 
 /// 字符串切片：避免为 &'static str 常量额外分配 String
 impl PushLua for &str {
-    fn push_lua(self, lua_state: *mut lua_State) -> i32 {
+    unsafe fn push_lua(self, lua_state: *mut lua_State) -> i32 {
         unsafe { lua_pushlstring(lua_state, self.as_ptr() as *const c_char, self.len()) };
         1
     }
@@ -702,7 +744,7 @@ impl PushLua for &str {
 /// Ok(v) 压 v，Err(e) 压 nil + e.to_string()（两个返回值）。
 /// 同步与异步方法共用这一份语义
 impl<T: PushLua, E: Display> PushLua for Result<T, E> {
-    fn push_lua(self, lua_state: *mut lua_State) -> i32 {
+    unsafe fn push_lua(self, lua_state: *mut lua_State) -> i32 {
         match self {
             Ok(v) => v.push_lua(lua_state),
             Err(e) => {
@@ -720,7 +762,6 @@ impl<T: PushLua, E: Display> PushLua for Result<T, E> {
 #[cfg(test)]
 mod derive_tests {
     use super::*;
-    use crate::ffi::*;
 
     fn with_state(f: impl FnOnce(*mut lua_State)) {
         unsafe {
@@ -1003,7 +1044,7 @@ mod derive_tests {
     #[test]
     fn typed_callback_keeps_arguments_and_results_alive_across_yield() {
         with_state(|lua_state| unsafe {
-            crate::libs::open_cosmos(lua_state);
+            crate::builtin::open(lua_state);
             assert_eq!(
                 luaL_loadstring(
                     lua_state,

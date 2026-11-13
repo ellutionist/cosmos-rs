@@ -16,7 +16,10 @@ use crate::userdata::PushLua;
 pub trait PendingOp {
     /// Pending 时不压栈；Ready 返回压入的值数，交给下一次 lua_resume。
     /// 与 PushLua 相同，转换过程中不得调用 lua_error。
-    fn poll_push(
+    ///
+    /// # Safety
+    /// lua_state 必须是当前线程上仍存活的协程，其栈空间及 VM 归属满足输出值的 PushLua 契约。
+    unsafe fn poll_push(
         self: Pin<&mut Self>,
         cx: &mut Context<'_>,
         lua_state: *mut lua_State,
@@ -27,12 +30,13 @@ impl<F: Future> PendingOp for F
 where
     F::Output: PushLua,
 {
-    fn poll_push(
+    unsafe fn poll_push(
         self: Pin<&mut Self>,
         cx: &mut Context<'_>,
         lua_state: *mut lua_State,
     ) -> Poll<i32> {
-        self.poll(cx).map(|value| value.push_lua(lua_state))
+        self.poll(cx)
+            .map(|value| unsafe { value.push_lua(lua_state) })
     }
 }
 
@@ -55,7 +59,11 @@ thread_local! {
 /// C 函数侧协议：op 进槽 + yield 0 个值（结果等 resume 时再由 poll 侧压栈）。
 /// lua_yield 的返回值必须作为 C 函数返回值交给 VM
 /// （5.1 语义：常规 yield 路径返回 -1 即 LUA_YIELD，不 longjmp）
-pub fn yield_with(lua_state: *mut lua_State, fut: PendingFuture) -> c_int {
+///
+/// # Safety
+/// lua_state 必须是当前 Lua C 回调中可 yield 的有效协程，fut 只能在同一线程执行。
+/// 返回值必须直接交给 Lua VM；宿主关闭 VM 前必须先回收挂起任务。
+pub unsafe fn yield_with(lua_state: *mut lua_State, fut: PendingFuture) -> c_int {
     PENDING_OP.with(|slot| {
         debug_assert!(slot.borrow().is_none(), "previous pending op was not taken");
         *slot.borrow_mut() = Some(fut);
@@ -93,6 +101,10 @@ impl LuaCoroutine {
     /// 防止挂起期间被 GC 回收。
     /// 初始参数在 new 之前压到协程栈上（位于 chunk 函数之上），
     /// 首次 resume 会按 gettop - 1 自动传参（对应脚本里的 `...`）
+    ///
+    /// # Safety
+    /// g 与 thread 必须属于同一个存活 VM，g 栈顶是 thread 对象，thread 栈上已准备好函数和参数。
+    /// 在本对象及其挂起操作释放前，宿主不得关闭 VM，且必须始终在当前线程轮询。
     pub unsafe fn new(g: *mut lua_State, thread: *mut lua_State) -> Self {
         Self {
             thread,
@@ -127,7 +139,7 @@ impl Future for LuaCoroutine {
                 // 关键接线：内层 future 拿到的是外层 cx 的 waker，
                 // 事件（timer/epoll）到来时唤醒的就是本 future 所在的 task。
                 // Pending 时 future 留在枚举里原地保存（堆上，pinning 不变）
-                Phase::Awaiting(fut) => match fut.as_mut().poll_push(cx, this.thread) {
+                Phase::Awaiting(fut) => match unsafe { fut.as_mut().poll_push(cx, this.thread) } {
                     Poll::Pending => return Poll::Pending,
                     Poll::Ready(nargs) => nargs,
                 },
@@ -168,6 +180,10 @@ mod tests {
     use std::task::Waker;
 
     #[test]
+    #[allow(
+        clippy::await_holding_refcell_ref,
+        reason = "此回归专门验证 userdata 借用跨 await 保活，并在完成后释放"
+    )]
     fn pending_operation_pushes_only_when_ready_and_releases_borrow() {
         unsafe {
             let lua_state = luaL_newstate();

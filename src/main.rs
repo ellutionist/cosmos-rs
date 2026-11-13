@@ -2,7 +2,7 @@ use std::ffi::CString;
 
 use cosmos::coroutine::LuaCoroutine;
 use cosmos::ffi::*;
-use cosmos::{libs, stack, userdata};
+use cosmos::{builtin, libs, stack, userdata};
 
 mod demo;
 
@@ -139,9 +139,8 @@ async fn run(code: &str, args: &[String]) -> (*mut lua_State, Result<(), String>
             );
         }
         luaL_openlibs(lua_state);
-        libs::open_cosmos(lua_state);
         userdata::init(lua_state);
-        cosmos::light_thread::register_types(lua_state);
+        builtin::open(lua_state);
         userdata::register::<demo::Counter>(lua_state);
         cosmos_ext_demo::register(lua_state);
         cosmos_network::register(lua_state);

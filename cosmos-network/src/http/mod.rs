@@ -17,6 +17,10 @@ use crate::tls::TlsIo;
 
 /// HTTP 客户端的底层连接：明文或 TLS，统一实现 AsyncRead/AsyncWrite，
 /// 让 hyper 的连接池对两种传输只有一种类型
+#[allow(
+    clippy::large_enum_variant,
+    reason = "内联连接流，避免每条 TLS 连接新增 Box 分配"
+)]
 pub(crate) enum Conn {
     Plain(TcpStream),
     Tls(TlsIo),
