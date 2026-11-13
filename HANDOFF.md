@@ -15,7 +15,7 @@
 
 ```
 cosmos-rs/
-  cosmos/            # 运行时 + 桥接层：ffi / userdata / coroutine / stack / libs / thread
+  cosmos/            # 运行时 + 桥接层：ffi / userdata / coroutine / stack / libs / light_thread
   cosmos-macros/     # #[userdata]、#[derive(FromLua/PushLua)]，生成全部 trampoline
   cosmos-network/    # 功能模块：tcp / tls / http / websocket + bridge.rs（叶子转换）
   src/main.rs        # 宿主：建 VM、跑脚本、关 VM；demo.rs 是 userdata 示例
@@ -38,6 +38,9 @@ cosmos-rs/
 6. 只有用户明确要求才 commit / push。
 
 ## 3. 工作区现状
+
+- 本次命名整理提交：`Thread` → `LightThread`，`thread.rs` → `light_thread.rs`；Rust 模块为 `cosmos::light_thread`，Lua 类型表为 `cosmos.LightThread`。
+- Lua 状态指针（含宏生成代码和外部扩展）已从 `L` 改为 `lua_state`，未使用参数为 `_lua_state`。
 
 - 已提交基线：WebSocket、桥接分层重构、VM 生命周期修复与项目约定。
 - 本次提交范围：统一 `PushLua`、类型化 Lua 回调、枚举 `FromLua`、userdata fallible 借用、统一错误边界、冗余清理与回归记录。
@@ -90,20 +93,20 @@ WebSocket 用例暴露了退出段错误：脚本结束后 LocalSet 里仍挂着
 `src/main.rs` 现在：
 
 ```rust
-let (L, result) = local.block_on(&rt, run(&code, &script_args));
+let (lua_state, result) = local.block_on(&rt, run(&code, &script_args));
 drop(local);                 // 先回收本地任务（VM 仍存活）
-userdata::cleanup(L);
-lua_close(L);
+userdata::cleanup(lua_state);
+lua_close(lua_state);
 ```
 
-`run()` 返回 `(*mut lua_State, Result<(), String>)`，内部不再 `lua_close`。所有错误路径也把 L 交回 main。
+`run()` 返回 `(*mut lua_State, Result<(), String>)`，内部不再 `lua_close`。所有错误路径也把 lua_state 交回 main。
 **不要改回"run 内部关 VM"**。
 
 ## 5. 本轮完成：统一 `PushLua`
 
 - 删除 `IntoOutput` trait、derive、全部 impl，以及 `AsyncOutput` 枚举。
 - `PendingFuture = Pin<Box<dyn PendingOp>>`；`PendingOp` 对所有输出实现 `PushLua` 的 Future
-  提供 blanket impl：Pending 时不动 Lua 栈，Ready 时立即 `value.push_lua(L)`，返回压栈个数。
+  提供 blanket impl：Pending 时不动 Lua 栈，Ready 时立即 `value.push_lua(lua_state)`，返回压栈个数。
 - Future 本身仍只装箱一次；标量没有新增返回值分配，原先 userdata/table/元组/枚举的
   `Custom` 闭包装箱也已消除。业务值自身与 Lua 栈的内存分配不包含在这个结论里。
 - `#[userdata]` 的 async trampoline 直接返回原生 Rust 值；同步和异步都经 `PushLua`。
@@ -138,6 +141,7 @@ lua_close(L);
 | `cosmos/src/ffi.rs` | LuaJIT C API 声明（唯一 FFI 声明处） |
 | `cosmos/src/userdata.rs` | 桥接核心：`UserData`/`PushLua`/`FromLua`、userdata 存放与 GC、类型化 `LuaFunction::call`、fallible userdata 借用、`Nil`/`LuaStrMap`、derive 单元测试 |
 | `cosmos/src/coroutine.rs` | `LuaCoroutine`（Future）、`PendingOp`/`PendingFuture`、TLS yield 通道、`yield_with` |
+| `cosmos/src/light_thread.rs` | `LightThread` 句柄、spawn/wait/join/kill 与类型注册 |
 | `cosmos/src/stack.rs` | 栈辅助：`err_message`、`abs_index` |
 | `cosmos-macros/src/lib.rs` | `#[userdata]`、`FromLua`/`PushLua` derive |
 | `cosmos-network/src/bridge.rs` | 本 crate 的叶子转换、`until` trampoline、注册入口 |
@@ -178,7 +182,7 @@ cargo test --workspace  # 15 passed（derive、类型化回调、错误栈恢复
 - **async 方法的 self 守卫**：`#[userdata]` 生成的 async 方法会把 `RefMut/Ref` move 进 future，
   跨 await 一直占着借用；同一 userdata 的另一次调用会 `lua_error`。这是有意设计。
 - **FromLua 只返回 Err，不抛 Lua 错误**；借用守卫必须先释放，再由外层 trampoline 调用 lua_error。
-- **FromLua 嵌套取值要用绝对索引**：`lua_next` 遍历后再用 `-1` 会错位（`value_idx = lua_gettop(L)`）。
+- **FromLua 嵌套取值要用绝对索引**：`lua_next` 遍历后再用 `-1` 会错位（`value_idx = lua_gettop(lua_state)`）。
 - **hyper upgrade**：必须 `serve_connection_with_upgrades` 且保留 `http::request::Parts`
   （`OnUpgrade` 在 extensions 里），否则 101 之后连接不会被接管。
 - **h2 不能走 WebSocket upgrade**（无 RFC 8441），当前直接 400。

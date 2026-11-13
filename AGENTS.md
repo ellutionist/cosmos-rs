@@ -24,7 +24,7 @@
 
 允许出现裸 FFI 的位置仅限：
 
-- cosmos 的运行时/桥接层（`ffi` / `userdata` / `coroutine` / `stack` / `libs` / `thread`
+- cosmos 的运行时/桥接层（`ffi` / `userdata` / `coroutine` / `stack` / `libs` / `light_thread`
   以及 `#[cosmos::userdata]` 生成的 trampoline）；
 - `cosmos-network/src/bridge.rs`：只放无法下沉到 cosmos 的叶子转换
   （如 `Bytes` ↔ Lua 字符串）、C 闭包 trampoline 与类型注册；
@@ -42,6 +42,7 @@
   （Lua 协程 `!Send`，网络任务与协程在同一线程交错推进）。
 - 不做死抽象：公共层只在有明确复用点（至少两个使用方）时抽取，
   避免无意义的包装函数。
+- Lua 状态指针统一命名为 `lua_state`，未使用时为 `_lua_state`；宏生成代码同样遵守。
 - Lua 模块命名统一 `cosmos.network.*`、`cosmos.thread`；
   userdata 用 `#[cosmos::userdata(name = "…")]` 指定 `require` 路径。
 

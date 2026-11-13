@@ -26,8 +26,8 @@ use crate::websocket::{Ws, WsConn};
 // ---------------------------------------------------------------------------
 
 impl FromLua for Headers {
-    unsafe fn from_lua(L: *mut lua_State, idx: c_int) -> Result<Self, String> {
-        let map = LuaStrMap::from_lua(L, idx)?;
+    unsafe fn from_lua(lua_state: *mut lua_State, idx: c_int) -> Result<Self, String> {
+        let map = LuaStrMap::from_lua(lua_state, idx)?;
         Ok(Headers(
             map.0
                 .into_iter()
@@ -38,22 +38,22 @@ impl FromLua for Headers {
 }
 
 impl PushLua for Headers {
-    fn push_lua(self, L: *mut lua_State) -> i32 {
-        LuaStrMap(self.0).push_lua(L)
+    fn push_lua(self, lua_state: *mut lua_State) -> i32 {
+        LuaStrMap(self.0).push_lua(lua_state)
     }
 }
 
 /// Bytes ↔ Lua 字符串（持有 Bytes 零拷贝，push 时拷进 Lua）
 impl PushLua for LuaBytes {
-    fn push_lua(self, L: *mut lua_State) -> i32 {
-        unsafe { lua_pushlstring(L, self.0.as_ptr() as *const c_char, self.0.len()) };
+    fn push_lua(self, lua_state: *mut lua_State) -> i32 {
+        unsafe { lua_pushlstring(lua_state, self.0.as_ptr() as *const c_char, self.0.len()) };
         1
     }
 }
 
 impl FromLua for LuaBytes {
-    unsafe fn from_lua(L: *mut lua_State, idx: c_int) -> Result<Self, String> {
-        let bytes = <Vec<u8> as FromLua>::from_lua(L, idx)?;
+    unsafe fn from_lua(lua_state: *mut lua_State, idx: c_int) -> Result<Self, String> {
+        let bytes = <Vec<u8> as FromLua>::from_lua(lua_state, idx)?;
         Ok(LuaBytes(bytes.into()))
     }
 }
@@ -71,8 +71,8 @@ enum ReceiveArg {
 }
 
 impl FromLua for ReceivePattern {
-    unsafe fn from_lua(L: *mut lua_State, idx: c_int) -> Result<Self, String> {
-        match ReceiveArg::from_lua(L, idx)? {
+    unsafe fn from_lua(lua_state: *mut lua_State, idx: c_int) -> Result<Self, String> {
+        match ReceiveArg::from_lua(lua_state, idx)? {
             ReceiveArg::Size(size) => Ok(ReceivePattern::Size(size.max(0) as usize)),
             ReceiveArg::Pattern(s) => {
                 let pat = s.strip_prefix('*').unwrap_or(&s);
@@ -92,8 +92,8 @@ impl FromLua for ReceivePattern {
 /// receiveuntil 返回的迭代器：压栈时构造 TcpUntil userdata 并包成 Lua 闭包
 /// （upvalue = userdata）。Lua 用法：local iter = reader:receiveuntil("--"); iter()
 impl PushLua for UntilIter {
-    fn push_lua(self, L: *mut lua_State) -> i32 {
-        unsafe { push_closure::<TcpUntil>(L, until_call, self.0) };
+    fn push_lua(self, lua_state: *mut lua_State) -> i32 {
+        unsafe { push_closure::<TcpUntil>(lua_state, until_call, self.0) };
         1
     }
 }
@@ -103,11 +103,11 @@ const UPVALUE_1: c_int = cosmos::ffi::LUA_GLOBALSINDEX - 1;
 
 /// 闭包本体：从 upvalue 取 TcpUntil（RefMut 移进 future 持有），
 /// 像异步方法一样 yield 出去等读取结果
-unsafe extern "C" fn until_call(L: *mut lua_State) -> c_int {
-    trampoline(L, |L| unsafe {
-        let mut this = try_check::<TcpUntil>(L, UPVALUE_1)?;
+unsafe extern "C" fn until_call(lua_state: *mut lua_State) -> c_int {
+    trampoline(lua_state, |lua_state| unsafe {
+        let mut this = try_check::<TcpUntil>(lua_state, UPVALUE_1)?;
         Ok(cosmos::coroutine::yield_with(
-            L,
+            lua_state,
             Box::pin(async move { this.next().await }),
         ))
     })
@@ -118,15 +118,15 @@ unsafe extern "C" fn until_call(L: *mut lua_State) -> c_int {
 // ---------------------------------------------------------------------------
 
 impl FromLua for ClientCfg {
-    unsafe fn from_lua(L: *mut lua_State, idx: c_int) -> Result<Self, String> {
-        let mut ctx = try_check::<TlsContext>(L, idx)?;
+    unsafe fn from_lua(lua_state: *mut lua_State, idx: c_int) -> Result<Self, String> {
+        let mut ctx = try_check::<TlsContext>(lua_state, idx)?;
         ctx.client_config().map(ClientCfg)
     }
 }
 
 impl FromLua for ServerCfg {
-    unsafe fn from_lua(L: *mut lua_State, idx: c_int) -> Result<Self, String> {
-        let mut ctx = try_check::<TlsContext>(L, idx)?;
+    unsafe fn from_lua(lua_state: *mut lua_State, idx: c_int) -> Result<Self, String> {
+        let mut ctx = try_check::<TlsContext>(lua_state, idx)?;
         ctx.server_config().map(ServerCfg)
     }
 }
@@ -135,24 +135,24 @@ impl FromLua for ServerCfg {
 // 类型注册
 // ---------------------------------------------------------------------------
 
-pub unsafe fn register(L: *mut lua_State) {
-    cosmos::userdata::register::<Tcp>(L);
-    cosmos::userdata::register::<TcpConn>(L);
-    cosmos::userdata::register::<TcpReader>(L);
-    cosmos::userdata::register::<TcpWriter>(L);
-    cosmos::userdata::register::<TcpUntil>(L);
-    cosmos::userdata::register::<TcpListener>(L);
+pub unsafe fn register(lua_state: *mut lua_State) {
+    cosmos::userdata::register::<Tcp>(lua_state);
+    cosmos::userdata::register::<TcpConn>(lua_state);
+    cosmos::userdata::register::<TcpReader>(lua_state);
+    cosmos::userdata::register::<TcpWriter>(lua_state);
+    cosmos::userdata::register::<TcpUntil>(lua_state);
+    cosmos::userdata::register::<TcpListener>(lua_state);
 
-    cosmos::userdata::register::<Tls>(L);
-    cosmos::userdata::register::<TlsContext>(L);
-    cosmos::userdata::register::<TlsConn>(L);
-    cosmos::userdata::register::<TlsListener>(L);
+    cosmos::userdata::register::<Tls>(lua_state);
+    cosmos::userdata::register::<TlsContext>(lua_state);
+    cosmos::userdata::register::<TlsConn>(lua_state);
+    cosmos::userdata::register::<TlsListener>(lua_state);
 
-    cosmos::userdata::register::<HttpClient>(L);
-    cosmos::userdata::register::<HttpServer>(L);
-    cosmos::userdata::register::<HttpServerHandle>(L);
-    cosmos::userdata::register::<HttpRequest>(L);
+    cosmos::userdata::register::<HttpClient>(lua_state);
+    cosmos::userdata::register::<HttpServer>(lua_state);
+    cosmos::userdata::register::<HttpServerHandle>(lua_state);
+    cosmos::userdata::register::<HttpRequest>(lua_state);
 
-    cosmos::userdata::register::<Ws>(L);
-    cosmos::userdata::register::<WsConn>(L);
+    cosmos::userdata::register::<Ws>(lua_state);
+    cosmos::userdata::register::<WsConn>(lua_state);
 }

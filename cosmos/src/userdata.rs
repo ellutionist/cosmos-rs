@@ -62,7 +62,7 @@ impl<T> MethodTable<T> {
     }
 }
 
-// 已注册类型缓存，键是主线程状态。Lua 5.1 的协程 L 拿不到主状态指针
+// 已注册类型缓存，键是主线程状态。Lua 5.1 的协程 lua_state 拿不到主状态指针
 // （LuaJIT 也没有 lua_mainthread），所以 init 时把主状态以 lightuserdata
 // 锚定在 registry（registry 对所有协程可见），之后经 main_state 取回
 thread_local! {
@@ -82,18 +82,18 @@ pub(crate) fn vm_alive() -> bool {
 }
 
 /// 状态初始化：把主状态指针锚定进 registry，必须早于任何 push 调用
-pub unsafe fn init(L: *mut lua_State) {
-    lua_pushlightuserdata(L, L as *mut c_void);
-    lua_setfield(L, LUA_REGISTRYINDEX, MAIN_STATE_KEY.as_ptr());
+pub unsafe fn init(lua_state: *mut lua_State) {
+    lua_pushlightuserdata(lua_state, lua_state as *mut c_void);
+    lua_setfield(lua_state, LUA_REGISTRYINDEX, MAIN_STATE_KEY.as_ptr());
     VM_ALIVE.store(true, Ordering::Relaxed);
 }
 
-pub unsafe fn main_state(L: *mut lua_State) -> *mut lua_State {
-    lua_getfield(L, LUA_REGISTRYINDEX, MAIN_STATE_KEY.as_ptr());
-    let p = lua_touserdata(L, -1);
-    lua_settop(L, -2);
+pub unsafe fn main_state(lua_state: *mut lua_State) -> *mut lua_State {
+    lua_getfield(lua_state, LUA_REGISTRYINDEX, MAIN_STATE_KEY.as_ptr());
+    let p = lua_touserdata(lua_state, -1);
+    lua_settop(lua_state, -2);
     if p.is_null() {
-        L // 未 init 时退化为调用方状态（主状态直接调用 push 的场景）
+        lua_state // 未 init 时退化为调用方状态（主状态直接调用 push 的场景）
     } else {
         p as *mut lua_State
     }
@@ -114,7 +114,7 @@ fn type_cstring<T: 'static>() -> &'static CString {
     })
 }
 
-fn ensure_metatable<T: UserData>(main: *mut lua_State, L: *mut lua_State) {
+fn ensure_metatable<T: UserData>(main: *mut lua_State, lua_state: *mut lua_State) {
     let registered = REGISTERED.with(|m| {
         m.borrow()
             .get(&main)
@@ -126,36 +126,40 @@ fn ensure_metatable<T: UserData>(main: *mut lua_State, L: *mut lua_State) {
     }
     unsafe {
         let name = type_cstring::<T>();
-        luaL_newmetatable(L, name.as_ptr()); // registry[type_name] = mt，同时压栈
+        luaL_newmetatable(lua_state, name.as_ptr()); // registry[type_name] = mt，同时压栈
 
         // 静态构造和实例方法共用这一张表：__index 指向自己，
         // obj:method() → mt.method，Counter.new() → 命名空间字段直接索引 mt
-        lua_pushvalue(L, -1);
-        lua_setfield(L, -2, c"__index".as_ptr());
+        lua_pushvalue(lua_state, -1);
+        lua_setfield(lua_state, -2, c"__index".as_ptr());
 
         let mut methods = MethodTable::new();
         T::add_methods(&mut methods);
         for (mname, f) in methods.entries {
-            lua_pushcclosure(L, f, 0);
-            lua_setfield(L, -2, mname.as_ptr());
+            lua_pushcclosure(lua_state, f, 0);
+            lua_setfield(lua_state, -2, mname.as_ptr());
         }
 
         // __gc 统一生成：drop_in_place 对无 Drop 的类型也是合法空操作，
         // 宏不需要探测 Drop 的存在
-        lua_pushcclosure(L, gc_trampoline::<T>, 0);
-        lua_setfield(L, -2, c"__gc".as_ptr());
+        lua_pushcclosure(lua_state, gc_trampoline::<T>, 0);
+        lua_setfield(lua_state, -2, c"__gc".as_ptr());
 
         // 类型表经 require 引入：package.preload["cosmos.Counter"] = 工厂函数。
         // require 约定 preload 条目必须是函数（返回非函数值会被静默丢弃，
         // 见 LuaJIT lib_package.c lj_cf_package_require），工厂返回 mt 自身
         let preload_key = format!("cosmos.{}", T::lua_name());
-        lua_getfield(L, LUA_GLOBALSINDEX, c"package".as_ptr()); // [mt, package]
-        lua_getfield(L, -1, c"preload".as_ptr()); // [mt, package, preload]
-        lua_pushlstring(L, preload_key.as_ptr() as *const c_char, preload_key.len());
-        lua_pushvalue(L, -4); // [mt, package, preload, key, mt]
-        lua_pushcclosure(L, preload_factory, 1); // mt 副本收为 upvalue → [.., key, factory]
-        lua_settable(L, -3); // preload[key] = factory
-        lua_settop(L, -4); // 弹出 mt、package、preload，恢复入口栈高度
+        lua_getfield(lua_state, LUA_GLOBALSINDEX, c"package".as_ptr()); // [mt, package]
+        lua_getfield(lua_state, -1, c"preload".as_ptr()); // [mt, package, preload]
+        lua_pushlstring(
+            lua_state,
+            preload_key.as_ptr() as *const c_char,
+            preload_key.len(),
+        );
+        lua_pushvalue(lua_state, -4); // [mt, package, preload, key, mt]
+        lua_pushcclosure(lua_state, preload_factory, 1); // mt 副本收为 upvalue → [.., key, factory]
+        lua_settable(lua_state, -3); // preload[key] = factory
+        lua_settop(lua_state, -4); // 弹出 mt、package、preload，恢复入口栈高度
 
         REGISTERED.with(|m| {
             m.borrow_mut()
@@ -169,69 +173,74 @@ fn ensure_metatable<T: UserData>(main: *mut lua_State, L: *mut lua_State) {
 /// 提前注册类型（构建 metatable + 挂 require 入口），
 /// 让脚本可以在任何实例产生之前 require("cosmos.Counter")。
 /// 不调用也能工作：首次 push 时会懒注册，只是 require 会晚于第一个实例
-pub fn register<T: UserData>(L: *mut lua_State) {
+pub fn register<T: UserData>(lua_state: *mut lua_State) {
     unsafe {
-        let main = main_state(L);
-        ensure_metatable::<T>(main, L);
+        let main = main_state(lua_state);
+        ensure_metatable::<T>(main, lua_state);
     }
 }
 
 /// 构造 userdata 并把 T 压上 Lua 栈（栈顶 +1 个值）。
-/// L 可以是协程线程，metatable 注册统一记在主状态名下。
+/// lua_state 可以是协程线程，metatable 注册统一记在主状态名下。
 ///
 /// 值包在 RefCell 里存进 userdata：方法拿 &mut/& 时走 try_borrow 运行期检查，
 /// 借用冲突（重入/跨协程交错）变成 lua_error 而不是 aliasing UB——
 /// Rust 的编译期独占性在 Lua 边界降级为运行期检查
-pub fn push<T: UserData>(L: *mut lua_State, value: T) {
+pub fn push<T: UserData>(lua_state: *mut lua_State, value: T) {
     unsafe {
-        let main = main_state(L);
-        ensure_metatable::<T>(main, L);
+        let main = main_state(lua_state);
+        ensure_metatable::<T>(main, lua_state);
         // LuaJIT userdata 对齐保证是 8 字节，更高对齐的类型直接断言拒绝
         debug_assert!(std::mem::align_of::<RefCell<T>>() <= 8);
-        let p = lua_newuserdata(L, std::mem::size_of::<RefCell<T>>()) as *mut RefCell<T>;
+        let p = lua_newuserdata(lua_state, std::mem::size_of::<RefCell<T>>()) as *mut RefCell<T>;
         ptr::write(p, RefCell::new(value));
         // 5.1 的 luaL_getmetatable 是宏（registry 上的 lua_getfield），直接用 lua_getfield
-        lua_getfield(L, LUA_REGISTRYINDEX, type_cstring::<T>().as_ptr());
-        lua_setmetatable(L, -2);
+        lua_getfield(lua_state, LUA_REGISTRYINDEX, type_cstring::<T>().as_ptr());
+        lua_setmetatable(lua_state, -2);
     }
 }
 
 /// 把 C 函数包成带一个 userdata upvalue 的闭包（压栈 1 个值）。
 /// 用于"读端返回迭代器闭包"这类需要把 Rust 状态挂成 upvalue 的场景。
-pub unsafe fn push_closure<T: UserData>(L: *mut lua_State, func: lua_CFunction, upvalue: T) {
-    push::<T>(L, upvalue);
-    lua_pushcclosure(L, func, 1);
+pub unsafe fn push_closure<T: UserData>(
+    lua_state: *mut lua_State,
+    func: lua_CFunction,
+    upvalue: T,
+) {
+    push::<T>(lua_state, upvalue);
+    lua_pushcclosure(lua_state, func, 1);
 }
 
 /// 校验 userdata 的类型，不抛出 Lua 错误；调用方可以先正常释放 Rust 局部值。
 unsafe fn userdata_ptr<T: UserData>(
-    L: *mut lua_State,
+    lua_state: *mut lua_State,
     idx: c_int,
 ) -> Result<*mut RefCell<T>, String> {
-    let top = lua_gettop(L);
-    let matches = if lua_type(L, idx) == LUA_TUSERDATA && lua_getmetatable(L, idx) != 0 {
-        lua_getfield(L, LUA_REGISTRYINDEX, type_cstring::<T>().as_ptr());
-        lua_rawequal(L, -1, -2) != 0
-    } else {
-        false
-    };
-    lua_settop(L, top);
+    let top = lua_gettop(lua_state);
+    let matches =
+        if lua_type(lua_state, idx) == LUA_TUSERDATA && lua_getmetatable(lua_state, idx) != 0 {
+            lua_getfield(lua_state, LUA_REGISTRYINDEX, type_cstring::<T>().as_ptr());
+            lua_rawequal(lua_state, -1, -2) != 0
+        } else {
+            false
+        };
+    lua_settop(lua_state, top);
     if !matches {
         return Err(format!(
             "argument {idx}: expected {} userdata",
             T::lua_name()
         ));
     }
-    Ok(lua_touserdata(L, idx) as *mut RefCell<T>)
+    Ok(lua_touserdata(lua_state, idx) as *mut RefCell<T>)
 }
 
 /// 守卫的地址由 Lua userdata 保持稳定；生命周期由调用栈或协程的 registry 锚点保证。
 /// 借用跨 await 时留在同一线程，类型或借用冲突均返回 Err，由最外层 trampoline 处理。
 pub unsafe fn try_check<T: UserData>(
-    L: *mut lua_State,
+    lua_state: *mut lua_State,
     idx: c_int,
 ) -> Result<RefMut<'static, T>, String> {
-    let p = userdata_ptr::<T>(L, idx)?;
+    let p = userdata_ptr::<T>(lua_state, idx)?;
     let guard = (*p)
         .try_borrow_mut()
         .map_err(|_| "attempt to mutably borrow userdata that is already borrowed".to_string())?;
@@ -243,18 +252,18 @@ pub unsafe fn try_check<T: UserData>(
 /// 共享借用与独占借用共用类型校验及错误协议。
 /// 守卫借用 Lua 托管的内存，只能用于受调用栈/协程锚点保护的调用期间，不能作为回调的拥有型结果。
 pub unsafe fn try_check_shared<T: UserData>(
-    L: *mut lua_State,
+    lua_state: *mut lua_State,
     idx: c_int,
 ) -> Result<Ref<'static, T>, String> {
-    let p = userdata_ptr::<T>(L, idx)?;
+    let p = userdata_ptr::<T>(lua_state, idx)?;
     let guard = (*p)
         .try_borrow()
         .map_err(|_| "attempt to borrow userdata that is mutably borrowed".to_string())?;
     Ok(std::mem::transmute::<Ref<'_, T>, Ref<'static, T>>(guard))
 }
 
-unsafe extern "C" fn gc_trampoline<T: UserData>(L: *mut lua_State) -> c_int {
-    let p = lua_touserdata(L, 1) as *mut RefCell<T>;
+unsafe extern "C" fn gc_trampoline<T: UserData>(lua_state: *mut lua_State) -> c_int {
+    let p = lua_touserdata(lua_state, 1) as *mut RefCell<T>;
     if !p.is_null() {
         // Drop 里 panic 不能穿过 extern "C" 帧，吞掉
         let _ = catch_unwind(AssertUnwindSafe(|| ptr::drop_in_place(p)));
@@ -264,19 +273,19 @@ unsafe extern "C" fn gc_trampoline<T: UserData>(L: *mut lua_State) -> c_int {
 
 /// require 的 preload 工厂：upvalue 1 就是 metatable，直接返回。
 /// require 会用返回值填充 package.loaded[name]
-unsafe extern "C" fn preload_factory(L: *mut lua_State) -> c_int {
-    lua_pushvalue(L, LUA_GLOBALSINDEX - 1); // lua_upvalueindex(1)
+unsafe extern "C" fn preload_factory(lua_state: *mut lua_State) -> c_int {
+    lua_pushvalue(lua_state, LUA_GLOBALSINDEX - 1); // lua_upvalueindex(1)
     1
 }
 
 /// 方法 trampoline 外壳：捕获 panic、把 Err 转成 lua_error。
 /// 只允许在 lua_resume 的保护帧内调用（即从 Lua 方法路径进入），
 /// 否则 lua_error 没有 setjmp 目标会 PANIC
-pub fn trampoline<F>(L: *mut lua_State, f: F) -> c_int
+pub fn trampoline<F>(lua_state: *mut lua_State, f: F) -> c_int
 where
     F: FnOnce(*mut lua_State) -> Result<i32, String>,
 {
-    let error = match catch_unwind(AssertUnwindSafe(|| f(L))) {
+    let error = match catch_unwind(AssertUnwindSafe(|| f(lua_state))) {
         Ok(Ok(n)) => return n,
         Ok(Err(msg)) => msg,
         Err(p) => {
@@ -289,17 +298,17 @@ where
         }
     };
     unsafe {
-        lua_pushlstring(L, error.as_ptr() as *const c_char, error.len());
+        lua_pushlstring(lua_state, error.as_ptr() as *const c_char, error.len());
     }
     // lua_error 使用 longjmp，不会运行 Rust 析构；错误字符串也要在跳转前释放。
     drop(error);
-    unsafe { lua_error(L) }
+    unsafe { lua_error(lua_state) }
 }
 
 /// lua_close 前调用，清掉该状态的注册缓存（否则线程本地 map 会残留死键）
-pub fn cleanup(L: *mut lua_State) {
+pub fn cleanup(lua_state: *mut lua_State) {
     unsafe {
-        let main = main_state(L);
+        let main = main_state(lua_state);
         REGISTERED.with(|m| {
             m.borrow_mut().remove(&main);
         });
@@ -310,36 +319,36 @@ pub fn cleanup(L: *mut lua_State) {
 /// 方法参数：从 Lua 栈取值
 pub trait FromLua: Sized {
     /// # Safety
-    /// L 属于仍存活的 VM；idx 是有效栈索引，或用于读取缺省参数/返回值的空槽。
+    /// lua_state 属于仍存活的 VM；idx 是有效栈索引，或用于读取缺省参数/返回值的空槽。
     /// 转换失败必须返回 Err，不得调用 lua_error；成功或失败都应恢复入口栈高度。
     /// 返回值需自行保活所依赖的 Lua 引用，不能返回仅靠当前调用栈保护的借用。
-    unsafe fn from_lua(L: *mut lua_State, idx: c_int) -> Result<Self, String>;
+    unsafe fn from_lua(lua_state: *mut lua_State, idx: c_int) -> Result<Self, String>;
 }
 
 impl FromLua for f64 {
-    unsafe fn from_lua(L: *mut lua_State, idx: c_int) -> Result<Self, String> {
-        if lua_type(L, idx) != LUA_TNUMBER {
+    unsafe fn from_lua(lua_state: *mut lua_State, idx: c_int) -> Result<Self, String> {
+        if lua_type(lua_state, idx) != LUA_TNUMBER {
             return Err(format!("argument {idx}: expected number"));
         }
-        Ok(lua_tonumber(L, idx))
+        Ok(lua_tonumber(lua_state, idx))
     }
 }
 
 impl FromLua for i64 {
-    unsafe fn from_lua(L: *mut lua_State, idx: c_int) -> Result<Self, String> {
-        if lua_type(L, idx) != LUA_TNUMBER {
+    unsafe fn from_lua(lua_state: *mut lua_State, idx: c_int) -> Result<Self, String> {
+        if lua_type(lua_state, idx) != LUA_TNUMBER {
             return Err(format!("argument {idx}: expected number"));
         }
-        Ok(lua_tointeger(L, idx) as i64)
+        Ok(lua_tointeger(lua_state, idx) as i64)
     }
 }
 
 impl FromLua for u16 {
-    unsafe fn from_lua(L: *mut lua_State, idx: c_int) -> Result<Self, String> {
-        if lua_type(L, idx) != LUA_TNUMBER {
+    unsafe fn from_lua(lua_state: *mut lua_State, idx: c_int) -> Result<Self, String> {
+        if lua_type(lua_state, idx) != LUA_TNUMBER {
             return Err(format!("argument {idx}: expected number"));
         }
-        let v = lua_tointeger(L, idx);
+        let v = lua_tointeger(lua_state, idx);
         if v < 0 || v > u16::MAX as lua_Integer {
             return Err(format!("argument {idx}: number out of range for u16"));
         }
@@ -348,22 +357,22 @@ impl FromLua for u16 {
 }
 
 impl FromLua for bool {
-    unsafe fn from_lua(L: *mut lua_State, idx: c_int) -> Result<Self, String> {
-        if lua_type(L, idx) != LUA_TBOOLEAN {
+    unsafe fn from_lua(lua_state: *mut lua_State, idx: c_int) -> Result<Self, String> {
+        if lua_type(lua_state, idx) != LUA_TBOOLEAN {
             return Err(format!("argument {idx}: expected boolean"));
         }
-        Ok(lua_toboolean(L, idx) != 0)
+        Ok(lua_toboolean(lua_state, idx) != 0)
     }
 }
 
 /// 原始字节（二进制安全）：Lua 字符串不做 UTF-8 校验
 impl FromLua for Vec<u8> {
-    unsafe fn from_lua(L: *mut lua_State, idx: c_int) -> Result<Self, String> {
-        if lua_type(L, idx) != LUA_TSTRING {
+    unsafe fn from_lua(lua_state: *mut lua_State, idx: c_int) -> Result<Self, String> {
+        if lua_type(lua_state, idx) != LUA_TSTRING {
             return Err(format!("argument {idx}: expected string"));
         }
         let mut len: size_t = 0;
-        let p = lua_tolstring(L, idx, &mut len);
+        let p = lua_tolstring(lua_state, idx, &mut len);
         Ok(std::slice::from_raw_parts(p as *const u8, len).to_vec())
     }
 }
@@ -374,33 +383,33 @@ impl FromLua for Vec<u8> {
 pub struct LuaStrMap(pub Vec<(String, String)>);
 
 impl FromLua for LuaStrMap {
-    unsafe fn from_lua(L: *mut lua_State, idx: c_int) -> Result<Self, String> {
-        let idx = crate::stack::abs_index(L, idx);
-        if lua_type(L, idx) != LUA_TTABLE {
+    unsafe fn from_lua(lua_state: *mut lua_State, idx: c_int) -> Result<Self, String> {
+        let idx = crate::stack::abs_index(lua_state, idx);
+        if lua_type(lua_state, idx) != LUA_TTABLE {
             return Err(format!("argument {idx}: expected table"));
         }
         let mut out = Vec::new();
-        lua_pushnil(L);
-        while lua_next(L, idx) != 0 {
-            if lua_type(L, -2) == LUA_TSTRING && lua_type(L, -1) == LUA_TSTRING {
-                let key = <String as FromLua>::from_lua(L, -2)?;
-                let value = <String as FromLua>::from_lua(L, -1)?;
+        lua_pushnil(lua_state);
+        while lua_next(lua_state, idx) != 0 {
+            if lua_type(lua_state, -2) == LUA_TSTRING && lua_type(lua_state, -1) == LUA_TSTRING {
+                let key = <String as FromLua>::from_lua(lua_state, -2)?;
+                let value = <String as FromLua>::from_lua(lua_state, -1)?;
                 out.push((key, value));
             }
-            lua_settop(L, -2); // 弹掉 value，保留 key 供下一次 lua_next
+            lua_settop(lua_state, -2); // 弹掉 value，保留 key 供下一次 lua_next
         }
         Ok(LuaStrMap(out))
     }
 }
 
 impl PushLua for LuaStrMap {
-    fn push_lua(self, L: *mut lua_State) -> i32 {
+    fn push_lua(self, lua_state: *mut lua_State) -> i32 {
         unsafe {
-            lua_createtable(L, 0, self.0.len() as c_int);
+            lua_createtable(lua_state, 0, self.0.len() as c_int);
             for (k, v) in self.0 {
-                k.push_lua(L);
-                v.push_lua(L);
-                lua_settable(L, -3);
+                k.push_lua(lua_state);
+                v.push_lua(lua_state);
+                lua_settable(lua_state, -3);
             }
         }
         1
@@ -408,12 +417,12 @@ impl PushLua for LuaStrMap {
 }
 
 impl FromLua for String {
-    unsafe fn from_lua(L: *mut lua_State, idx: c_int) -> Result<Self, String> {
-        if lua_type(L, idx) != LUA_TSTRING {
+    unsafe fn from_lua(lua_state: *mut lua_State, idx: c_int) -> Result<Self, String> {
+        if lua_type(lua_state, idx) != LUA_TSTRING {
             return Err(format!("argument {idx}: expected string"));
         }
         let mut len: size_t = 0;
-        let p = lua_tolstring(L, idx, &mut len);
+        let p = lua_tolstring(lua_state, idx, &mut len);
         Ok(String::from_utf8_lossy(std::slice::from_raw_parts(p as *const u8, len)).into_owned())
     }
 }
@@ -423,12 +432,12 @@ impl FromLua for String {
 /// 异步方法不得使用——future 跨 yield 后栈帧已丢弃，借用会悬垂（宏会拒绝）。
 /// 异步方法要用字符串请用 LuaStr（按长度拷贝或锚定）
 impl<'a> FromLua for &'a str {
-    unsafe fn from_lua(L: *mut lua_State, idx: c_int) -> Result<Self, String> {
-        if lua_type(L, idx) != LUA_TSTRING {
+    unsafe fn from_lua(lua_state: *mut lua_State, idx: c_int) -> Result<Self, String> {
+        if lua_type(lua_state, idx) != LUA_TSTRING {
             return Err(format!("argument {idx}: expected string"));
         }
         let mut len: size_t = 0;
-        let p = lua_tolstring(L, idx, &mut len);
+        let p = lua_tolstring(lua_state, idx, &mut len);
         let bytes = std::slice::from_raw_parts(p as *const u8, len);
         std::str::from_utf8(bytes).map_err(|_| format!("argument {idx}: invalid UTF-8 string"))
     }
@@ -466,13 +475,13 @@ pub enum LuaStr {
 /// 因此 s 的 'static 生命周期是 sound 的（transmute 延展）
 pub struct StrAnchor {
     s: &'static str,
-    L: *mut lua_State,
+    lua_state: *mut lua_State,
     ref_: c_int,
 }
 
 impl Drop for StrAnchor {
     fn drop(&mut self) {
-        unsafe { luaL_unref(self.L, LUA_REGISTRYINDEX, self.ref_) };
+        unsafe { luaL_unref(self.lua_state, LUA_REGISTRYINDEX, self.ref_) };
     }
 }
 
@@ -487,12 +496,12 @@ impl std::ops::Deref for LuaStr {
 }
 
 impl FromLua for LuaStr {
-    unsafe fn from_lua(L: *mut lua_State, idx: c_int) -> Result<Self, String> {
-        if lua_type(L, idx) != LUA_TSTRING {
+    unsafe fn from_lua(lua_state: *mut lua_State, idx: c_int) -> Result<Self, String> {
+        if lua_type(lua_state, idx) != LUA_TSTRING {
             return Err(format!("argument {idx}: expected string"));
         }
         let mut len: size_t = 0;
-        let p = lua_tolstring(L, idx, &mut len);
+        let p = lua_tolstring(lua_state, idx, &mut len);
         let bytes = std::slice::from_raw_parts(p as *const u8, len);
         if len <= STR_ANCHOR_THRESHOLD {
             Ok(LuaStr::Owned(String::from_utf8_lossy(bytes).into_owned()))
@@ -500,11 +509,11 @@ impl FromLua for LuaStr {
             // 先校验 UTF-8（此时字符串还在栈上、锚定前不会被 GC），再锚定
             let s = std::str::from_utf8(bytes)
                 .map_err(|_| format!("argument {idx}: invalid UTF-8 string"))?;
-            lua_pushvalue(L, idx);
-            let ref_ = luaL_ref(L, LUA_REGISTRYINDEX);
+            lua_pushvalue(lua_state, idx);
+            let ref_ = luaL_ref(lua_state, LUA_REGISTRYINDEX);
             Ok(LuaStr::Borrowed(StrAnchor {
                 s: std::mem::transmute::<&str, &'static str>(s),
-                L,
+                lua_state,
                 ref_,
             }))
         }
@@ -514,10 +523,10 @@ impl FromLua for LuaStr {
 /// 可选参数：实参缺省（栈上无此槽位）或显式 nil 时取 None。
 /// 宏不需要特判——Lua 调用少传参数时 lua_type 天然返回 LUA_TNONE。
 impl<T: FromLua> FromLua for Option<T> {
-    unsafe fn from_lua(L: *mut lua_State, idx: c_int) -> Result<Self, String> {
-        match lua_type(L, idx) {
+    unsafe fn from_lua(lua_state: *mut lua_State, idx: c_int) -> Result<Self, String> {
+        match lua_type(lua_state, idx) {
             LUA_TNONE | LUA_TNIL => Ok(None),
-            _ => Ok(Some(T::from_lua(L, idx)?)),
+            _ => Ok(Some(T::from_lua(lua_state, idx)?)),
         }
     }
 }
@@ -552,13 +561,13 @@ impl LuaFunction {
 }
 
 impl FromLua for LuaFunction {
-    unsafe fn from_lua(L: *mut lua_State, idx: c_int) -> Result<Self, String> {
-        if lua_type(L, idx) != LUA_TFUNCTION {
+    unsafe fn from_lua(lua_state: *mut lua_State, idx: c_int) -> Result<Self, String> {
+        if lua_type(lua_state, idx) != LUA_TFUNCTION {
             return Err(format!("argument {idx}: expected function"));
         }
-        let main = main_state(L);
-        lua_pushvalue(L, idx);
-        let registry_ref = luaL_ref(L, LUA_REGISTRYINDEX);
+        let main = main_state(lua_state);
+        lua_pushvalue(lua_state, idx);
+        let registry_ref = luaL_ref(lua_state, LUA_REGISTRYINDEX);
         Ok(LuaFunction { main, registry_ref })
     }
 }
@@ -581,48 +590,48 @@ impl Drop for LuaFunction {
 /// 安全约定：压栈在 lua_resume 之间也合法；实现里不得调用 lua_error
 /// （那需要 lua_resume 的保护帧，错误应返回 Err 由 trampoline 转换）
 pub trait PushLua {
-    fn push_lua(self, L: *mut lua_State) -> i32;
+    fn push_lua(self, lua_state: *mut lua_State) -> i32;
 }
 
 impl PushLua for () {
-    fn push_lua(self, _L: *mut lua_State) -> i32 {
+    fn push_lua(self, _lua_state: *mut lua_State) -> i32 {
         0
     }
 }
 impl PushLua for i64 {
-    fn push_lua(self, L: *mut lua_State) -> i32 {
-        unsafe { lua_pushinteger(L, self as lua_Integer) };
+    fn push_lua(self, lua_state: *mut lua_State) -> i32 {
+        unsafe { lua_pushinteger(lua_state, self as lua_Integer) };
         1
     }
 }
 impl PushLua for u16 {
-    fn push_lua(self, L: *mut lua_State) -> i32 {
-        unsafe { lua_pushinteger(L, self as lua_Integer) };
+    fn push_lua(self, lua_state: *mut lua_State) -> i32 {
+        unsafe { lua_pushinteger(lua_state, self as lua_Integer) };
         1
     }
 }
 impl PushLua for f64 {
-    fn push_lua(self, L: *mut lua_State) -> i32 {
-        unsafe { lua_pushnumber(L, self) };
+    fn push_lua(self, lua_state: *mut lua_State) -> i32 {
+        unsafe { lua_pushnumber(lua_state, self) };
         1
     }
 }
 impl PushLua for bool {
-    fn push_lua(self, L: *mut lua_State) -> i32 {
-        unsafe { lua_pushboolean(L, self as c_int) };
+    fn push_lua(self, lua_state: *mut lua_State) -> i32 {
+        unsafe { lua_pushboolean(lua_state, self as c_int) };
         1
     }
 }
 impl PushLua for String {
-    fn push_lua(self, L: *mut lua_State) -> i32 {
-        unsafe { lua_pushlstring(L, self.as_ptr() as *const c_char, self.len()) };
+    fn push_lua(self, lua_state: *mut lua_State) -> i32 {
+        unsafe { lua_pushlstring(lua_state, self.as_ptr() as *const c_char, self.len()) };
         1
     }
 }
 /// 原始字节 → Lua 字符串（二进制安全，不做 UTF-8 校验）
 impl PushLua for Vec<u8> {
-    fn push_lua(self, L: *mut lua_State) -> i32 {
-        unsafe { lua_pushlstring(L, self.as_ptr() as *const c_char, self.len()) };
+    fn push_lua(self, lua_state: *mut lua_State) -> i32 {
+        unsafe { lua_pushlstring(lua_state, self.as_ptr() as *const c_char, self.len()) };
         1
     }
 }
@@ -631,8 +640,8 @@ impl PushLua for Vec<u8> {
 pub struct Nil;
 
 impl FromLua for Nil {
-    unsafe fn from_lua(L: *mut lua_State, idx: c_int) -> Result<Self, String> {
-        match lua_type(L, idx) {
+    unsafe fn from_lua(lua_state: *mut lua_State, idx: c_int) -> Result<Self, String> {
+        match lua_type(lua_state, idx) {
             LUA_TNONE | LUA_TNIL => Ok(Nil),
             _ => Err(format!("argument {idx}: expected nil")),
         }
@@ -641,25 +650,25 @@ impl FromLua for Nil {
 
 /// 无返回值的回调忽略 Lua 返回内容，供 WebSocket handler 等场景使用。
 impl FromLua for () {
-    unsafe fn from_lua(_L: *mut lua_State, _idx: c_int) -> Result<Self, String> {
+    unsafe fn from_lua(_lua_state: *mut lua_State, _idx: c_int) -> Result<Self, String> {
         Ok(())
     }
 }
 
 impl PushLua for Nil {
-    fn push_lua(self, L: *mut lua_State) -> i32 {
-        unsafe { lua_pushnil(L) };
+    fn push_lua(self, lua_state: *mut lua_State) -> i32 {
+        unsafe { lua_pushnil(lua_state) };
         1
     }
 }
 impl<T: PushLua> PushLua for Option<T> {
-    fn push_lua(self, L: *mut lua_State) -> i32 {
+    fn push_lua(self, lua_state: *mut lua_State) -> i32 {
         match self {
-            Some(v) => v.push_lua(L),
+            Some(v) => v.push_lua(lua_state),
             // None 压一个 nil：作为表字段时与 setfield 配对，
             // 作为多返回值时 `local v = f()` 同样是 nil
             None => {
-                unsafe { lua_pushnil(L) };
+                unsafe { lua_pushnil(lua_state) };
                 1
             }
         }
@@ -667,24 +676,24 @@ impl<T: PushLua> PushLua for Option<T> {
 }
 /// userdata 返回：直接构造压栈，无需为返回值单独装箱
 impl<T: UserData> PushLua for T {
-    fn push_lua(self, L: *mut lua_State) -> i32 {
-        push::<T>(L, self);
+    fn push_lua(self, lua_state: *mut lua_State) -> i32 {
+        push::<T>(lua_state, self);
         1
     }
 }
 
 /// 多返回值：2 元组依次压栈（split 这类"一次返回多个 userdata"的同步方法用）
 impl<A: PushLua, B: PushLua> PushLua for (A, B) {
-    fn push_lua(self, L: *mut lua_State) -> i32 {
+    fn push_lua(self, lua_state: *mut lua_State) -> i32 {
         let (a, b) = self;
-        a.push_lua(L) + b.push_lua(L)
+        a.push_lua(lua_state) + b.push_lua(lua_state)
     }
 }
 
 /// 字符串切片：避免为 &'static str 常量额外分配 String
 impl PushLua for &str {
-    fn push_lua(self, L: *mut lua_State) -> i32 {
-        unsafe { lua_pushlstring(L, self.as_ptr() as *const c_char, self.len()) };
+    fn push_lua(self, lua_state: *mut lua_State) -> i32 {
+        unsafe { lua_pushlstring(lua_state, self.as_ptr() as *const c_char, self.len()) };
         1
     }
 }
@@ -693,14 +702,14 @@ impl PushLua for &str {
 /// Ok(v) 压 v，Err(e) 压 nil + e.to_string()（两个返回值）。
 /// 同步与异步方法共用这一份语义
 impl<T: PushLua, E: Display> PushLua for Result<T, E> {
-    fn push_lua(self, L: *mut lua_State) -> i32 {
+    fn push_lua(self, lua_state: *mut lua_State) -> i32 {
         match self {
-            Ok(v) => v.push_lua(L),
+            Ok(v) => v.push_lua(lua_state),
             Err(e) => {
                 let msg = e.to_string();
                 unsafe {
-                    lua_pushnil(L);
-                    lua_pushlstring(L, msg.as_ptr() as *const c_char, msg.len());
+                    lua_pushnil(lua_state);
+                    lua_pushlstring(lua_state, msg.as_ptr() as *const c_char, msg.len());
                 }
                 2
             }
@@ -715,23 +724,23 @@ mod derive_tests {
 
     fn with_state(f: impl FnOnce(*mut lua_State)) {
         unsafe {
-            let L = luaL_newstate();
-            assert!(!L.is_null(), "luaL_newstate failed");
-            luaL_openlibs(L);
-            init(L);
-            f(L);
-            cleanup(L);
-            lua_close(L);
+            let lua_state = luaL_newstate();
+            assert!(!lua_state.is_null(), "luaL_newstate failed");
+            luaL_openlibs(lua_state);
+            init(lua_state);
+            f(lua_state);
+            cleanup(lua_state);
+            lua_close(lua_state);
         }
     }
 
     /// 建一张整数/字符串字段的表（栈顶 +1）
-    unsafe fn push_int_table(L: *mut lua_State, pairs: &[(&str, lua_Integer)]) {
-        lua_createtable(L, 0, pairs.len() as c_int);
+    unsafe fn push_int_table(lua_state: *mut lua_State, pairs: &[(&str, lua_Integer)]) {
+        lua_createtable(lua_state, 0, pairs.len() as c_int);
         for (k, v) in pairs {
-            lua_pushlstring(L, k.as_ptr() as *const c_char, k.len());
-            lua_pushinteger(L, *v);
-            lua_settable(L, -3);
+            lua_pushlstring(lua_state, k.as_ptr() as *const c_char, k.len());
+            lua_pushinteger(lua_state, *v);
+            lua_settable(lua_state, -3);
         }
     }
 
@@ -752,9 +761,9 @@ mod derive_tests {
 
     #[test]
     fn field_level_defaults() {
-        with_state(|L| unsafe {
-            push_int_table(L, &[("c", 3)]);
-            let v = FieldDefaults::from_lua(L, 1).expect("read table");
+        with_state(|lua_state| unsafe {
+            push_int_table(lua_state, &[("c", 3)]);
+            let v = FieldDefaults::from_lua(lua_state, 1).expect("read table");
             assert_eq!(
                 v,
                 FieldDefaults {
@@ -769,9 +778,9 @@ mod derive_tests {
 
     #[test]
     fn all_fields_present() {
-        with_state(|L| unsafe {
-            push_int_table(L, &[("a", 10), ("b", 20), ("c", 30), ("d", 40)]);
-            let v = FieldDefaults::from_lua(L, 1).expect("read table");
+        with_state(|lua_state| unsafe {
+            push_int_table(lua_state, &[("a", 10), ("b", 20), ("c", 30), ("d", 40)]);
+            let v = FieldDefaults::from_lua(lua_state, 1).expect("read table");
             assert_eq!(
                 v,
                 FieldDefaults {
@@ -786,9 +795,9 @@ mod derive_tests {
 
     #[test]
     fn missing_field_without_default_is_error() {
-        with_state(|L| unsafe {
-            push_int_table(L, &[("a", 1)]);
-            let err = FieldDefaults::from_lua(L, 1).unwrap_err();
+        with_state(|lua_state| unsafe {
+            push_int_table(lua_state, &[("a", 1)]);
+            let err = FieldDefaults::from_lua(lua_state, 1).unwrap_err();
             assert!(err.contains("missing field `c`"), "unexpected error: {err}");
         });
     }
@@ -808,9 +817,9 @@ mod derive_tests {
 
     #[test]
     fn container_default_uses_default_impl() {
-        with_state(|L| unsafe {
-            push_int_table(L, &[("b", 5)]);
-            let v = ContainerDefaults::from_lua(L, 1).expect("read table");
+        with_state(|lua_state| unsafe {
+            push_int_table(lua_state, &[("b", 5)]);
+            let v = ContainerDefaults::from_lua(lua_state, 1).expect("read table");
             assert_eq!(v, ContainerDefaults { a: -1, b: 5 });
         });
     }
@@ -828,18 +837,18 @@ mod derive_tests {
 
     #[test]
     fn container_default_fn() {
-        with_state(|L| unsafe {
-            push_int_table(L, &[("b", 5)]);
-            let v = FnDefaults::from_lua(L, 1).expect("read table");
+        with_state(|lua_state| unsafe {
+            push_int_table(lua_state, &[("b", 5)]);
+            let v = FnDefaults::from_lua(lua_state, 1).expect("read table");
             assert_eq!(v, FnDefaults { a: 11, b: 5 });
         });
     }
 
     #[test]
     fn non_table_is_error() {
-        with_state(|L| unsafe {
-            lua_pushinteger(L, 1);
-            let err = ContainerDefaults::from_lua(L, 1).unwrap_err();
+        with_state(|lua_state| unsafe {
+            lua_pushinteger(lua_state, 1);
+            let err = ContainerDefaults::from_lua(lua_state, 1).unwrap_err();
             assert!(err.contains("expected table"), "unexpected error: {err}");
         });
     }
@@ -852,16 +861,16 @@ mod derive_tests {
 
     #[test]
     fn push_lua_generates_table() {
-        with_state(|L| unsafe {
-            Pushed { a: 42, b: None }.push_lua(L);
-            assert_eq!(lua_type(L, -1), LUA_TTABLE);
+        with_state(|lua_state| unsafe {
+            Pushed { a: 42, b: None }.push_lua(lua_state);
+            assert_eq!(lua_type(lua_state, -1), LUA_TTABLE);
 
-            lua_getfield(L, -1, c"a".as_ptr());
-            assert_eq!(lua_tointeger(L, -1), 42);
-            lua_settop(L, -2);
+            lua_getfield(lua_state, -1, c"a".as_ptr());
+            assert_eq!(lua_tointeger(lua_state, -1), 42);
+            lua_settop(lua_state, -2);
 
-            lua_getfield(L, -1, c"b".as_ptr());
-            assert_eq!(lua_type(L, -1), LUA_TNIL);
+            lua_getfield(lua_state, -1, c"b".as_ptr());
+            assert_eq!(lua_type(lua_state, -1), LUA_TNIL);
         });
     }
 
@@ -870,7 +879,7 @@ mod derive_tests {
         Empty,
         Data(T),
         Closed {
-            L: Nil,
+            lua_state: Nil,
             reason: &'static str,
             partial: T,
         },
@@ -878,24 +887,24 @@ mod derive_tests {
 
     #[test]
     fn enum_push_preserves_count_order_and_binary_data() {
-        with_state(|L| unsafe {
-            assert_eq!(Outcome::<Vec<u8>>::Empty.push_lua(L), 0);
-            assert_eq!(lua_gettop(L), 0);
+        with_state(|lua_state| unsafe {
+            assert_eq!(Outcome::<Vec<u8>>::Empty.push_lua(lua_state), 0);
+            assert_eq!(lua_gettop(lua_state), 0);
 
-            assert_eq!(Outcome::Data(vec![0, 255, 1]).push_lua(L), 1);
-            assert_eq!(Vec::<u8>::from_lua(L, 1).unwrap(), [0, 255, 1]);
-            lua_settop(L, 0);
+            assert_eq!(Outcome::Data(vec![0, 255, 1]).push_lua(lua_state), 1);
+            assert_eq!(Vec::<u8>::from_lua(lua_state, 1).unwrap(), [0, 255, 1]);
+            lua_settop(lua_state, 0);
 
             let outcome = Outcome::Closed {
-                L: Nil,
+                lua_state: Nil,
                 reason: "closed",
                 partial: vec![255, 0],
             };
-            assert_eq!(outcome.push_lua(L), 3);
-            assert_eq!(lua_gettop(L), 3);
-            assert_eq!(lua_type(L, 1), LUA_TNIL);
-            assert_eq!(String::from_lua(L, 2).unwrap(), "closed");
-            assert_eq!(Vec::<u8>::from_lua(L, 3).unwrap(), [255, 0]);
+            assert_eq!(outcome.push_lua(lua_state), 3);
+            assert_eq!(lua_gettop(lua_state), 3);
+            assert_eq!(lua_type(lua_state, 1), LUA_TNIL);
+            assert_eq!(String::from_lua(lua_state, 2).unwrap(), "closed");
+            assert_eq!(Vec::<u8>::from_lua(lua_state, 3).unwrap(), [255, 0]);
         });
     }
 
@@ -915,53 +924,56 @@ mod derive_tests {
 
     #[test]
     fn enum_from_lua_reads_typed_values_and_multiple_slots() {
-        with_state(|L| unsafe {
+        with_state(|lua_state| unsafe {
             type Reply = CallbackReply<ContainerDefaults>;
-            assert!(matches!(Reply::from_lua(L, 1).unwrap(), Reply::Nothing));
-            lua_pushinteger(L, 42);
             assert!(matches!(
-                Reply::from_lua(L, -1).unwrap(),
+                Reply::from_lua(lua_state, 1).unwrap(),
+                Reply::Nothing
+            ));
+            lua_pushinteger(lua_state, 42);
+            assert!(matches!(
+                Reply::from_lua(lua_state, -1).unwrap(),
                 Reply::Number { value: 42 }
             ));
 
-            push_int_table(L, &[("a", 7), ("b", 9)]);
-            match Reply::from_lua(L, -1).unwrap() {
+            push_int_table(lua_state, &[("a", 7), ("b", 9)]);
+            match Reply::from_lua(lua_state, -1).unwrap() {
                 Reply::Table(value) => assert_eq!(value, ContainerDefaults { a: 7, b: 9 }),
                 _ => panic!("返回值分支错误"),
             }
-            assert_eq!(lua_gettop(L), 2);
-            lua_settop(L, 0);
+            assert_eq!(lua_gettop(lua_state), 2);
+            lua_settop(lua_state, 0);
 
-            vec![0u8, 255, 1].push_lua(L);
-            match Reply::from_lua(L, 1).unwrap() {
+            vec![0u8, 255, 1].push_lua(lua_state);
+            match Reply::from_lua(lua_state, 1).unwrap() {
                 Reply::Body(bytes) => assert_eq!(bytes, [0, 255, 1]),
                 _ => panic!("返回值分支错误"),
             }
-            lua_settop(L, 0);
-            Nil.push_lua(L);
-            "callback error".push_lua(L);
-            match Reply::from_lua(L, -2).unwrap() {
+            lua_settop(lua_state, 0);
+            Nil.push_lua(lua_state);
+            "callback error".push_lua(lua_state);
+            match Reply::from_lua(lua_state, -2).unwrap() {
                 Reply::Empty(_, Some(error)) => assert_eq!(error, "callback error"),
                 _ => panic!("返回值分支错误"),
             }
-            assert_eq!(lua_gettop(L), 2);
+            assert_eq!(lua_gettop(lua_state), 2);
         });
     }
 
     #[test]
     fn failed_nested_conversion_restores_stack_and_allows_retry() {
-        with_state(|L| unsafe {
-            lua_createtable(L, 0, 1);
-            "bad".push_lua(L);
-            lua_setfield(L, -2, c"a".as_ptr());
-            assert!(CallbackReply::<ContainerDefaults>::from_lua(L, -1).is_err());
-            assert_eq!(lua_gettop(L), 1);
+        with_state(|lua_state| unsafe {
+            lua_createtable(lua_state, 0, 1);
+            "bad".push_lua(lua_state);
+            lua_setfield(lua_state, -2, c"a".as_ptr());
+            assert!(CallbackReply::<ContainerDefaults>::from_lua(lua_state, -1).is_err());
+            assert_eq!(lua_gettop(lua_state), 1);
 
-            10i64.push_lua(L);
-            lua_setfield(L, -2, c"a".as_ptr());
-            let value = ContainerDefaults::from_lua(L, -1).unwrap();
+            10i64.push_lua(lua_state);
+            lua_setfield(lua_state, -2, c"a".as_ptr());
+            let value = ContainerDefaults::from_lua(lua_state, -1).unwrap();
             assert_eq!(value.a, 10);
-            assert_eq!(lua_gettop(L), 1);
+            assert_eq!(lua_gettop(lua_state), 1);
         });
     }
 
@@ -972,36 +984,36 @@ mod derive_tests {
         struct Other;
         impl UserData for Other {}
 
-        with_state(|L| unsafe {
-            push(L, Value);
-            let guard = try_check::<Value>(L, -1).unwrap();
-            assert!(try_check_shared::<Value>(L, 1).is_err());
-            assert!(try_check::<Value>(L, 1).is_err());
-            assert_eq!(lua_gettop(L), 1);
+        with_state(|lua_state| unsafe {
+            push(lua_state, Value);
+            let guard = try_check::<Value>(lua_state, -1).unwrap();
+            assert!(try_check_shared::<Value>(lua_state, 1).is_err());
+            assert!(try_check::<Value>(lua_state, 1).is_err());
+            assert_eq!(lua_gettop(lua_state), 1);
             drop(guard);
-            assert!(try_check::<Value>(L, 1).is_ok());
+            assert!(try_check::<Value>(lua_state, 1).is_ok());
 
-            push(L, Other);
-            assert!(try_check::<Value>(L, -1).is_err());
-            assert!(try_check_shared::<Value>(L, -1).is_err());
-            assert_eq!(lua_gettop(L), 2);
+            push(lua_state, Other);
+            assert!(try_check::<Value>(lua_state, -1).is_err());
+            assert!(try_check_shared::<Value>(lua_state, -1).is_err());
+            assert_eq!(lua_gettop(lua_state), 2);
         });
     }
 
     #[test]
     fn typed_callback_keeps_arguments_and_results_alive_across_yield() {
-        with_state(|L| unsafe {
-            crate::libs::open_cosmos(L);
+        with_state(|lua_state| unsafe {
+            crate::libs::open_cosmos(lua_state);
             assert_eq!(
                 luaL_loadstring(
-                    L,
+                    lua_state,
                     c"return function(value) cosmos.sleep(1); return nil, value end".as_ptr()
                 ),
                 0
             );
-            assert_eq!(lua_pcall(L, 0, 1, 0), 0);
-            let callback = LuaFunction::from_lua(L, -1).unwrap();
-            lua_settop(L, 0);
+            assert_eq!(lua_pcall(lua_state, 0, 1, 0), 0);
+            let callback = LuaFunction::from_lua(lua_state, -1).unwrap();
+            lua_settop(lua_state, 0);
             let runtime = tokio::runtime::Builder::new_current_thread()
                 .enable_time()
                 .build()
@@ -1015,7 +1027,7 @@ mod derive_tests {
                 CallbackReply::Empty(_, Some(value)) => assert_eq!(value, "yielded"),
                 _ => panic!("返回值分支错误"),
             }
-            assert_eq!(lua_gettop(L), 0);
+            assert_eq!(lua_gettop(lua_state), 0);
             drop(local);
         });
     }

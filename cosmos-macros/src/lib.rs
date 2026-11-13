@@ -169,10 +169,10 @@ fn gen_method(
             }
             let binding = match (&r.reference, &r.mutability) {
                 (Some(_), None) => {
-                    quote!(let this = cosmos::userdata::try_check_shared::<#ty>(L, 1)?;)
+                    quote!(let this = cosmos::userdata::try_check_shared::<#ty>(lua_state, 1)?;)
                 }
                 (Some(_), Some(_)) => {
-                    quote!(let mut this = cosmos::userdata::try_check::<#ty>(L, 1)?;)
+                    quote!(let mut this = cosmos::userdata::try_check::<#ty>(lua_state, 1)?;)
                 }
                 _ => return err(r, "only &self and &mut self receivers are supported"),
             };
@@ -208,7 +208,7 @@ fn gen_method(
         arg_n += 1;
         arg_idents.push(ident.clone());
         arg_conversions.push(quote! {
-            let #ident = <#arg_ty as cosmos::userdata::FromLua>::from_lua(L, #stack_idx)?;
+            let #ident = <#arg_ty as cosmos::userdata::FromLua>::from_lua(lua_state, #stack_idx)?;
         });
         stack_idx += 1;
     }
@@ -236,13 +236,13 @@ fn gen_method(
         quote! {
             #[allow(non_snake_case)]
             unsafe extern "C" fn #tramp_ident(
-                L: *mut cosmos::ffi::lua_State,
+                lua_state: *mut cosmos::ffi::lua_State,
             ) -> cosmos::ffi::c_int {
-                cosmos::userdata::trampoline(L, |L| unsafe {
+                cosmos::userdata::trampoline(lua_state, |lua_state| unsafe {
                     #self_binding
                     #(#arg_conversions)*
                     Ok(cosmos::coroutine::yield_with(
-                        L,
+                        lua_state,
                         Box::pin(async move { #call.await }),
                     ))
                 })
@@ -254,19 +254,19 @@ fn gen_method(
         let ret_conv = match &sig.output {
             ReturnType::Default => quote! {
                 let ret = #call;
-                Ok(<() as cosmos::userdata::PushLua>::push_lua(ret, L))
+                Ok(<() as cosmos::userdata::PushLua>::push_lua(ret, lua_state))
             },
             ReturnType::Type(_, ret_ty) => quote! {
                 let ret = #call;
-                Ok(<#ret_ty as cosmos::userdata::PushLua>::push_lua(ret, L))
+                Ok(<#ret_ty as cosmos::userdata::PushLua>::push_lua(ret, lua_state))
             },
         };
         quote! {
             #[allow(non_snake_case)]
             unsafe extern "C" fn #tramp_ident(
-                L: *mut cosmos::ffi::lua_State,
+                lua_state: *mut cosmos::ffi::lua_State,
             ) -> cosmos::ffi::c_int {
-                cosmos::userdata::trampoline(L, |L| unsafe {
+                cosmos::userdata::trampoline(lua_state, |lua_state| unsafe {
                     #self_binding
                     #(#arg_conversions)*
                     #ret_conv
@@ -434,9 +434,9 @@ fn expand_from_lua(input: &DeriveInput) -> syn::Result<proc_macro2::TokenStream>
             if key == &#key[..] {
                 // 传绝对下标：嵌套 from_lua 可能先 push 再按 idx 取表（如 Headers），
                 // 负下标此时会指向新压入的值
-                let value_idx = cosmos::ffi::lua_gettop(L);
+                let value_idx = cosmos::ffi::lua_gettop(lua_state);
                 #s = ::core::option::Option::Some(
-                    <#ty as cosmos::userdata::FromLua>::from_lua(L, value_idx)?,
+                    <#ty as cosmos::userdata::FromLua>::from_lua(lua_state, value_idx)?,
                 );
             }
         }
@@ -482,16 +482,16 @@ fn expand_from_lua(input: &DeriveInput) -> syn::Result<proc_macro2::TokenStream>
         quote!()
     } else {
         quote! {
-            cosmos::ffi::lua_pushnil(L);
-            while cosmos::ffi::lua_next(L, idx) != 0 {
-                if cosmos::ffi::lua_type(L, -2) == cosmos::ffi::LUA_TSTRING {
+            cosmos::ffi::lua_pushnil(lua_state);
+            while cosmos::ffi::lua_next(lua_state, idx) != 0 {
+                if cosmos::ffi::lua_type(lua_state, -2) == cosmos::ffi::LUA_TSTRING {
                     let mut key_len: cosmos::ffi::size_t = 0;
-                    let key_ptr = cosmos::ffi::lua_tolstring(L, -2, &mut key_len);
+                    let key_ptr = cosmos::ffi::lua_tolstring(lua_state, -2, &mut key_len);
                     let key: &[u8] =
                         ::core::slice::from_raw_parts(key_ptr as *const u8, key_len);
                     #(#checks)*
                 }
-                cosmos::ffi::lua_settop(L, -2);
+                cosmos::ffi::lua_settop(lua_state, -2);
             }
         }
     };
@@ -499,12 +499,12 @@ fn expand_from_lua(input: &DeriveInput) -> syn::Result<proc_macro2::TokenStream>
     Ok(quote! {
         impl cosmos::userdata::FromLua for #name {
             unsafe fn from_lua(
-                L: *mut cosmos::ffi::lua_State,
+                lua_state: *mut cosmos::ffi::lua_State,
                 idx: cosmos::ffi::c_int,
             ) -> ::core::result::Result<Self, ::std::string::String> {
-                let idx = cosmos::stack::abs_index(L, idx);
-                let __cosmos_top = cosmos::ffi::lua_gettop(L);
-                if cosmos::ffi::lua_type(L, idx) != cosmos::ffi::LUA_TTABLE {
+                let idx = cosmos::stack::abs_index(lua_state, idx);
+                let __cosmos_top = cosmos::ffi::lua_gettop(lua_state);
+                if cosmos::ffi::lua_type(lua_state, idx) != cosmos::ffi::LUA_TTABLE {
                     return ::core::result::Result::Err(::std::format!(
                         "argument {}: expected table", idx
                     ));
@@ -515,7 +515,7 @@ fn expand_from_lua(input: &DeriveInput) -> syn::Result<proc_macro2::TokenStream>
                     #scan
                     Ok(Self { #(#values),* })
                 })();
-                cosmos::ffi::lua_settop(L, __cosmos_top);
+                cosmos::ffi::lua_settop(lua_state, __cosmos_top);
                 __cosmos_result
             }
         }
@@ -594,7 +594,7 @@ fn expand_from_lua_enum(input: &DeriveInput) -> syn::Result<proc_macro2::TokenSt
             .map(|(i, field)| {
                 let ty = &field.ty;
                 let offset = i as i32;
-                quote!(<#ty as cosmos::userdata::FromLua>::from_lua(L, idx + #offset)?)
+                quote!(<#ty as cosmos::userdata::FromLua>::from_lua(lua_state, idx + #offset)?)
             })
             .collect();
         let construct = match &variant.fields {
@@ -621,18 +621,18 @@ fn expand_from_lua_enum(input: &DeriveInput) -> syn::Result<proc_macro2::TokenSt
     Ok(quote! {
         impl #impl_generics cosmos::userdata::FromLua for #name #ty_generics #where_clause {
             unsafe fn from_lua(
-                L: *mut cosmos::ffi::lua_State,
+                lua_state: *mut cosmos::ffi::lua_State,
                 idx: cosmos::ffi::c_int,
             ) -> ::core::result::Result<Self, ::std::string::String> {
-                let idx = cosmos::stack::abs_index(L, idx);
-                let __cosmos_top = cosmos::ffi::lua_gettop(L);
+                let idx = cosmos::stack::abs_index(lua_state, idx);
+                let __cosmos_top = cosmos::ffi::lua_gettop(lua_state);
                 let __cosmos_result = (|| {
-                    match cosmos::ffi::lua_type(L, idx) {
+                    match cosmos::ffi::lua_type(lua_state, idx) {
                         #(#arms,)*
                         #fallback,
                     }
                 })();
-                cosmos::ffi::lua_settop(L, __cosmos_top);
+                cosmos::ffi::lua_settop(lua_state, __cosmos_top);
                 __cosmos_result
             }
         }
@@ -661,16 +661,16 @@ fn expand_push_lua(input: &DeriveInput) -> syn::Result<proc_macro2::TokenStream>
         let cstr = std::ffi::CString::new(f.key.clone()).expect("field name contains NUL");
         let cname = Literal::c_string(&cstr);
         quote! {
-            <#ty as cosmos::userdata::PushLua>::push_lua(self.#ident, L);
-            cosmos::ffi::lua_setfield(L, -2, #cname.as_ptr());
+            <#ty as cosmos::userdata::PushLua>::push_lua(self.#ident, lua_state);
+            cosmos::ffi::lua_setfield(lua_state, -2, #cname.as_ptr());
         }
     });
 
     Ok(quote! {
         impl cosmos::userdata::PushLua for #name {
-            fn push_lua(self, L: *mut cosmos::ffi::lua_State) -> cosmos::ffi::c_int {
+            fn push_lua(self, lua_state: *mut cosmos::ffi::lua_State) -> cosmos::ffi::c_int {
                 unsafe {
-                    cosmos::ffi::lua_createtable(L, 0, #n as cosmos::ffi::c_int);
+                    cosmos::ffi::lua_createtable(lua_state, 0, #n as cosmos::ffi::c_int);
                     #(#sets)*
                 }
                 1
@@ -722,15 +722,15 @@ fn expand_push_lua_enum(input: &DeriveInput) -> syn::Result<proc_macro2::TokenSt
         };
         let pushes = variant.fields.iter().enumerate().map(|(i, _)| {
             let binding = format_ident!("__field_{i}");
-            quote!(+ cosmos::userdata::PushLua::push_lua(#binding, L))
+            quote!(+ cosmos::userdata::PushLua::push_lua(#binding, lua_state))
         });
-        // `0 + a.push_lua(L) + b.push_lua(L)`：操作数从左到右求值，保证压栈顺序
+        // `0 + a.push_lua(lua_state) + b.push_lua(lua_state)`：操作数从左到右求值，保证压栈顺序
         arms.push(quote!(#pattern => 0i32 #(#pushes)*));
     }
 
     Ok(quote! {
         impl #impl_generics cosmos::userdata::PushLua for #name #ty_generics #where_clause {
-            fn push_lua(self, L: *mut cosmos::ffi::lua_State) -> cosmos::ffi::c_int {
+            fn push_lua(self, lua_state: *mut cosmos::ffi::lua_State) -> cosmos::ffi::c_int {
                 match self {
                     #(#arms),*
                 }

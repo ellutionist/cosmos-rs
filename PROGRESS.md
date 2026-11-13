@@ -148,3 +148,54 @@
 - 提交前 `git diff --check` 通过；构建、15 项单元测试与 examples 回归沿用上一轮已完成的验证结果。
 - 外部路径依赖 `../cosmos-ext-demo` 不属于本仓库，其同步迁移的两行改动不在本次 Git 提交内。
 - 下一步等待用户安排；未执行 push。
+
+
+## 2026-11-13 Thread 与文件重命名为 LightThread
+
+### 核心逻辑
+
+- 将句柄类型 `Thread` 改为 `LightThread`，文件 `thread.rs` 改为 `light_thread.rs`；
+  Rust 路径为 `cosmos::light_thread::LightThread`，同步更新宿主注册与模块构造引用。
+- 使用 `#[cosmos::userdata(name = "LightThread")]` 显式指定 Lua 类型表 `cosmos.LightThread`。
+- 同步更新 AGENTS.md 的运行时模块列表和 HANDOFF.md 的代码地图。
+- 本轮只做类型/文件重命名；`LuaCoroutine`、原有执行与句柄分层、`cosmos.thread.spawn/wait` 保持原样。
+
+### 验证与下一步
+
+- `cargo build`、`cargo test --workspace`（15 项）通过。
+- 实际验证 `require("cosmos.LightThread")` 与 spawn 返回值的 metatable 一致，join 正常。
+- 实际运行 `examples/spawn.lua`、`ext.lua`、`http.lua`、`websocket.lua` 全部通过。
+- 未 commit / push，等待用户安排。
+
+
+## 2026-11-13 Lua 状态指针统一使用 Rust 命名
+
+### 核心逻辑
+
+- 按用户最新要求，将运行时、桥接层、宿主、FFI 参数及外部扩展示例中的状态指针
+  `L` 改为 `lua_state`，未使用的 `_L` 改为 `_lua_state`。
+- userdata trampoline、FromLua/PushLua derive 同步生成 `lua_state`；内部锚定对象的同名字段、
+  相关注释和交接文档一并更新。
+- 撤销上一轮未完成方案新增的 non_snake_case 豁免；宏原有的两处 trampoline 函数名豁免保留，
+  它们用于生成函数名中包含 Rust 类型名的场景，不用于屏蔽状态变量警告。
+- 重命名区分 Rust 标识符与字符串/字符字面量，保留 TCP `"L"` / `"*L"` 等协议参数。
+  枚举回归字段也改为 `lua_state`，继续验证与宏参数同名时的绑定隔离。
+- 保留此前 LightThread 重命名与原有实现分层；没有改变执行流程或新增依赖。
+
+### 验证与下一步
+
+- `cargo build`、`cargo test --workspace`（15 项）通过。
+- Clippy 完整工作区命名检查通过：检查命令仅临时使用
+  `-A clippy::not_unsafe_ptr_arg_deref -D non_snake_case` 绕过原有裸指针 API 错误，让所有 crate
+  完成诊断；non_snake_case 数量为 0。该参数没有写入项目配置。
+- 标准 Clippy 原有的 `not_unsafe_ptr_arg_deref` 错误不是本轮命名修改的范围，保留原规则。
+- 实际运行 websocket、http、userdata、spawn、ext、sleep、TCP/TLS 单进程与双进程回归；
+  error.lua 按预期退出 1。
+- 已更新 AGENTS.md 的状态指针命名约定与 HANDOFF.md，本轮未 commit / push。
+
+
+## 2026-11-13 提交命名整理
+
+- 按用户要求，先将 LightThread 类型/文件重命名、lua_state 变量命名及相关文档提交到本地 Git。
+- 提交前差异检查通过；构建、15 项单元测试和 examples 回归沿用上一轮已完成的结果。
+- 外部扩展示例的同步改动不属于本仓库；本次未 push。下一步检查并修复剩余 Clippy 诊断。
