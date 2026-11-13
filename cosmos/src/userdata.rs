@@ -20,6 +20,7 @@
 use std::any::TypeId;
 use std::cell::{Ref, RefCell, RefMut};
 use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::ffi::CString;
 use std::fmt::Display;
 use std::marker::PhantomData;
@@ -75,13 +76,23 @@ thread_local! {
 
 const MAIN_STATE_KEY: &std::ffi::CStr = c"__cosmos_main_state";
 
+/// VM 是否还活着：lua_close 之后挂着未 drop 的锚定对象（LuaFunction /
+/// 挂起的 LuaCoroutine）会因为任务延后回收而在已释放的状态上 luaL_unref。
+/// Drop 里查这个标志，已关闭则直接放弃释放（进程即将退出，泄漏无害）
+static VM_ALIVE: AtomicBool = AtomicBool::new(false);
+
+pub(crate) fn vm_alive() -> bool {
+    VM_ALIVE.load(Ordering::Relaxed)
+}
+
 /// 状态初始化：把主状态指针锚定进 registry，必须早于任何 push 调用
 pub unsafe fn init(L: *mut lua_State) {
     lua_pushlightuserdata(L, L as *mut c_void);
     lua_setfield(L, LUA_REGISTRYINDEX, MAIN_STATE_KEY.as_ptr());
+    VM_ALIVE.store(true, Ordering::Relaxed);
 }
 
-unsafe fn main_state(L: *mut lua_State) -> *mut lua_State {
+pub unsafe fn main_state(L: *mut lua_State) -> *mut lua_State {
     lua_getfield(L, LUA_REGISTRYINDEX, MAIN_STATE_KEY.as_ptr());
     let p = lua_touserdata(L, -1);
     lua_settop(L, -2);
@@ -260,6 +271,7 @@ pub fn cleanup(L: *mut lua_State) {
             m.borrow_mut().remove(&main);
         });
     }
+    VM_ALIVE.store(false, Ordering::Relaxed);
 }
 
 /// 方法参数：从 Lua 栈取值
@@ -409,6 +421,50 @@ impl<T: FromLua> FromLua for Option<T> {
         match lua_type(L, idx) {
             LUA_TNONE | LUA_TNIL => Ok(None),
             _ => Ok(Some(T::from_lua(L, idx)?)),
+        }
+    }
+}
+
+/// Lua 函数引用：参数需要在调用返回后继续存活（如 HTTP handler）时使用。
+/// 锚定在 registry（luaL_ref），可跨 yield、跨协程使用；Drop 时解除锚定。
+/// 借用 VM 的单线程约束与 lua_State 相同。
+pub struct LuaFunction {
+    main: *mut lua_State,
+    registry_ref: c_int,
+}
+
+impl LuaFunction {
+    /// 把函数压到 target 栈顶（target 可以是同一 VM 里的任意协程）
+    pub unsafe fn push_to(&self, target: *mut lua_State) {
+        lua_rawgeti(target, LUA_REGISTRYINDEX, self.registry_ref);
+    }
+
+    pub fn registry_ref(&self) -> c_int {
+        self.registry_ref
+    }
+
+    /// 创建时所属的主状态（跨协程调用时 registry 操作的稳妥锚点）
+    pub fn main(&self) -> *mut lua_State {
+        self.main
+    }
+}
+
+impl FromLua for LuaFunction {
+    unsafe fn from_lua(L: *mut lua_State, idx: c_int) -> Result<Self, String> {
+        if lua_type(L, idx) != LUA_TFUNCTION {
+            return Err(format!("argument {idx}: expected function"));
+        }
+        let main = main_state(L);
+        lua_pushvalue(L, idx);
+        let registry_ref = luaL_ref(L, LUA_REGISTRYINDEX);
+        Ok(LuaFunction { main, registry_ref })
+    }
+}
+
+impl Drop for LuaFunction {
+    fn drop(&mut self) {
+        if vm_alive() {
+            unsafe { luaL_unref(self.main, LUA_REGISTRYINDEX, self.registry_ref) };
         }
     }
 }

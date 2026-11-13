@@ -57,6 +57,8 @@ extern "C" {
     pub fn lua_pushnil(L: *mut lua_State);
     pub fn lua_pushlstring(L: *mut lua_State, s: *const c_char, len: size_t);
     pub fn lua_pushvalue(L: *mut lua_State, idx: c_int);
+    pub fn lua_rawgeti(L: *mut lua_State, idx: c_int, n: c_int);
+    pub fn lua_next(L: *mut lua_State, idx: c_int) -> c_int;
     pub fn lua_pushlightuserdata(L: *mut lua_State, p: *mut c_void);
     pub fn lua_pushcclosure(L: *mut lua_State, f: lua_CFunction, n: c_int);
     pub fn lua_createtable(L: *mut lua_State, narr: c_int, nrec: c_int);

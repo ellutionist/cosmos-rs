@@ -1,6 +1,7 @@
-//! cosmos-network：基于 cosmos 运行时的网络库（tcp / tls）
+//! cosmos-network：基于 cosmos 运行时的网络库（tcp / tls / http）
 
 mod error;
+mod http;
 mod tcp;
 mod tls;
 
@@ -13,4 +14,5 @@ pub const LUA_SOURCES: &[(&str, &str)] = &[("cosmos.network.tcp", include_str!("
 pub unsafe fn register(L: *mut lua_State) {
     tcp::register(L);
     tls::register(L);
+    http::register(L);
 }

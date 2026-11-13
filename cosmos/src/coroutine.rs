@@ -115,13 +115,21 @@ impl LuaCoroutine {
             _not_send: PhantomData,
         }
     }
+
+    /// 绑定的协程状态（完成后读返回值用；在 Drop 前有效）
+    pub fn state(&self) -> *mut lua_State {
+        self.thread
+    }
 }
 
 impl Drop for LuaCoroutine {
     fn drop(&mut self) {
         // LuaJIT 的 lua_close 只接受主线程，协程线程靠 GC 回收——摘掉锚点即可。
-        // 被取消（future 被 drop）时协程正挂起，同样适用
-        unsafe { luaL_unref(self.thread, LUA_REGISTRYINDEX, self.registry_ref) };
+        // 被取消（future 被 drop）时协程正挂起，同样适用。
+        // VM 已关闭则跳过：任务可能在 lua_close 之后才被 runtime 回收
+        if crate::userdata::vm_alive() {
+            unsafe { luaL_unref(self.thread, LUA_REGISTRYINDEX, self.registry_ref) };
+        }
     }
 }
 

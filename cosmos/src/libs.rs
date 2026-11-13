@@ -40,12 +40,21 @@ unsafe extern "C" fn now_ms_impl(L: *mut lua_State) -> c_int {
     1
 }
 
+/// 微秒级单调时钟（压测/单请求计时用，f64 在 2^53µs ≈ 285 年内精确）
+unsafe extern "C" fn now_us_impl(L: *mut lua_State) -> c_int {
+    let start = START.get_or_init(Instant::now);
+    lua_pushnumber(L, start.elapsed().as_micros() as f64);
+    1
+}
+
 pub unsafe fn open_cosmos(L: *mut lua_State) {
-    lua_createtable(L, 0, 2);
+    lua_createtable(L, 0, 3);
     lua_pushcclosure(L, sleep_impl, 0);
     lua_setfield(L, -2, c"sleep".as_ptr());
     lua_pushcclosure(L, now_ms_impl, 0);
     lua_setfield(L, -2, c"now_ms".as_ptr());
+    lua_pushcclosure(L, now_us_impl, 0);
+    lua_setfield(L, -2, c"now_us".as_ptr());
     crate::thread::open(L);
     lua_setfield(L, -2, c"thread".as_ptr());
     lua_setfield(L, LUA_GLOBALSINDEX, c"cosmos".as_ptr());

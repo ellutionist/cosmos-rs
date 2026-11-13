@@ -80,6 +80,15 @@ impl TlsIo {
         }
         .and_then(|certs| certs.first().cloned())
     }
+
+    /// 握手后 ALPN 是否协商为 h2（HTTP 客户端的 h2 连接池判断用）
+    pub(crate) fn negotiated_h2(&self) -> bool {
+        let alpn = match self {
+            TlsIo::Client(s) => s.get_ref().1.alpn_protocol(),
+            TlsIo::Server(s) => s.get_ref().1.alpn_protocol(),
+        };
+        alpn == Some(b"h2")
+    }
 }
 
 impl AsyncWrite for TlsIo {
@@ -123,32 +132,7 @@ impl Tls {
         timeout_ms: Option<i64>,
         ctx: Option<ClientCfg>,
     ) -> Result<TlsConn, String> {
-        let config = match ctx {
-            Some(ClientCfg(c)) => c,
-            None => default_client_config(),
-        };
-        let server_name = ServerName::try_from(host.clone())
-            .map_err(|e| format!("invalid server name '{host}': {e}"))?;
-        let deadline = timeout_ms
-            .and_then(timeout_from_ms)
-            .map(|d| Instant::now() + d);
-
-        let tcp = match with_deadline(deadline, TcpStream::connect((host.as_str(), port as u16)))
-            .await
-        {
-            Ok(Ok(s)) => s,
-            Ok(Err(e)) => return Err(classify_io(&e)),
-            Err(()) => return Err("timeout".to_string()),
-        };
-        let stream =
-            match with_deadline(deadline, TlsConnector::from(config).connect(server_name, tcp)).await
-            {
-                Ok(Ok(s)) => s,
-                Ok(Err(e)) => return Err(classify_io(&e)),
-                Err(()) => return Err("timeout".to_string()),
-            };
-
-        let io = TlsIo::Client(stream);
+        let io = connect_tls_io(&host, port as u16, timeout_ms, ctx).await?;
         Ok(TlsConn {
             peer_cert: io.peer_cert(),
             stream: Some(io),
@@ -174,6 +158,38 @@ impl Tls {
             timeout: timeout_ms.and_then(timeout_from_ms),
         })
     }
+}
+
+/// 建立 TLS 客户端流（TCP + 握手共用一个 deadline）；Tls.connect 与 HTTP client 共用
+pub(crate) async fn connect_tls_io(
+    host: &str,
+    port: u16,
+    timeout_ms: Option<i64>,
+    ctx: Option<ClientCfg>,
+) -> Result<TlsIo, String> {
+    let config = match ctx {
+        Some(ClientCfg(c)) => c,
+        None => default_client_config(),
+    };
+    let server_name = ServerName::try_from(host.to_string())
+        .map_err(|e| format!("invalid server name '{host}': {e}"))?;
+    let deadline = timeout_ms
+        .and_then(timeout_from_ms)
+        .map(|d| Instant::now() + d);
+
+    let tcp = match with_deadline(deadline, TcpStream::connect((host, port))).await {
+        Ok(Ok(s)) => s,
+        Ok(Err(e)) => return Err(classify_io(&e)),
+        Err(()) => return Err("timeout".to_string()),
+    };
+    let stream = match with_deadline(deadline, TlsConnector::from(config).connect(server_name, tcp))
+        .await
+    {
+        Ok(Ok(s)) => s,
+        Ok(Err(e)) => return Err(classify_io(&e)),
+        Err(()) => return Err("timeout".to_string()),
+    };
+    Ok(TlsIo::Client(stream))
 }
 
 /// 配置对象（对应 C++ ssl_ctx）：所有 setter 都会让已构建的配置失效，
@@ -391,7 +407,7 @@ impl TlsContext {
 }
 
 /// connect 的 ctx 参数：从 userdata 取（或懒构建）客户端配置快照
-pub struct ClientCfg(Arc<ClientConfig>);
+pub(crate) struct ClientCfg(pub(crate) Arc<ClientConfig>);
 
 impl FromLua for ClientCfg {
     unsafe fn from_lua(L: *mut lua_State, idx: i32) -> Result<Self, String> {
@@ -401,7 +417,7 @@ impl FromLua for ClientCfg {
 }
 
 /// listen 的 ctx 参数：同上，取服务端配置
-pub struct ServerCfg(Arc<ServerConfig>);
+pub(crate) struct ServerCfg(pub(crate) Arc<ServerConfig>);
 
 impl FromLua for ServerCfg {
     unsafe fn from_lua(L: *mut lua_State, idx: i32) -> Result<Self, String> {
