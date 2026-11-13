@@ -1,7 +1,7 @@
 //! HTTP 服务端：hyper auto (h1/h2) 驱动连接，每个请求跑一个 Lua 协程。
 //!
 //! Lua 侧：
-//!   local HttpServer = require("cosmos.HttpServer")
+//!   local HttpServer = require("cosmos.network.http.server")
 //!   local srv = assert(HttpServer.listen("0.0.0.0", 8080, function(req)
 //!     -- req: method()/path()/target()/version()/headers()/header(name)/
 //!     --      body()/remote_addr()
@@ -57,34 +57,12 @@ where
     }
 }
 
-/// listen 的第四个参数（options table）
-#[derive(Default)]
+/// listen 的第四个参数（options table），逐字段读取由 derive(FromLua) 生成
+#[derive(Default, cosmos::FromLua)]
+#[lua(default)]
 pub(crate) struct ServerOptions {
     max_body: Option<i64>,
     tls: Option<ServerCfg>,
-}
-
-impl FromLua for ServerOptions {
-    unsafe fn from_lua(L: *mut lua_State, idx: c_int) -> Result<Self, String> {
-        let mut opts = ServerOptions::default();
-        if lua_type(L, idx) != LUA_TTABLE {
-            return Err(format!("argument {idx}: expected options table"));
-        }
-        lua_pushnil(L);
-        while lua_next(L, idx) != 0 {
-            if lua_type(L, -2) == LUA_TSTRING && lua_type(L, -1) != LUA_TNIL {
-                let key = take_string(L, -2);
-                let top = lua_gettop(L);
-                match key.as_str() {
-                    "max_body" => opts.max_body = Some(lua_tointeger(L, top) as i64),
-                    "tls" => opts.tls = Some(ServerCfg::from_lua(L, top)?),
-                    _ => {}
-                }
-            }
-            lua_settop(L, -2);
-        }
-        Ok(opts)
-    }
 }
 
 /// 服务端共享状态：主状态 + 锚定的 handler；Rc 由 accept 循环与各连接共同持有
@@ -105,7 +83,7 @@ pub struct HttpRequest {
     remote: String,
 }
 
-#[cosmos::userdata]
+#[cosmos::userdata(name = "network.http.request")]
 impl HttpRequest {
     fn method(&self) -> String {
         self.method.clone()
@@ -142,47 +120,23 @@ impl HttpRequest {
     }
 }
 
-/// handler 的返回值：table { status, headers, body }
+/// handler 的返回值：table { status, headers, body }，
+/// 缺省按 `RespSpec::default()`（200 + 空头 + 空 body）取值
+#[derive(cosmos::FromLua)]
+#[lua(default)]
 pub(crate) struct RespSpec {
     status: u16,
     headers: Headers,
-    body: Vec<u8>,
+    body: LuaBytes,
 }
 
 impl Default for RespSpec {
     fn default() -> Self {
         RespSpec {
             status: 200,
-            headers: Headers(Vec::new()),
-            body: Vec::new(),
+            headers: Headers::default(),
+            body: LuaBytes::default(),
         }
-    }
-}
-
-impl FromLua for RespSpec {
-    unsafe fn from_lua(L: *mut lua_State, idx: c_int) -> Result<Self, String> {
-        let mut spec = RespSpec::default();
-        lua_pushnil(L);
-        while lua_next(L, idx) != 0 {
-            if lua_type(L, -2) == LUA_TSTRING && lua_type(L, -1) != LUA_TNIL {
-                let key = take_string(L, -2);
-                let top = lua_gettop(L);
-                match key.as_str() {
-                    "status" => {
-                        let s = lua_tointeger(L, top) as i64;
-                        if !(100..=999).contains(&s) {
-                            return Err(format!("invalid response status {s}"));
-                        }
-                        spec.status = s as u16;
-                    }
-                    "headers" => spec.headers = Headers::from_lua(L, top)?,
-                    "body" => spec.body = take_bytes(L, top),
-                    _ => {}
-                }
-            }
-            lua_settop(L, -2);
-        }
-        Ok(spec)
     }
 }
 
@@ -204,7 +158,7 @@ impl RespSpec {
             builder = builder.header(name, value);
         }
         builder
-            .body(Full::new(Bytes::from(self.body)))
+            .body(Full::new(self.body.0))
             .unwrap_or_else(|_| plain_response(StatusCode::INTERNAL_SERVER_ERROR, "bad response"))
     }
 }
@@ -314,8 +268,8 @@ unsafe fn read_handler_return(L: *mut lua_State) -> Result<RespSpec, String> {
         // 直接返回字符串：200 + 原文
         LUA_TSTRING => Ok(RespSpec {
             status: 200,
-            headers: Headers(Vec::new()),
-            body: take_bytes(L, 1),
+            headers: Headers::default(),
+            body: LuaBytes(Bytes::from(take_bytes(L, 1))),
         }),
         // handler 里 assert 失败等会返回 nil, err
         LUA_TNIL => {
@@ -379,7 +333,7 @@ pub struct HttpServerHandle {
     port: u16,
 }
 
-#[cosmos::userdata]
+#[cosmos::userdata(name = "network.http.handle")]
 impl HttpServerHandle {
     fn close(&mut self) {
         if let Some(task) = self.task.take() {
@@ -397,7 +351,7 @@ impl HttpServerHandle {
 ///   HttpServer.listen(host, port, handler, opts?) → handle
 pub struct HttpServer;
 
-#[cosmos::userdata]
+#[cosmos::userdata(name = "network.http.server")]
 impl HttpServer {
     /// opts 里给 tls = server_ctx 即启用 HTTPS（证书/私钥在该 ctx 上设置）
     async fn listen(

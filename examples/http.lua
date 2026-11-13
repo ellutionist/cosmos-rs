@@ -1,10 +1,10 @@
 -- HTTP 模块端到端测试：同一进程里起 server + 发 client 请求（靠协程交错）
 -- 运行：cargo run -- examples/http.lua
 
-local HttpServer = require("cosmos.HttpServer")
-local HttpClient = require("cosmos.HttpClient")
-local TlsContext = require("cosmos.TlsContext")
-local Tcp = require("cosmos.Tcp")
+local HttpServer = require("cosmos.network.http.server")
+local HttpClient = require("cosmos.network.http.client")
+local TlsContext = require("cosmos.network.tcp.tls.context")
+local Tcp = require("cosmos.network.tcp.stream")
 
 local failures = 0
 -- Result<(), E> 成功时压 0 个值，不能直接 assert

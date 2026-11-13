@@ -7,6 +7,10 @@
 //!     fn get(&self) -> i64 { ... }
 //!     fn inc(&mut self, by: i64) -> i64 { ... }
 //! }
+//!
+//! // 自定义 Lua require 路径（默认是类型名，如 require("cosmos.Counter")）
+//! #[cosmos::userdata(name = "http.client")]
+//! impl HttpClient { ... }
 //! ```
 //!
 //! 每个方法生成一个 extern "C" trampoline（参数转换 / panic 捕获 /
@@ -18,10 +22,17 @@
 use proc_macro::TokenStream;
 use proc_macro2::Literal;
 use quote::{format_ident, quote};
-use syn::{parse_macro_input, spanned::Spanned, FnArg, ImplItem, ItemImpl, PatType, ReturnType, Type};
+use syn::{
+    parse_macro_input, spanned::Spanned, Data, DataStruct, DeriveInput, Field, Fields, FnArg,
+    ImplItem, ItemImpl, LitByteStr, LitStr, PatType, ReturnType, Type,
+};
 
 #[proc_macro_attribute]
-pub fn userdata(_attr: TokenStream, item: TokenStream) -> TokenStream {
+pub fn userdata(attr: TokenStream, item: TokenStream) -> TokenStream {
+    let name_override = match parse_userdata_attr(attr.into()) {
+        Ok(v) => v,
+        Err(e) => return e.to_compile_error().into(),
+    };
     let imp = parse_macro_input!(item as ItemImpl);
 
     let mut errors: Vec<syn::Error> = Vec::new();
@@ -41,7 +52,10 @@ pub fn userdata(_attr: TokenStream, item: TokenStream) -> TokenStream {
 
     let ty = &imp.self_ty;
     let ty_label = type_label(ty);
-    let lua_name = syn::LitStr::new(&ty_label, ty.span());
+    let lua_name = syn::LitStr::new(
+        name_override.as_deref().unwrap_or(&ty_label),
+        ty.span(),
+    );
 
     let mut trampolines = Vec::new();
     let mut registrations = Vec::new();
@@ -87,6 +101,28 @@ pub fn userdata(_attr: TokenStream, item: TokenStream) -> TokenStream {
         };
     };
     expanded.into()
+}
+
+/// `#[cosmos::userdata(name = "http.client")]`：Lua require 路径覆盖，
+/// 默认是类型短名（require("cosmos.Counter")）
+fn parse_userdata_attr(attr: proc_macro2::TokenStream) -> syn::Result<Option<String>> {
+    if attr.is_empty() {
+        return Ok(None);
+    }
+    let nv: syn::MetaNameValue = syn::parse2(attr)?;
+    if !nv.path.is_ident("name") {
+        return Err(syn::Error::new(
+            nv.path.span(),
+            "expected `name = \"module.path\"`",
+        ));
+    }
+    match &nv.value {
+        syn::Expr::Lit(syn::ExprLit {
+            lit: syn::Lit::Str(s),
+            ..
+        }) => Ok(Some(s.value())),
+        other => Err(syn::Error::new(other.span(), "expected a string literal")),
+    }
 }
 
 fn err<T>(span: &dyn Spanned, msg: &str) -> syn::Result<T> {
@@ -258,4 +294,275 @@ fn gen_method(
     };
 
     Ok((c_name, tramp_ident, tramp))
+}
+
+// ---------------------------------------------------------------------------
+// #[derive(FromLua)] / #[derive(PushLua)]：Lua table ↔ Rust struct
+//
+// 字段属性（与 serde 的分工类似）：
+//   #[lua(name = "external_key")]   Lua 侧键名，默认等于 Rust 字段名
+//   #[lua(default)]                 缺省时 Default::default()
+//   #[lua(default = expr)]          缺省时用 expr（值或函数调用）
+//   #[lua(default_fn = path)]       缺省时调用 path()（返回字段类型）
+//
+// 结构体属性（用于整张表的缺省，字段级优先）：
+//   #[lua(default)]                 缺省字段取 Self::default() 的同名字段
+//   #[lua(default = expr)]          缺省字段取 expr 得到的 Self 的同名字段
+//   #[lua(default_fn = path)]       缺省字段取 path() 得到的 Self 的同名字段
+//
+// 缺省且没有 default/default_fn、结构体也没有默认的字段读表时报错；
+// 未知键忽略；非字符串键跳过（绝不对键做会改写键值的转换，避免破坏 lua_next）。
+// 键比较直接用字节切片，不为每个键分配 Rust String。
+// ---------------------------------------------------------------------------
+
+enum FieldDefault {
+    Default,
+    Expr(syn::Expr),
+    Fn(syn::Path),
+}
+
+struct LuaField {
+    ident: syn::Ident,
+    ty: Type,
+    key: String,
+    default: Option<FieldDefault>,
+}
+
+fn lua_fields(input: &DeriveInput) -> syn::Result<Vec<LuaField>> {
+    let Data::Struct(DataStruct {
+        fields: Fields::Named(named),
+        ..
+    }) = &input.data
+    else {
+        return err(&input.ident, "expected a struct with named fields");
+    };
+    named.named.iter().map(parse_lua_field).collect()
+}
+
+/// 结构体级 `#[lua(default)]` / `#[lua(default = expr)]` / `#[lua(default_fn = path)]`
+fn parse_container_default(attrs: &[syn::Attribute]) -> syn::Result<Option<FieldDefault>> {
+    let mut default = None;
+    for attr in attrs {
+        if !attr.path().is_ident("lua") {
+            continue;
+        }
+        attr.parse_nested_meta(|meta| {
+            if meta.path.is_ident("default") {
+                if default.is_some() {
+                    return Err(meta.error("duplicate `default` / `default_fn`"));
+                }
+                default = Some(if meta.input.peek(syn::Token![=]) {
+                    FieldDefault::Expr(meta.value()?.parse()?)
+                } else {
+                    FieldDefault::Default
+                });
+                Ok(())
+            } else if meta.path.is_ident("default_fn") {
+                if default.is_some() {
+                    return Err(meta.error("duplicate `default` / `default_fn`"));
+                }
+                default = Some(FieldDefault::Fn(meta.value()?.parse()?));
+                Ok(())
+            } else {
+                Err(meta.error("unknown struct-level lua attribute (expected default / default_fn)"))
+            }
+        })?;
+    }
+    Ok(default)
+}
+
+fn parse_lua_field(field: &Field) -> syn::Result<LuaField> {
+    let Some(ident) = field.ident.clone() else {
+        return err(&field.ty, "unnamed fields are not supported");
+    };
+    let mut key = ident.to_string();
+    let mut default = None;
+    for attr in &field.attrs {
+        if !attr.path().is_ident("lua") {
+            continue;
+        }
+        attr.parse_nested_meta(|meta| {
+            if meta.path.is_ident("name") {
+                key = meta.value()?.parse::<LitStr>()?.value();
+                Ok(())
+            } else if meta.path.is_ident("default") {
+                if default.is_some() {
+                    return Err(meta.error("duplicate `default` / `default_fn`"));
+                }
+                default = Some(if meta.input.peek(syn::Token![=]) {
+                    FieldDefault::Expr(meta.value()?.parse()?)
+                } else {
+                    FieldDefault::Default
+                });
+                Ok(())
+            } else if meta.path.is_ident("default_fn") {
+                if default.is_some() {
+                    return Err(meta.error("duplicate `default` / `default_fn`"));
+                }
+                default = Some(FieldDefault::Fn(meta.value()?.parse()?));
+                Ok(())
+            } else {
+                Err(meta.error("unknown lua attribute (expected name / default / default_fn)"))
+            }
+        })?;
+    }
+    Ok(LuaField {
+        ident,
+        ty: field.ty.clone(),
+        key,
+        default,
+    })
+}
+
+#[proc_macro_derive(FromLua, attributes(lua))]
+pub fn derive_from_lua(input: TokenStream) -> TokenStream {
+    let input = parse_macro_input!(input as DeriveInput);
+    expand_from_lua(&input)
+        .unwrap_or_else(|e| e.to_compile_error())
+        .into()
+}
+
+fn expand_from_lua(input: &DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
+    let name = &input.ident;
+    let fields = lua_fields(input)?;
+    let container_default = parse_container_default(&input.attrs)?;
+    let span = proc_macro2::Span::call_site();
+
+    // 只有确实有字段要靠结构体级默认兜底时才构造默认实例，避免无用变量警告
+    let needs_container_default =
+        container_default.is_some() && fields.iter().any(|f| f.default.is_none());
+
+    let seen: Vec<syn::Ident> = (0..fields.len())
+        .map(|i| syn::Ident::new(&format!("__cosmos_field_{i}"), span))
+        .collect();
+
+    let decls = fields.iter().zip(&seen).map(|(f, s)| {
+        let ty = &f.ty;
+        quote!(let mut #s: ::core::option::Option<#ty> = ::core::option::Option::None;)
+    });
+
+    let checks = fields.iter().zip(&seen).map(|(f, s)| {
+        let key = LitByteStr::new(f.key.as_bytes(), span);
+        let ty = &f.ty;
+        quote! {
+            if key == &#key[..] {
+                // 传绝对下标：嵌套 from_lua 可能先 push 再按 idx 取表（如 Headers），
+                // 负下标此时会指向新压入的值
+                let value_idx = cosmos::ffi::lua_gettop(L);
+                #s = ::core::option::Option::Some(
+                    <#ty as cosmos::userdata::FromLua>::from_lua(L, value_idx)?,
+                );
+            }
+        }
+    });
+
+    let values = fields.iter().zip(&seen).map(|(f, s)| {
+        let ident = &f.ident;
+        let missing = match &f.default {
+            Some(FieldDefault::Default) => quote!(::core::default::Default::default()),
+            Some(FieldDefault::Expr(expr)) => quote!(#expr),
+            Some(FieldDefault::Fn(path)) => quote!(#path()),
+            // 字段没写默认值：结构体级默认存在就取默认实例的同名字段
+            None if needs_container_default => quote!(__cosmos_defaults.#ident),
+            None => {
+                let key = &f.key;
+                quote! {
+                    return ::core::result::Result::Err(::std::format!(
+                        "missing field `{}`", #key
+                    ))
+                }
+            }
+        };
+        quote! {
+            #ident: match #s {
+                ::core::option::Option::Some(v) => v,
+                ::core::option::Option::None => #missing,
+            }
+        }
+    });
+
+    let container_init = if needs_container_default {
+        let init = match container_default.as_ref().expect("checked above") {
+            FieldDefault::Default => quote!(::core::default::Default::default()),
+            FieldDefault::Expr(expr) => quote!(#expr),
+            FieldDefault::Fn(path) => quote!(#path()),
+        };
+        quote!(let __cosmos_defaults: Self = #init;)
+    } else {
+        quote!()
+    };
+
+    let scan = if fields.is_empty() {
+        quote!()
+    } else {
+        quote! {
+            cosmos::ffi::lua_pushnil(L);
+            while cosmos::ffi::lua_next(L, idx) != 0 {
+                if cosmos::ffi::lua_type(L, -2) == cosmos::ffi::LUA_TSTRING {
+                    let mut key_len: cosmos::ffi::size_t = 0;
+                    let key_ptr = cosmos::ffi::lua_tolstring(L, -2, &mut key_len);
+                    let key: &[u8] =
+                        ::core::slice::from_raw_parts(key_ptr as *const u8, key_len);
+                    #(#checks)*
+                }
+                cosmos::ffi::lua_settop(L, -2);
+            }
+        }
+    };
+
+    Ok(quote! {
+        impl cosmos::userdata::FromLua for #name {
+            unsafe fn from_lua(
+                L: *mut cosmos::ffi::lua_State,
+                idx: cosmos::ffi::c_int,
+            ) -> ::core::result::Result<Self, ::std::string::String> {
+                if cosmos::ffi::lua_type(L, idx) != cosmos::ffi::LUA_TTABLE {
+                    return ::core::result::Result::Err(::std::format!(
+                        "argument {}: expected table", idx
+                    ));
+                }
+                #(#decls)*
+                #container_init
+                #scan
+                Ok(Self { #(#values),* })
+            }
+        }
+    })
+}
+
+#[proc_macro_derive(PushLua, attributes(lua))]
+pub fn derive_push_lua(input: TokenStream) -> TokenStream {
+    let input = parse_macro_input!(input as DeriveInput);
+    expand_push_lua(&input)
+        .unwrap_or_else(|e| e.to_compile_error())
+        .into()
+}
+
+fn expand_push_lua(input: &DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
+    let name = &input.ident;
+    let fields = lua_fields(input)?;
+    let n = fields.len() as i32;
+
+    let sets = fields.iter().map(|f| {
+        let ident = &f.ident;
+        let ty = &f.ty;
+        let cstr = std::ffi::CString::new(f.key.clone()).expect("field name contains NUL");
+        let cname = Literal::c_string(&cstr);
+        quote! {
+            <#ty as cosmos::userdata::PushLua>::push_lua(self.#ident, L);
+            cosmos::ffi::lua_setfield(L, -2, #cname.as_ptr());
+        }
+    });
+
+    Ok(quote! {
+        impl cosmos::userdata::PushLua for #name {
+            fn push_lua(self, L: *mut cosmos::ffi::lua_State) -> cosmos::ffi::c_int {
+                unsafe {
+                    cosmos::ffi::lua_createtable(L, 0, #n as cosmos::ffi::c_int);
+                    #(#sets)*
+                }
+                1
+            }
+        }
+    })
 }

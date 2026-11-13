@@ -1,8 +1,8 @@
 local port = tonumber(...)
 assert(port, "usage: tls.lua <port>")
 
-local Tls = require("cosmos.Tls")
-local TlsContext = require("cosmos.TlsContext")
+local Tls = require("cosmos.network.tcp.tls")
+local TlsContext = require("cosmos.network.tcp.tls.context")
 
 local function read_file(path)
     local f = assert(io.open(path, "rb"))

@@ -1,7 +1,11 @@
 local port = tonumber(...)
 assert(port, "usage: tcp.lua <port>")
 
-local Tcp = require("cosmos.Tcp")
+-- 命名空间入口：{ stream, tls }；子模块可单独 require
+local net = require("cosmos.network.tcp")
+assert(net.stream == require("cosmos.network.tcp.stream"), "tcp 入口：stream")
+assert(net.tls == require("cosmos.network.tcp.tls"), "tcp 入口：tls")
+local Tcp = net.stream
 
 -- 连接失败：nil + 错误串
 local bad, bad_err = Tcp.connect("127.0.0.1", 1)

@@ -299,6 +299,19 @@ impl FromLua for i64 {
     }
 }
 
+impl FromLua for u16 {
+    unsafe fn from_lua(L: *mut lua_State, idx: c_int) -> Result<Self, String> {
+        if lua_type(L, idx) != LUA_TNUMBER {
+            return Err(format!("argument {idx}: expected number"));
+        }
+        let v = lua_tointeger(L, idx);
+        if v < 0 || v > u16::MAX as lua_Integer {
+            return Err(format!("argument {idx}: number out of range for u16"));
+        }
+        Ok(v as u16)
+    }
+}
+
 impl FromLua for bool {
     unsafe fn from_lua(L: *mut lua_State, idx: c_int) -> Result<Self, String> {
         if lua_type(L, idx) != LUA_TBOOLEAN {
@@ -494,6 +507,12 @@ impl PushLua for i64 {
         1
     }
 }
+impl PushLua for u16 {
+    fn push_lua(self, L: *mut lua_State) -> i32 {
+        unsafe { lua_pushinteger(L, self as lua_Integer) };
+        1
+    }
+}
 impl PushLua for f64 {
     fn push_lua(self, L: *mut lua_State) -> i32 {
         unsafe { lua_pushnumber(L, self) };
@@ -516,7 +535,12 @@ impl<T: PushLua> PushLua for Option<T> {
     fn push_lua(self, L: *mut lua_State) -> i32 {
         match self {
             Some(v) => v.push_lua(L),
-            None => 0,
+            // None 压一个 nil：作为表字段时与 setfield 配对，
+            // 作为多返回值时 `local v = f()` 同样是 nil
+            None => {
+                unsafe { lua_pushnil(L) };
+                1
+            }
         }
     }
 }
@@ -617,5 +641,160 @@ impl<T: IntoOutput, E: Display> IntoOutput for Result<T, E> {
             Ok(v) => v.into_output(),
             Err(e) => AsyncOutput::NilErr(e.to_string()),
         }
+    }
+}
+
+#[cfg(test)]
+mod derive_tests {
+    use super::*;
+    use crate::ffi::*;
+
+    fn with_state(f: impl FnOnce(*mut lua_State)) {
+        unsafe {
+            let L = luaL_newstate();
+            assert!(!L.is_null(), "luaL_newstate failed");
+            f(L);
+            lua_close(L);
+        }
+    }
+
+    /// 建一张整数/字符串字段的表（栈顶 +1）
+    unsafe fn push_int_table(L: *mut lua_State, pairs: &[(&str, lua_Integer)]) {
+        lua_createtable(L, 0, pairs.len() as c_int);
+        for (k, v) in pairs {
+            lua_pushlstring(L, k.as_ptr() as *const c_char, k.len());
+            lua_pushinteger(L, *v);
+            lua_settable(L, -3);
+        }
+    }
+
+    fn seven() -> i64 {
+        7
+    }
+
+    #[derive(cosmos::FromLua, Debug, PartialEq)]
+    struct FieldDefaults {
+        #[lua(default = 1)]
+        a: i64,
+        #[lua(default)]
+        b: Option<i64>,
+        #[lua(default_fn = seven)]
+        d: i64,
+        c: i64,
+    }
+
+    #[test]
+    fn field_level_defaults() {
+        with_state(|L| unsafe {
+            push_int_table(L, &[("c", 3)]);
+            let v = FieldDefaults::from_lua(L, 1).expect("read table");
+            assert_eq!(
+                v,
+                FieldDefaults {
+                    a: 1,
+                    b: None,
+                    d: 7,
+                    c: 3
+                }
+            );
+        });
+    }
+
+    #[test]
+    fn all_fields_present() {
+        with_state(|L| unsafe {
+            push_int_table(L, &[("a", 10), ("b", 20), ("c", 30), ("d", 40)]);
+            let v = FieldDefaults::from_lua(L, 1).expect("read table");
+            assert_eq!(
+                v,
+                FieldDefaults {
+                    a: 10,
+                    b: Some(20),
+                    d: 40,
+                    c: 30
+                }
+            );
+        });
+    }
+
+    #[test]
+    fn missing_field_without_default_is_error() {
+        with_state(|L| unsafe {
+            push_int_table(L, &[("a", 1)]);
+            let err = FieldDefaults::from_lua(L, 1).unwrap_err();
+            assert!(err.contains("missing field `c`"), "unexpected error: {err}");
+        });
+    }
+
+    #[derive(cosmos::FromLua, Debug, PartialEq)]
+    #[lua(default)]
+    struct ContainerDefaults {
+        a: i64,
+        b: i64,
+    }
+
+    impl Default for ContainerDefaults {
+        fn default() -> Self {
+            Self { a: -1, b: -2 }
+        }
+    }
+
+    #[test]
+    fn container_default_uses_default_impl() {
+        with_state(|L| unsafe {
+            push_int_table(L, &[("b", 5)]);
+            let v = ContainerDefaults::from_lua(L, 1).expect("read table");
+            assert_eq!(v, ContainerDefaults { a: -1, b: 5 });
+        });
+    }
+
+    #[derive(cosmos::FromLua, Debug, PartialEq)]
+    #[lua(default_fn = build_defaults)]
+    struct FnDefaults {
+        a: i64,
+        b: i64,
+    }
+
+    fn build_defaults() -> FnDefaults {
+        FnDefaults { a: 11, b: 22 }
+    }
+
+    #[test]
+    fn container_default_fn() {
+        with_state(|L| unsafe {
+            push_int_table(L, &[("b", 5)]);
+            let v = FnDefaults::from_lua(L, 1).expect("read table");
+            assert_eq!(v, FnDefaults { a: 11, b: 5 });
+        });
+    }
+
+    #[test]
+    fn non_table_is_error() {
+        with_state(|L| unsafe {
+            lua_pushinteger(L, 1);
+            let err = ContainerDefaults::from_lua(L, 1).unwrap_err();
+            assert!(err.contains("expected table"), "unexpected error: {err}");
+        });
+    }
+
+    #[derive(cosmos::PushLua)]
+    struct Pushed {
+        a: i64,
+        b: Option<i64>,
+    }
+
+    #[test]
+    fn push_lua_generates_table() {
+        with_state(|L| unsafe {
+            Pushed { a: 42, b: None }.push_lua(L);
+            assert_eq!(lua_type(L, -1), LUA_TTABLE);
+
+            lua_getfield(L, -1, c"a".as_ptr());
+            assert_eq!(lua_tointeger(L, -1), 42);
+            lua_settop(L, -2);
+
+            lua_getfield(L, -1, c"b".as_ptr());
+            assert_eq!(lua_type(L, -1), LUA_TNIL);
+        });
     }
 }

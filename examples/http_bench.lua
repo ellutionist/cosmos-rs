@@ -2,7 +2,7 @@
 -- 运行：cargo run --release -- examples/http_bench.lua [port] [body_bytes]
 -- 然后：wrk -t1 -c10 -d10s --latency http://127.0.0.1:<port>/
 
-local HttpServer = require("cosmos.HttpServer")
+local HttpServer = require("cosmos.network.http.server")
 
 local arg_port, arg_body = ...
 local port = tonumber(arg_port) or 18080

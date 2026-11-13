@@ -1,5 +1,8 @@
 //! TLS 模块：基于 rustls（ring 后端）的客户端与服务端流。
 //!
+//! Lua: local Tls = require("cosmos.network.tcp.tls")（对应 C++ cosmos.network.tcp.tls），
+//!      local TlsContext = require("cosmos.network.tcp.tls.context")
+//!
 //! 配置走 TlsContext（对应 C++ 的 ssl_ctx）：信任根、verify_none、客户端证书、
 //! ALPN 都在这里设置并缓存构建结果。Tls.connect 不传 context 时用缓存的
 //! 默认配置（webpki-roots 公有根）。
@@ -123,7 +126,7 @@ impl AsyncWrite for TlsIo {
 ///   Tls.listen(port, ctx?, timeout_ms?)         → TlsListener
 pub struct Tls;
 
-#[cosmos::userdata]
+#[cosmos::userdata(name = "network.tcp.tls")]
 impl Tls {
     /// 客户端：TCP 连接 + TLS 握手（共用一个 deadline）。ctx 缺省用公有根证书
     async fn connect(
@@ -208,7 +211,7 @@ pub struct TlsContext {
     server_cfg: Option<Arc<ServerConfig>>,
 }
 
-#[cosmos::userdata]
+#[cosmos::userdata(name = "network.tcp.tls.context")]
 impl TlsContext {
     /// 客户端配置：webpki 公有根证书 + 校验开启
     fn new() -> TlsContext {
@@ -490,7 +493,7 @@ pub struct TlsConn {
     peer_cert: Option<CertificateDer<'static>>,
 }
 
-#[cosmos::userdata]
+#[cosmos::userdata(name = "network.tcp.tls.conn")]
 impl TlsConn {
     fn state(&self) -> i64 {
         self.state.get() as i64
@@ -548,7 +551,7 @@ pub struct TlsListener {
     timeout: Option<Duration>,
 }
 
-#[cosmos::userdata]
+#[cosmos::userdata(name = "network.tcp.tls.listener")]
 impl TlsListener {
     /// 接受一个连接并完成握手；timeout 覆盖 accept + 握手
     async fn accept(&mut self) -> Result<TlsConn, String> {

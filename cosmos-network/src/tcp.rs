@@ -1,5 +1,8 @@
 //! TCP 模块：连接状态枚举 + 读写流分离。
 //!
+//! Lua: local Tcp = require("cosmos.network.tcp.stream")（C++ 的 cosmos.network.tcp）
+//!      命名空间入口：local net = require("cosmos.network.tcp")  -- { stream, tls }
+//!
 //! 连接生命周期建模为 State 枚举（Connected/Closed）。connect 是阻塞式异步调用，
 //! 返回时必然已连通或失败，因此没有可观察的 Connecting 中间态。
 //! split() 把 TcpStream 拆成 reader/writer 两个独立 userdata（各占一个 RefCell），
@@ -130,7 +133,7 @@ impl AsyncWrite for WriteSide {
 /// 连接入口：静态方法 Tcp.connect / Tcp.listen
 pub struct Tcp;
 
-#[cosmos::userdata]
+#[cosmos::userdata(name = "network.tcp.stream")]
 impl Tcp {
     /// 连接失败或超时返回 nil + 错误串（local conn, err = Tcp.connect(...)）；
     /// timeout_ms 可选：<= 0 或缺省表示不设连接超时
@@ -166,7 +169,7 @@ pub struct TcpListener {
     timeout: Option<Duration>,
 }
 
-#[cosmos::userdata]
+#[cosmos::userdata(name = "network.tcp.stream.listener")]
 impl TcpListener {
     /// 接受一个连接；timeout 到点返回 nil,"timeout"
     async fn accept(&mut self) -> Result<TcpConn, String> {
@@ -201,7 +204,7 @@ pub struct TcpConn {
     max_buf: Option<usize>,
 }
 
-#[cosmos::userdata]
+#[cosmos::userdata(name = "network.tcp.stream.conn")]
 impl TcpConn {
     fn state(&self) -> i64 {
         self.state.get() as i64
@@ -333,7 +336,7 @@ pub struct TcpReader {
     pub(crate) max_buf: Option<usize>,
 }
 
-#[cosmos::userdata]
+#[cosmos::userdata(name = "network.tcp.stream.reader")]
 impl TcpReader {
     fn state(&self) -> i64 {
         self.state.get() as i64
@@ -517,7 +520,7 @@ pub struct TcpUntil {
 
 // 空 impl：只为拿到 UserData（metatable + __gc）与 require 入口，
 // 读取逻辑在下面的普通 impl 里（Lua 侧通过闭包调用，不暴露方法）
-#[cosmos::userdata]
+#[cosmos::userdata(name = "network.tcp.stream.until")]
 impl TcpUntil {}
 
 /// 迭代器返回值：压栈时构造 TcpUntil userdata，再包成 Lua 闭包（upvalue = userdata）。
@@ -665,7 +668,7 @@ pub struct TcpWriter {
     pub(crate) timeout: Option<Duration>,
 }
 
-#[cosmos::userdata]
+#[cosmos::userdata(name = "network.tcp.stream.writer")]
 impl TcpWriter {
     fn state(&self) -> i64 {
         self.state.get() as i64

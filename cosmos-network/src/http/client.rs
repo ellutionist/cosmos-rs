@@ -1,7 +1,7 @@
 //! HTTP 客户端：hyper + hyper-util 连接池，外挂重定向与整体超时。
 //!
 //! Lua 侧：
-//!   local HttpClient = require("cosmos.HttpClient")
+//!   local HttpClient = require("cosmos.network.http.client")
 //!   local resp, err = HttpClient.request("GET", "http://host/path", {
 //!     headers = { ["x-a"] = "1" },
 //!     body = "...",          -- 任意方法都可带 body
@@ -36,10 +36,10 @@ use tokio::net::TcpStream;
 use tokio::time::Instant;
 
 use cosmos::coroutine::AsyncOutput;
-use cosmos::ffi::*;
-use cosmos::userdata::{FromLua, IntoOutput, PushLua};
+use cosmos::ffi::lua_State;
+use cosmos::userdata::{IntoOutput, PushLua};
 
-use super::{take_bytes, version_num, Conn, Headers};
+use super::{version_num, Conn, Headers, LuaBytes};
 use crate::error::classify_io;
 use crate::tcp::{timeout_from_ms, with_deadline};
 use crate::tls::{connect_tls_io, ClientCfg};
@@ -140,81 +140,40 @@ impl tower_service::Service<Uri> for Connector {
     }
 }
 
-/// request 的第三个参数（options table）
+/// request 的第三个参数（options table）。
+/// 表的逐字段读取由 `#[derive(FromLua)]` 生成（见 cosmos-macros）；
+/// `#[lua(default)]` 表示整张表缺省时按 `Default` 取同名字段。
+#[derive(cosmos::FromLua)]
+#[lua(default)]
 pub(crate) struct ClientOptions {
     headers: Headers,
-    body: Bytes,
+    body: LuaBytes,
     timeout: Option<i64>,
     ctx: Option<ClientCfg>,
     redirects: i64,
     max_body: Option<i64>,
 }
 
-impl FromLua for ClientOptions {
-    unsafe fn from_lua(L: *mut lua_State, idx: c_int) -> Result<Self, String> {
-        let mut opts = ClientOptions {
-            headers: Headers(Vec::new()),
-            body: Bytes::new(),
+impl Default for ClientOptions {
+    fn default() -> Self {
+        ClientOptions {
+            headers: Headers::default(),
+            body: LuaBytes::default(),
             timeout: None,
             ctx: None,
             redirects: 5,
             max_body: None,
-        };
-        if lua_type(L, idx) != LUA_TTABLE {
-            return Err(format!("argument {idx}: expected options table"));
         }
-        lua_pushnil(L);
-        while lua_next(L, idx) != 0 {
-            // 非字符串键跳过；也避免 take_string 把数字键转成字符串破坏 lua_next
-            if lua_type(L, -2) == LUA_TSTRING && lua_type(L, -1) != LUA_TNIL {
-                let key = super::take_string(L, -2);
-                let top = lua_gettop(L);
-                match key.as_str() {
-                    "headers" => opts.headers = Headers::from_lua(L, top)?,
-                    "body" => opts.body = Bytes::from(take_bytes(L, top)),
-                    "timeout" => opts.timeout = Some(lua_tointeger(L, top) as i64),
-                    "redirects" => opts.redirects = lua_tointeger(L, top) as i64,
-                    "max_body" => opts.max_body = Some(lua_tointeger(L, top) as i64),
-                    "ctx" => opts.ctx = Some(ClientCfg::from_lua(L, top)?),
-                    _ => {}
-                }
-            }
-            lua_settop(L, -2);
-        }
-        Ok(opts)
     }
 }
 
-/// 客户端响应（Lua 侧 table）
+/// 客户端响应（Lua 侧 table），压栈由 `#[derive(PushLua)]` 生成
+#[derive(cosmos::PushLua)]
 pub(crate) struct ClientResponse {
     status: u16,
     version: i64,
     headers: Headers,
-    body: Bytes,
-}
-
-impl PushLua for ClientResponse {
-    fn push_lua(self, L: *mut lua_State) -> i32 {
-        unsafe {
-            lua_createtable(L, 0, 4);
-            lua_pushinteger(L, self.status as lua_Integer);
-            lua_setfield(L, -2, c"status".as_ptr());
-            lua_pushinteger(L, self.version as lua_Integer);
-            lua_setfield(L, -2, c"version".as_ptr());
-
-            lua_createtable(L, 0, self.headers.0.len() as c_int);
-            for (k, v) in &self.headers.0 {
-                lua_pushlstring(L, k.as_ptr() as *const c_char, k.len());
-                lua_pushlstring(L, v.as_ptr() as *const c_char, v.len());
-                lua_settable(L, -3);
-            }
-            lua_setfield(L, -2, c"headers".as_ptr());
-
-            lua_pushlstring(L, self.body.as_ptr() as *const c_char, self.body.len());
-            lua_setfield(L, -2, c"body".as_ptr());
-        }
-        1
-    }
+    body: LuaBytes,
 }
 
 impl IntoOutput for ClientResponse {
@@ -227,7 +186,7 @@ impl IntoOutput for ClientResponse {
 ///   HttpClient.request(method, url, opts?) → resp
 pub struct HttpClient;
 
-#[cosmos::userdata]
+#[cosmos::userdata(name = "network.http.client")]
 impl HttpClient {
     /// 发一次请求（含重定向跟随）；失败返回 nil + 错误串
     async fn request(
@@ -235,14 +194,7 @@ impl HttpClient {
         url: String,
         opts: Option<ClientOptions>,
     ) -> Result<ClientResponse, String> {
-        let opts = opts.unwrap_or(ClientOptions {
-            headers: Headers(Vec::new()),
-            body: Bytes::new(),
-            timeout: None,
-            ctx: None,
-            redirects: 5,
-            max_body: None,
-        });
+        let opts = opts.unwrap_or_default();
         let deadline = opts
             .timeout
             .and_then(timeout_from_ms)
@@ -265,7 +217,7 @@ async fn do_request(
         .parse()
         .map_err(|e| format!("invalid url '{url}': {e}"))?;
     let mut headers = opts.headers;
-    let mut body = opts.body;
+    let mut body = opts.body.0;
     let max_redirects = opts.redirects.max(0);
     let mut redirects = 0i64;
 
@@ -315,7 +267,7 @@ async fn do_request(
                 status: status.as_u16(),
                 version,
                 headers: resp_headers,
-                body: resp_body,
+                body: LuaBytes(resp_body),
             });
         };
         if redirects >= max_redirects {
@@ -323,7 +275,7 @@ async fn do_request(
                 status: status.as_u16(),
                 version,
                 headers: resp_headers,
-                body: resp_body,
+                body: LuaBytes(resp_body),
             });
         }
 

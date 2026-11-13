@@ -76,7 +76,7 @@ impl Connection for Conn {
 }
 
 /// 头表：保持顺序，名字统一小写
-#[derive(Clone)]
+#[derive(Clone, Default)]
 pub struct Headers(pub Vec<(String, String)>);
 
 impl Headers {
@@ -121,14 +121,24 @@ impl PushLua for Headers {
     }
 }
 
-/// 二进制安全的 Lua 字符串返回值（body 可能是任意字节）。
+/// 二进制安全的 Lua 字符串 ↔ Bytes（body 可能是任意字节）。
 /// 持有 Bytes 是为了多次取值时零拷贝（clone 只是引用计数）
+#[derive(Default)]
 pub struct LuaBytes(pub bytes::Bytes);
 
 impl PushLua for LuaBytes {
     fn push_lua(self, L: *mut lua_State) -> i32 {
         unsafe { lua_pushlstring(L, self.0.as_ptr() as *const c_char, self.0.len()) };
         1
+    }
+}
+
+impl FromLua for LuaBytes {
+    unsafe fn from_lua(L: *mut lua_State, idx: c_int) -> Result<Self, String> {
+        if lua_type(L, idx) != LUA_TSTRING {
+            return Err(format!("argument {idx}: expected string"));
+        }
+        Ok(LuaBytes(bytes::Bytes::from(take_bytes(L, idx))))
     }
 }
 

@@ -1,7 +1,7 @@
 local port = tonumber(...)
 assert(port, "usage: tcp_client.lua <port>")
 
-local Tcp = require("cosmos.Tcp")
+local Tcp = require("cosmos.network.tcp.stream")
 
 -- 先发一个慢请求（服务端 handler 会 sleep 300ms）
 local c1 = assert(Tcp.connect("127.0.0.1", port, 2000))

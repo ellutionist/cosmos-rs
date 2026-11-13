@@ -1,8 +1,8 @@
 local port = tonumber(...)
 assert(port, "usage: tls_server.lua <port>")
 
-local Tls = require("cosmos.Tls")
-local TlsContext = require("cosmos.TlsContext")
+local Tls = require("cosmos.network.tcp.tls")
+local TlsContext = require("cosmos.network.tcp.tls.context")
 
 -- 服务端 ctx：证书链 + 私钥 + 客户端证书校验（mTLS）
 local ctx = TlsContext.new_server()

@@ -1,7 +1,7 @@
 local port = tonumber(...)
 assert(port, "usage: tcp_server.lua <port>")
 
-local Tcp = require("cosmos.Tcp")
+local Tcp = require("cosmos.network.tcp.stream")
 
 local srv = assert(Tcp.listen(port, 3000))
 print("listening on", port)

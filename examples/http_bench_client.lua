@@ -8,7 +8,7 @@
 
 io.stdout:setvbuf("no")
 
-local HttpClient = require("cosmos.HttpClient")
+local HttpClient = require("cosmos.network.http.client")
 
 local a_port, a_conns, a_secs, a_path, a_method, a_body = ...
 local port = tonumber(a_port) or 18090
