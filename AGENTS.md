@@ -12,11 +12,11 @@
 
 桥接的正确做法是**逐层组合**，不是把命令式栈操作换个文件存放（那只是马甲，没有意义）：
 
-1. 基层类型各自实现 `PushLua` / `FromLua` / `IntoOutput`：
+1. 基层类型各自实现 `PushLua` / `FromLua`：
    标量、`String` / `&str` / `Vec<u8>`、`Nil`、字符串 map、userdata 等，
    每个类型只在桥接层实现一次；
 2. 结构体用 `#[derive(cosmos::FromLua)]` / `#[derive(cosmos::PushLua)]`，
-   枚举用 `#[derive(cosmos::IntoOutput)]`，由过程宏按字段/分支生成压栈与读取；
+   枚举用 `#[derive(cosmos::PushLua)]`，由过程宏按字段/分支生成压栈与读取；
 3. 多返回值用元组（`(A, B)`）或 derive 出来的枚举字段顺序表达，
    不要手写 `match variant { … lua_pushlstring(…) }`；
 4. 功能模块只负责构造"值"（如 `ReceiveOutcome::Closed(Nil, "closed", partial)`），
@@ -44,6 +44,10 @@
   避免无意义的包装函数。
 - Lua 模块命名统一 `cosmos.network.*`、`cosmos.thread`；
   userdata 用 `#[cosmos::userdata(name = "…")]` 指定 `require` 路径。
+
+## 进度记录
+
+- 请将每一轮修改的核心逻辑、踩坑记录和下一步计划更新到 `PROGRESS.md`。
 
 ## 常用验证命令
 

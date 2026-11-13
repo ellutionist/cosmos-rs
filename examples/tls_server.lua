@@ -12,6 +12,10 @@ assert(ctx:add_ca_file("examples/certs/ca.pem") == nil, "add_ca_file")
 ctx:verify_client()
 
 local srv = assert(Tls.listen(port, ctx, 3000))
+-- FromLua 类型错误必须先释放 listener 的独占借用，再交给 Lua pcall。
+local reload_ok, reload_err = pcall(function() srv:reload({}) end)
+assert(not reload_ok and type(reload_err) == "string", "reload 应拒绝错误类型的 ctx")
+assert(srv:reload(ctx) == nil, "非法 ctx 后 listener 应仍可使用")
 print("listening on", port)
 
 local function echo(conn)

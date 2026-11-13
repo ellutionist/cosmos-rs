@@ -53,6 +53,20 @@ local function handler(req)
     error("handler exploded")
   elseif path == "/missing" then
     return { status = 404, body = "nope" }
+  elseif path == "/raw" then
+    return "a\0b\255c"
+  elseif path == "/nothing" then
+    return
+  elseif path == "/nil" then
+    return nil
+  elseif path == "/nil-ignored" then
+    return nil, 42
+  elseif path == "/nil-error" then
+    return nil, "explicit handler error"
+  elseif path == "/bad-return" then
+    return false
+  elseif path == "/bad-field" then
+    return { body = {} }
   end
   return { status = 200, body = "hello " .. req:target() }
 end
@@ -88,6 +102,20 @@ check(r.headers["x-body-len"] == tostring(#payload), "handler 看到 body 长度
 -- 404 不是错误，原样返回
 r = assert(HttpClient.request("GET", base .. "/missing"))
 check(r.status == 404 and r.body == "nope", "404 原样返回")
+
+-- 回调结果由类型化桥接读取，覆盖单值、多值及错误后的下一次调用。
+r = assert(HttpClient.request("GET", base .. "/raw"))
+check(r.status == 200 and r.body == "a\0b\255c", "handler 直接返回二进制字符串")
+for _, path in ipairs({ "/nothing", "/nil", "/nil-ignored" }) do
+  r = assert(HttpClient.request("GET", base .. path))
+  check(r.status == 200 and r.body == "", "handler 缺省响应 " .. path)
+end
+for _, path in ipairs({ "/nil-error", "/bad-return", "/bad-field" }) do
+  r = assert(HttpClient.request("GET", base .. path))
+  check(r.status == 500, "handler 非法返回值 " .. path)
+end
+r = assert(HttpClient.request("GET", base .. "/hello"))
+check(r.status == 200, "handler 转换失败后后续请求正常")
 
 -- 重定向跟随（302 → GET）
 r = assert(HttpClient.request("GET", base .. "/redirect"))

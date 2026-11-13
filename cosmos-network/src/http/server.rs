@@ -38,8 +38,7 @@ use tokio::net::TcpListener;
 use tokio::task::JoinHandle;
 use tokio_rustls::TlsAcceptor;
 
-use cosmos::stack::{return_kind, ReturnKind};
-use cosmos::userdata::{FromLua, LuaFunction};
+use cosmos::userdata::{LuaFunction, Nil};
 
 use super::{Headers, LuaBytes};
 use crate::error::classify_io;
@@ -168,6 +167,28 @@ pub(crate) struct RespSpec {
     websocket: Option<LuaFunction>,
 }
 
+/// Lua handler 的返回形态由宏读取；HTTP 层只处理转换后的值。
+#[derive(cosmos::FromLua)]
+enum HandlerReply {
+    #[lua(type = "table")]
+    Response(RespSpec),
+    #[lua(type = "string")]
+    Body(LuaBytes),
+    #[lua(type = "nil")]
+    Empty(Nil, ReplyError),
+    #[lua(type = "none")]
+    Nothing,
+}
+
+/// 保持 nil 返回的原有约定：第二个值只有是字符串时才表示错误。
+#[derive(cosmos::FromLua)]
+enum ReplyError {
+    #[lua(type = "string")]
+    Message(String),
+    #[lua(other)]
+    Absent,
+}
+
 impl Default for RespSpec {
     fn default() -> Self {
         RespSpec {
@@ -192,7 +213,10 @@ impl RespSpec {
                 HeaderName::from_bytes(k.as_bytes()),
                 HeaderValue::from_bytes(v.as_bytes()),
             ) else {
-                return plain_response(StatusCode::INTERNAL_SERVER_ERROR, "invalid response header");
+                return plain_response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "invalid response header",
+                );
             };
             builder = builder.header(name, value);
         }
@@ -295,44 +319,25 @@ fn upgrade_websocket(
     Response::from_parts(parts, Full::new(Bytes::new()))
 }
 
-/// 新建 Lua 协程执行 handler(req)；完成后从协程栈读返回值
+/// 类型化回调负责协程生命周期与结果转换，本层只组装 HTTP 响应。
 async fn run_handler(inner: &Rc<ServerInner>, request: HttpRequest) -> Result<RespSpec, String> {
-    let mut co = unsafe { inner.handler.call_in_new_thread(request) };
-    let result = (&mut co).await;
-    let out = unsafe {
-        match result {
-            Ok(()) => read_handler_return(co.state()),
-            Err(err) => Err(err),
+    match inner.handler.call::<_, HandlerReply>(request).await? {
+        HandlerReply::Nothing | HandlerReply::Empty(_, ReplyError::Absent) => {
+            Ok(RespSpec::default())
         }
-    };
-    drop(co); // 解除协程锚定（挂起中被取消同样适用）
-    out
-}
-
-unsafe fn read_handler_return(L: *mut cosmos::userdata::lua_State) -> Result<RespSpec, String> {
-    match return_kind(L) {
-        ReturnKind::Nothing | ReturnKind::Nil(None) => Ok(RespSpec::default()),
-        ReturnKind::Table => RespSpec::from_lua(L, 1),
+        HandlerReply::Response(spec) => Ok(spec),
         // 直接返回字符串：200 + 原文
-        ReturnKind::String => Ok(RespSpec {
+        HandlerReply::Body(body) => Ok(RespSpec {
             status: 200,
             headers: Headers::default(),
-            body: LuaBytes::from_lua(L, 1)?,
+            body,
             websocket: None,
         }),
-        // handler 里 assert 失败等会返回 nil, err
-        ReturnKind::Nil(Some(err)) => Err(err),
-        ReturnKind::Other(kind) => Err(format!(
-            "handler must return a response table (got lua type {kind})"
-        )),
+        HandlerReply::Empty(_, ReplyError::Message(err)) => Err(err),
     }
 }
 
-async fn accept_loop(
-    inner: Rc<ServerInner>,
-    listener: TcpListener,
-    acceptor: Option<TlsAcceptor>,
-) {
+async fn accept_loop(inner: Rc<ServerInner>, listener: TcpListener, acceptor: Option<TlsAcceptor>) {
     loop {
         let (sock, peer) = match listener.accept().await {
             Ok(v) => v,
@@ -408,10 +413,7 @@ impl HttpServer {
         let listener = TcpListener::bind((host.as_str(), port as u16))
             .await
             .map_err(|e| classify_io(&e))?;
-        let local_port = listener
-            .local_addr()
-            .map_err(|e| classify_io(&e))?
-            .port();
+        let local_port = listener.local_addr().map_err(|e| classify_io(&e))?.port();
         let inner = Rc::new(ServerInner {
             handler,
             max_body: opts

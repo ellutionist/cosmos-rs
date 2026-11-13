@@ -5,8 +5,10 @@
 ## 0. TL;DR
 
 - 项目：LuaJIT + Rust 重写版网络框架，路径 `/Users/ellutionist/code/ellutionist/cosmos-rs`。
-- 工作区有**大量未提交改动**（WebSocket 模块 + 桥接分层重构 + `AGENTS.md`），全部已验证通过，**未 commit**。
-- 下一个待办是"统一 `IntoOutput` 与 `PushLua`"，方案已定但**用户尚未点头**，先确认再动手（见 §5）。
+- WebSocket、桥接分层重构和 VM 生命周期修复已提交为 `e004c8e`。
+- 已按用户要求将统一返回值桥接、分层修复和冗余清理纳入本次本地提交；最新验证与踩坑见 `PROGRESS.md`。
+- 异步边界采用 `PendingOp::poll_push`，只保留 `PushLua` 转换协议；不采用返回值闭包装箱方案（见 §5）。
+- HTTP/WebSocket 回调已改用 `LuaFunction::call<A, R>`；userdata 借用失败只返回 Err，最外层 trampoline 统一抛 Lua 错误。
 - 交流、注释、文档一律**中文**；**不要自动 commit / push**。
 
 ## 1. 环境与结构
@@ -14,42 +16,33 @@
 ```
 cosmos-rs/
   cosmos/            # 运行时 + 桥接层：ffi / userdata / coroutine / stack / libs / thread
-  cosmos-macros/     # #[userdata]、#[derive(FromLua/PushLua/IntoOutput)]，生成全部 trampoline
+  cosmos-macros/     # #[userdata]、#[derive(FromLua/PushLua)]，生成全部 trampoline
   cosmos-network/    # 功能模块：tcp / tls / http / websocket + bridge.rs（叶子转换）
   src/main.rs        # 宿主：建 VM、跑脚本、关 VM；demo.rs 是 userdata 示例
   examples/*.lua     # 全部端到端用例
-  lua/               # cosmos-network 内嵌 Lua 源码（include_str! 随二进制编译）
+  cosmos-network/lua/ # 内嵌 Lua 源码（include_str! 随二进制编译）
 ```
 
 - LuaJIT 2.1（Lua 5.1 C API），单线程：tokio `current_thread` + `LocalSet`，Lua 协程 `!Send`。
 - 依赖：hyper 1 + hyper-util（client/server，h2 走 ALPN）、rustls+ring、fastwebsockets（upgrade feature）。
-- 最近提交：`4f796f6 feat: serde-like table derives and namespaced Lua modules`，之后的改动都在工作区未提交。
+- 重构前基线：`e004c8e feat: 新增 WebSocket 支持并重构 Lua 桥接分层`；最新提交号通过 `git log -1` 查询。
 
 ## 2. 硬性约定（详见 `AGENTS.md`）
 
 1. **功能模块零 FFI**：tcp / tls / http / websocket 里不出现 `cosmos::ffi`、不直接调 `lua_*`、不做裸栈操作。
-2. **桥接 = 组合**：基层类型各实现 `PushLua` / `FromLua` / `IntoOutput`，结构体靠 derive，枚举靠 derive，
+2. **桥接 = 组合**：基层类型各实现 `PushLua` / `FromLua`，结构体靠 derive，枚举靠 derive，
    多返回值靠元组/枚举字段顺序。**禁止**把命令式栈操作换个文件存放（用户明确说过那是"马甲"，没有意义）。
 3. 允许裸 FFI：cosmos 运行时/桥接层、`cosmos-network/src/bridge.rs` 的叶子转换与 C trampoline、`src/main.rs`（宿主）。
 4. 不做死抽象；公共层要有明确复用点。
 5. 任何行为改动必须实际跑 `examples/` 对应用例（含回归），不能只看编译通过。
 6. 只有用户明确要求才 commit / push。
 
-## 3. 工作区现状（全部未提交）
+## 3. 工作区现状
 
-```
-M Cargo.lock
-M cosmos-macros/src/lib.rs
-M cosmos-network/Cargo.toml          # + fastwebsockets
-M cosmos-network/src/http/{client,mod,server}.rs
-M cosmos-network/src/{lib,tcp,tls}.rs
-M cosmos/src/{lib,stack,userdata}.rs
-M src/{main,demo}.rs
-?? AGENTS.md
-?? cosmos-network/src/bridge.rs      # 新增：crate 桥接层
-?? cosmos-network/src/websocket.rs   # 新增：WebSocket 模块
-?? examples/websocket.lua            # 新增：24 项端到端用例
-```
+- 已提交基线：WebSocket、桥接分层重构、VM 生命周期修复与项目约定。
+- 本次提交范围：统一 `PushLua`、类型化 Lua 回调、枚举 `FromLua`、userdata fallible 借用、统一错误边界、冗余清理与回归记录。
+- 主程序还依赖工作区外的 `../cosmos-ext-demo`；其 `src/lib.rs` 已经用户授权同步修改两行：
+  移除旧输出类型的导入，`slow_add` 的 Future 直接返回 `a + b`。后续保存/迁移工程时须一起保留。
 
 ## 4. 最近完成的工作
 
@@ -69,37 +62,25 @@ M src/{main,demo}.rs
     超时 `nil,"timeout"`（连接可继续用）。ping 自动 pong、close 自动回 close。
   - 帧流放在 `Rc<RefCell<Option<FragmentCollector<...>>>>`：handler 协程结束后服务端强制 close；
     协程被取消时随 userdata 回收关闭。
-  - `run_conn()`（约 203 行）通过 `LuaFunction::call_in_new_thread((conn, request))` 跑 Lua 协程。
+  - `run_conn()` 通过 `handler.call::<_, ()>((conn, request)).await` 跑类型化 Lua 回调，运行时管理协程锚点。
 - 上限：`ServerOptions.ws_max_message` / 客户端 `max_message`，缺省 64 MiB。
 - 注意：`FragmentCollector<S>` 包的是**流** `S`，不是 `WebSocket<S>`。
 
-### 4.2 桥接分层重构
+### 4.2 桥接分层与回调
 
-- 新增 `cosmos-network/src/bridge.rs`：只放叶子转换（`Headers`、`LuaBytes`、`ReceivePattern`）、
-  `until` 闭包的 C trampoline、全部类型注册。功能模块已 grep 不到任何 `lua_*` / `cosmos::ffi`。
-- cosmos 新增基层原语（都在 `cosmos/src/userdata.rs`）：
-  - `impl PushLua / FromLua for Vec<u8>`（二进制安全）；
-  - `pub struct Nil`（614 行）：代表"一个 nil"，与 `()`（0 个返回值）区分；
-  - `pub struct LuaStrMap`（349 行）：Lua table(string→string) ↔ 有序键值表，`Headers` 由它组合；
-  - `pub unsafe fn push_closure<T: UserData>`：把 C 函数包成带 userdata upvalue 的闭包；
-  - `LuaFunction::call_in_new_thread`（518 行）：建协程 + 压函数/参数，替代各处手写 `lua_newthread`；
-  - `impl PushLua for &str`、`impl<A,B: PushLua> IntoOutput for (A,B)`。
-- `cosmos/src/stack.rs`：`ReturnKind` + `return_kind()`，HTTP handler 返回值分类不再手写栈检查。
-- `cosmos-macros`：新增 `#[derive(IntoOutput)]`（584 行）：枚举按分支字段顺序压栈，字段需 `PushLua`。
-- `cosmos-network/src/tcp.rs`：`ReceiveOutcome` 改为
-  ```rust
-  #[derive(cosmos::IntoOutput)]
-  pub enum ReceiveOutcome {
-      Data(Vec<u8>),
-      Eof(Nil),
-      Closed(Nil, &'static str, Vec<u8>),
-      Timeout(Nil, &'static str, Vec<u8>),
-      Overflow(Nil, &'static str, Vec<u8>),
-      Error(Nil, String, Vec<u8>),
-  }
-  ```
-  不再有任何手写 `match + lua_push*`。
-- `cosmos-network/src/lib.rs`：`pub use bridge::register;`，外部注册入口不变。
+- `cosmos-network/src/bridge.rs` 只保留叶子转换、`until` trampoline 与类型注册。
+  `Headers` 组合 `LuaStrMap`，`LuaBytes` 对接 `Bytes` 与 Lua 字符串，TLS 配置组合 fallible userdata 借用。
+- cosmos 基层原语包括：`Nil`、`Vec<u8>`、`LuaStrMap`、`push_closure`、元组和标量的转换。
+  `()` 是 0 个输出值；`Nil` 是 1 个 nil；读取无返回值的回调可选择 `R = ()` 忽略结果。
+- `LuaFunction::call<A: PushLua, R: FromLua>` 在内部创建并锚定协程，完成后读取拥有型结果；
+  HTTP 和 WebSocket 都使用该入口。功能模块不再接触 Lua 指针、栈索引或类型编号。
+- `#[derive(FromLua)]` 的结构体读取 table；枚举按分支上的 `#[lua(type = "table")]` 等选择，
+  分支字段依次读取多个返回值。`#[lua(other)]` 表示无字段的兜底分支，不进行试读或额外装箱。
+- HTTP `HandlerReply` 通过 derive 表达 table、二进制字符串、nil/错误串和无返回值；
+  TCP `ReceiveArg` 复用同一宏表达数字或模式字符串。
+- `#[derive(PushLua)]` 的结构体生成 table，枚举按分支字段顺序压栈；`ReceiveOutcome` 和
+  `WaitOutcome` 直接组合 `Nil`、字符串、字节及下标，不手写多值栈操作。
+- 已删除 `ReturnKind`、`return_kind`、`read_handler_return` 和对外的协程状态 getter。
 
 ### 4.3 VM 生命周期修复（重要）
 
@@ -118,54 +99,47 @@ lua_close(L);
 `run()` 返回 `(*mut lua_State, Result<(), String>)`，内部不再 `lua_close`。所有错误路径也把 L 交回 main。
 **不要改回"run 内部关 VM"**。
 
-## 5. 待办（最高优先级，需先确认）
+## 5. 本轮完成：统一 `PushLua`
 
-### 统一 `IntoOutput` 与 `PushLua`
+- 删除 `IntoOutput` trait、derive、全部 impl，以及 `AsyncOutput` 枚举。
+- `PendingFuture = Pin<Box<dyn PendingOp>>`；`PendingOp` 对所有输出实现 `PushLua` 的 Future
+  提供 blanket impl：Pending 时不动 Lua 栈，Ready 时立即 `value.push_lua(L)`，返回压栈个数。
+- Future 本身仍只装箱一次；标量没有新增返回值分配，原先 userdata/table/元组/枚举的
+  `Custom` 闭包装箱也已消除。业务值自身与 Lua 栈的内存分配不包含在这个结论里。
+- `#[userdata]` 的 async trampoline 直接返回原生 Rust 值；同步和异步都经 `PushLua`。
+- `#[derive(PushLua)]`：struct 仍生成 Lua table；enum 按分支字段顺序生成多返回值。
+  TCP `ReceiveOutcome` 和线程 `WaitOutcome` 都采用该机制。
+- `()` 仍返回 0 个值，`Nil` 返回 1 个 nil；异步 `Option::None` 从旧实现的 0 个值统一为
+  1 个 nil，`select('#', f())` 能观察到这个变化。
+- **旧交接结论已纠正**：统一桥接并不必然增加一次 Box；可以在具体 Future 的输出类型
+  被擦除前组合完成轮询和压栈，无需 specialization，也无需返回值闭包。
 
-用户认为两条 trait + `AsyncOutput` 枚举是冗余的，要求真正合并（不是加 `Output<T>` 包装）。已讨论过的
-结论方案：
+### 分层错误边界与冗余清理
 
-- 只保留 `PushLua`；
-- 异步边界改为
-  ```rust
-  pub type DeferredPush = Box<dyn FnOnce(*mut lua_State) -> i32>;
-  pub fn defer<T: PushLua + 'static>(v: T) -> DeferredPush;   // = Box::new(move |L| v.push_lua(L))
-  ```
-- 删除 `IntoOutput` trait（`cosmos/src/userdata.rs:683`）及其全部 impl；
-- 删除 `AsyncOutput` 枚举（`cosmos/src/coroutine.rs:18`）及 `impl PushLua for AsyncOutput`；
-  `PendingFuture = Pin<Box<dyn Future<Output = DeferredPush>>>`；
-  poll loop（`coroutine.rs:149-152`）里 `out.push_lua(thread)` 改为直接调用闭包 `out(thread)`；
-- async 宏体（`cosmos-macros/src/lib.rs` 的 `gen_method`）从
-  `<#ret_ty as IntoOutput>::into_output(#call.await)` 改为 `cosmos::userdata::defer(#call.await)`；
-- `#[derive(IntoOutput)]` 合并进 `#[derive(PushLua)]`：struct 仍生成 Lua table（`expand_push_lua`），
-  enum 生成"按字段顺序压栈"（把当前 `expand_into_output` 的逻辑搬进来，输出 `impl PushLua`）；
-  删除 `IntoOutput` derive 与 `cosmos/src/lib.rs` 的导出；`ReceiveOutcome` 改成 `#[derive(cosmos::PushLua)]`；
-- 语义差异需记录：`Option::None` 走 `PushLua` 是 1 个 nil（现在是 0 个值），对 `local v = f()` 等价，
-  只有 `select('#', f())` 能观察出差异。
+- `try_check` / `try_check_shared` 通过 metatable 比较和 `RefCell` 检查返回 `Result`；
+  类型错误和借用冲突均不直接调用 `lua_error`。借用守卫受调用栈/协程锚点保护，不能作为拥有型回调结果。
+- 同步/异步宏、TCP until、sleep、thread.spawn/wait 共用 `userdata::trampoline`；
+  参数解析和守卫获取失败先释放 Rust 局部值，再压错误串，释放该串后才调用 `lua_error`。
+- `FromLua` 及其 derive 在成功、失败时恢复入口栈高度；相对索引先通过 `stack::abs_index` 固定。
+- 首次注册 userdata 的 metatable 已修正为弹出 mt/package/preload 三项，确保 `push` 只增加一个值。
+- 移除了无调用方的 `with_alpn_server`、`LuaFunction::registry_ref/main/push_to`、`UserData::type_name`，
+  旧 throwing check、重复 raise、状态别名与示例注册包装；Counter 注册直接放在宿主入口。
 
-**唯一代价**：每次异步返回多一次 `Box`（复合返回今天本来就走 `AsyncOutput::Custom`，不受影响；
-受影响的只有返回 `()` / 标量 的 async 方法，如 `sleep`、`thread.wait`）。stable Rust 没有 specialization，
-"统一"与"标量零分配"只能二选一。
+### 尚未排期
 
-**动手前先向用户确认**是否接受这次分配；用户对分配很敏感。验收：
-`cargo build`、`cargo test`（7 个 derive 测试）、§7 全部 examples 通过。
-
-### 其它 backlog（未排期，勿主动开工）
-
-- UDP / unix socket：用户之前说"udp 补上，network 先到这"，随后改为先做 WebSocket；优先级未确认。
-- HTTP/3：用户明确"先不做"。
-- 压测脚本：`examples/http_bench.lua`（服务端）、`examples/http_bench_client.lua`（自己 client 打自己 server），
-  历史基线见项目记录（wrk GET 13B ≈146k RPS，自研 client ≈125k）。
+- UDP / unix socket：优先级待用户确认，勿主动开工。
+- HTTP/3：用户明确暂缓。
+- 压测脚本：`examples/http_bench.lua` / `examples/http_bench_client.lua`。
 
 ## 6. 代码地图
 
 | 文件 | 职责 |
 |---|---|
 | `cosmos/src/ffi.rs` | LuaJIT C API 声明（唯一 FFI 声明处） |
-| `cosmos/src/userdata.rs` | 桥接核心：`UserData`/`PushLua`/`FromLua`/`IntoOutput`、userdata 存放与 GC、`LuaFunction`、`Nil`/`LuaStrMap`、derive 单元测试 |
-| `cosmos/src/coroutine.rs` | `LuaCoroutine`（Future）、`AsyncOutput`、TLS yield 通道、`yield_with` |
-| `cosmos/src/stack.rs` | 栈辅助：`err_message`、`ReturnKind`/`return_kind` |
-| `cosmos-macros/src/lib.rs` | `#[userdata]`、`FromLua`/`PushLua`/`IntoOutput` derive |
+| `cosmos/src/userdata.rs` | 桥接核心：`UserData`/`PushLua`/`FromLua`、userdata 存放与 GC、类型化 `LuaFunction::call`、fallible userdata 借用、`Nil`/`LuaStrMap`、derive 单元测试 |
+| `cosmos/src/coroutine.rs` | `LuaCoroutine`（Future）、`PendingOp`/`PendingFuture`、TLS yield 通道、`yield_with` |
+| `cosmos/src/stack.rs` | 栈辅助：`err_message`、`abs_index` |
+| `cosmos-macros/src/lib.rs` | `#[userdata]`、`FromLua`/`PushLua` derive |
 | `cosmos-network/src/bridge.rs` | 本 crate 的叶子转换、`until` trampoline、注册入口 |
 | `cosmos-network/src/tcp.rs` | TCP 状态机、`ReceivePattern`/`ReceiveOutcome`、`receiveuntil` |
 | `cosmos-network/src/tls.rs` | rustls 客户端/服务端、`TlsContext`（证书/信任根/ALPN/mTLS） |
@@ -187,7 +161,7 @@ cargo build
 ./target/debug/cosmos-rs examples/spawn.lua       # OK
 ./target/debug/cosmos-rs examples/ext.lua         # OK
 ./target/debug/cosmos-rs examples/sleep.lua       # OK
-# examples/error.lua 期望 exit=1（末尾故意 sleep(-1)）
+# examples/error.lua 期望 exit=1（故意调用 sleep(-1)）
 
 # 双进程
 (./target/debug/cosmos-rs examples/tcp_server.lua 19001 &) ; sleep 1
@@ -195,7 +169,7 @@ cargo build
 (./target/debug/cosmos-rs examples/tls_server.lua 19443 &) ; sleep 1
 ./target/debug/cosmos-rs examples/tls_client.lua 19443     # OK
 
-cargo test        # 7 passed（derive 默认值/缺字段/PushLua 等）
+cargo test --workspace  # 15 passed（derive、类型化回调、错误栈恢复、userdata 借用与取消）
 ```
 
 ## 8. 坑与注意事项
@@ -203,6 +177,7 @@ cargo test        # 7 passed（derive 默认值/缺字段/PushLua 等）
 - **VM 关闭顺序**：先 `drop(local)` 再 `lua_close`（§4.3）。改了会 UAF。
 - **async 方法的 self 守卫**：`#[userdata]` 生成的 async 方法会把 `RefMut/Ref` move 进 future，
   跨 await 一直占着借用；同一 userdata 的另一次调用会 `lua_error`。这是有意设计。
+- **FromLua 只返回 Err，不抛 Lua 错误**；借用守卫必须先释放，再由外层 trampoline 调用 lua_error。
 - **FromLua 嵌套取值要用绝对索引**：`lua_next` 遍历后再用 `-1` 会错位（`value_idx = lua_gettop(L)`）。
 - **hyper upgrade**：必须 `serve_connection_with_upgrades` 且保留 `http::request::Parts`
   （`OnUpgrade` 在 extensions 里），否则 101 之后连接不会被接管。

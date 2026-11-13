@@ -45,8 +45,3 @@ impl Drop for Counter {
         eprintln!("counter dropped (n={})", self.n);
     }
 }
-
-/// 启动时注册类型，脚本才能在任何实例之前 require("cosmos.Counter")
-pub unsafe fn register(L: *mut cosmos::userdata::lua_State) {
-    cosmos::userdata::register::<Counter>(L);
-}

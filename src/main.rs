@@ -142,7 +142,7 @@ async fn run(code: &str, args: &[String]) -> (*mut lua_State, Result<(), String>
         libs::open_cosmos(L);
         userdata::init(L);
         cosmos::thread::register_types(L);
-        demo::register(L);
+        userdata::register::<demo::Counter>(L);
         cosmos_ext_demo::register(L);
         cosmos_network::register(L);
 

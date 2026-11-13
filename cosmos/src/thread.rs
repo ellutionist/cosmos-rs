@@ -19,10 +19,9 @@ use std::task::{Context, Poll};
 use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
 
-use crate::coroutine::{yield_with, AsyncOutput, LuaCoroutine};
+use crate::coroutine::{yield_with, LuaCoroutine};
 use crate::ffi::*;
-use crate::libs::raise;
-use crate::userdata::{check, push, register};
+use crate::userdata::{push, register, trampoline, try_check, Nil};
 
 /// 轻线程句柄（Lua userdata）
 pub struct Thread {
@@ -55,37 +54,49 @@ impl Thread {
 
 /// cosmos.thread.spawn(fn, ...)：把 fn 及其参数搬到新 lua_State 协程上执行
 unsafe extern "C" fn spawn_impl(L: *mut lua_State) -> c_int {
-    if lua_type(L, 1) != LUA_TFUNCTION {
-        return raise(L, "thread.spawn: expected a function");
-    }
-    let n = lua_gettop(L);
-    let thread = lua_newthread(L); // 线程对象压栈，new() 里 luaL_ref 会取走
-    for i in 1..=n {
-        lua_pushvalue(L, i);
-        lua_xmove(L, thread, 1);
-    }
-    // 新协程栈：[fn, args...]，Fresh 阶段按 gettop-1 传参
-    let co = LuaCoroutine::new(L, thread);
-    let (tx, done) = oneshot::channel();
-    let handle = tokio::task::spawn_local(async move {
-        let res = co.await;
-        if let Err(e) = &res {
-            eprintln!("cosmos.thread: unhandled error: {e}");
+    trampoline(L, |L| unsafe {
+        if lua_type(L, 1) != LUA_TFUNCTION {
+            return Err("thread.spawn: expected a function".to_string());
         }
-        let _ = tx.send(res.clone());
-        res
-    });
-    push(L, Thread {
-        handle: Some(handle),
-        done: Some(done),
-    });
-    1
+        let n = lua_gettop(L);
+        let thread = lua_newthread(L); // 线程对象压栈，new() 里 luaL_ref 会取走
+        for i in 1..=n {
+            lua_pushvalue(L, i);
+            lua_xmove(L, thread, 1);
+        }
+        // 新协程栈：[fn, args...]，Fresh 阶段按 gettop-1 传参
+        let co = LuaCoroutine::new(L, thread);
+        let (tx, done) = oneshot::channel();
+        let handle = tokio::task::spawn_local(async move {
+            let res = co.await;
+            if let Err(e) = &res {
+                eprintln!("cosmos.thread: unhandled error: {e}");
+            }
+            let _ = tx.send(res.clone());
+            res
+        });
+        push(
+            L,
+            Thread {
+                handle: Some(handle),
+                done: Some(done),
+            },
+        );
+        Ok(1)
+    })
 }
 
 /// 轮询一组完成信号，返回第一个结束的（下标从 1 开始，与 wait 的参数位置一致）。
 /// 只用 oneshot 信号、不碰 JoinHandle，所以 wait 之后线程仍可 join。
 struct WaitAny {
     done: Vec<(usize, oneshot::Receiver<Result<(), String>>)>,
+}
+
+/// wait 的返回形态：成功给参数下标，失败给 nil、错误串和参数下标。
+#[derive(cosmos::PushLua)]
+enum WaitOutcome {
+    Done(i64),
+    Error(Nil, String, i64),
 }
 
 impl Future for WaitAny {
@@ -114,36 +125,30 @@ impl Future for WaitAny {
 
 /// cosmos.thread.wait(t1, t2, ...)：任一结束即返回其参数下标；其余线程继续运行
 unsafe extern "C" fn wait_impl(L: *mut lua_State) -> c_int {
-    let n = lua_gettop(L);
-    if n < 1 {
-        return raise(L, "thread.wait: expected at least one thread");
-    }
-    let mut done = Vec::with_capacity(n as usize);
-    for i in 1..=n {
-        let mut thread = check::<Thread>(L, i); // 类型不符直接 lua_error
-        let Some(rx) = thread.done.take() else {
-            return raise(L, "thread.wait: thread already waited");
-        };
-        done.push((i as usize, rx));
-    }
-    yield_with(
-        L,
-        Box::pin(async move {
-            let (idx, res) = WaitAny { done }.await;
-            match res {
-                Ok(()) => AsyncOutput::Custom(Box::new(move |L| unsafe {
-                    lua_pushinteger(L, idx as lua_Integer);
-                    1
-                })),
-                Err(err) => AsyncOutput::Custom(Box::new(move |L| unsafe {
-                    lua_pushnil(L);
-                    lua_pushlstring(L, err.as_ptr() as *const c_char, err.len());
-                    lua_pushinteger(L, idx as lua_Integer);
-                    3
-                })),
-            }
-        }),
-    )
+    trampoline(L, |L| unsafe {
+        let n = lua_gettop(L);
+        if n < 1 {
+            return Err("thread.wait: expected at least one thread".to_string());
+        }
+        let mut done = Vec::with_capacity(n as usize);
+        for i in 1..=n {
+            let mut thread = try_check::<Thread>(L, i)?;
+            let Some(rx) = thread.done.take() else {
+                return Err("thread.wait: thread already waited".to_string());
+            };
+            done.push((i as usize, rx));
+        }
+        Ok(yield_with(
+            L,
+            Box::pin(async move {
+                let (idx, res) = WaitAny { done }.await;
+                match res {
+                    Ok(()) => WaitOutcome::Done(idx as i64),
+                    Err(err) => WaitOutcome::Error(Nil, err, idx as i64),
+                }
+            }),
+        ))
+    })
 }
 
 /// 构造 cosmos.thread 表（open_cosmos 里挂到 cosmos 表下）

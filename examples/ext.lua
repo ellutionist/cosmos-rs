@@ -37,4 +37,15 @@ assert(r4 == 42, "delayed_double wrong: " .. r4)
 assert(cosmos.now_ms() - t3 >= 99, "delayed_double too early")
 print("static async ok:", r4)
 
+-- 异步参数错误不能跳过 self 守卫的析构；同一对象必须还能继续使用。
+local expected = acc:get()
+local ok, err = pcall(function() acc:tick("bad") end)
+assert(not ok and type(err) == "string", "tick 应拒绝非法参数")
+assert(acc:get() == expected, "tick 参数错误后对象不可读")
+local shared_ok = pcall(function() acc:peek_delayed("bad") end)
+assert(not shared_ok, "peek_delayed 应拒绝非法参数")
+assert(acc:add(0) == expected, "共享异步参数错误后对象不可写")
+assert(acc:tick(0) == expected + 1, "参数错误后合法异步调用失败")
+print("async argument recovery ok")
+
 print("OK")

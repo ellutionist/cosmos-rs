@@ -211,11 +211,9 @@ pub(crate) async fn run_conn(
         ws: shared.clone(),
         timeout: None,
     };
-    let mut co = unsafe { handler.call_in_new_thread((conn, request)) };
-    if let Err(err) = (&mut co).await {
+    if let Err(err) = handler.call::<_, ()>((conn, request)).await {
         eprintln!("websocket handler error: {err}");
     }
-    drop(co); // 解除协程锚定（挂起中被取消同样适用）
     // handler 返回（或被取消）后由服务端主动 close；对端可能已关，忽略错误
     let pending = shared.borrow_mut().take();
     if let Some(mut ws) = pending {

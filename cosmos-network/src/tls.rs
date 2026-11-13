@@ -170,16 +170,6 @@ pub(crate) fn with_alpn_client(config: Arc<ClientConfig>, alpn: &[&[u8]]) -> Arc
     Arc::new(cfg)
 }
 
-/// 复制服务端配置并强制 ALPN
-pub(crate) fn with_alpn_server(config: Arc<ServerConfig>, alpn: &[&[u8]]) -> Arc<ServerConfig> {
-    if config.alpn_protocols.iter().map(|p| p.as_slice()).eq(alpn.iter().copied()) {
-        return config;
-    }
-    let mut cfg = (*config).clone();
-    cfg.alpn_protocols = alpn.iter().map(|p| p.to_vec()).collect();
-    Arc::new(cfg)
-}
-
 /// 建立 TLS 客户端流（TCP + 握手共用一个 deadline）；Tls.connect 与 HTTP client 共用
 pub(crate) async fn connect_tls_io(
     host: &str,

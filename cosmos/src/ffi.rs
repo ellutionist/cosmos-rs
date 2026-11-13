@@ -69,9 +69,10 @@ extern "C" {
 
     pub fn lua_newuserdata(L: *mut lua_State, size: size_t) -> *mut c_void;
     pub fn lua_touserdata(L: *mut lua_State, idx: c_int) -> *mut c_void;
+    pub fn lua_getmetatable(L: *mut lua_State, idx: c_int) -> c_int;
+    pub fn lua_rawequal(L: *mut lua_State, idx1: c_int, idx2: c_int) -> c_int;
     pub fn lua_setmetatable(L: *mut lua_State, idx: c_int) -> c_int;
     pub fn luaL_newmetatable(L: *mut lua_State, tname: *const c_char) -> c_int;
-    pub fn luaL_checkudata(L: *mut lua_State, idx: c_int, tname: *const c_char) -> *mut c_void;
 
     pub fn luaL_ref(L: *mut lua_State, t: c_int) -> c_int;
     pub fn luaL_unref(L: *mut lua_State, t: c_int, ref_: c_int);

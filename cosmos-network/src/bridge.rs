@@ -6,15 +6,11 @@
 //! - TCP 迭代器闭包的 C trampoline（upvalue 挂 userdata）；
 //! - 全部 userdata 类型注册。
 //!
-//! 多返回值/表结构一律由 `#[derive(cosmos::IntoOutput)]` 与 `&str` / `Vec<u8>` /
+//! 多返回值/表结构一律由 `#[derive(cosmos::PushLua)]` 与 `&str` / `Vec<u8>` /
 //! `Nil` / `LuaStrMap` 等 cosmos 基层类型组合而成，功能模块只构造值。
 
-pub(crate) use cosmos::ffi::lua_State;
-
-use cosmos::ffi::{
-    c_char, c_int, lua_pushlstring, lua_tointeger, lua_type, LUA_TNUMBER, LUA_TSTRING,
-};
-use cosmos::userdata::{check, push_closure, FromLua, IntoOutput, LuaStrMap, PushLua};
+use cosmos::ffi::{c_char, c_int, lua_State, lua_pushlstring};
+use cosmos::userdata::{push_closure, trampoline, try_check, FromLua, LuaStrMap, PushLua};
 
 use crate::http::client::HttpClient;
 use crate::http::server::{HttpRequest, HttpServer, HttpServerHandle};
@@ -66,12 +62,19 @@ impl FromLua for LuaBytes {
 // TCP：receive 参数与迭代器闭包
 // ---------------------------------------------------------------------------
 
+#[derive(cosmos::FromLua)]
+enum ReceiveArg {
+    #[lua(type = "number")]
+    Size(i64),
+    #[lua(type = "string")]
+    Pattern(String),
+}
+
 impl FromLua for ReceivePattern {
     unsafe fn from_lua(L: *mut lua_State, idx: c_int) -> Result<Self, String> {
-        match lua_type(L, idx) {
-            LUA_TNUMBER => Ok(ReceivePattern::Size(lua_tointeger(L, idx).max(0) as usize)),
-            LUA_TSTRING => {
-                let s = <String as FromLua>::from_lua(L, idx)?;
+        match ReceiveArg::from_lua(L, idx)? {
+            ReceiveArg::Size(size) => Ok(ReceivePattern::Size(size.max(0) as usize)),
+            ReceiveArg::Pattern(s) => {
                 let pat = s.strip_prefix('*').unwrap_or(&s);
                 match pat {
                     "a" => Ok(ReceivePattern::All),
@@ -82,7 +85,6 @@ impl FromLua for ReceivePattern {
                     )),
                 }
             }
-            _ => Err(format!("argument {idx}: expected number or '*l'/'*L'/'*a'")),
         }
     }
 }
@@ -102,13 +104,13 @@ const UPVALUE_1: c_int = cosmos::ffi::LUA_GLOBALSINDEX - 1;
 /// 闭包本体：从 upvalue 取 TcpUntil（RefMut 移进 future 持有），
 /// 像异步方法一样 yield 出去等读取结果
 unsafe extern "C" fn until_call(L: *mut lua_State) -> c_int {
-    unsafe {
-        let mut this = check::<TcpUntil>(L, UPVALUE_1);
-        cosmos::coroutine::yield_with(
+    trampoline(L, |L| unsafe {
+        let mut this = try_check::<TcpUntil>(L, UPVALUE_1)?;
+        Ok(cosmos::coroutine::yield_with(
             L,
-            Box::pin(async move { this.next().await.into_output() }),
-        )
-    }
+            Box::pin(async move { this.next().await }),
+        ))
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -117,14 +119,14 @@ unsafe extern "C" fn until_call(L: *mut lua_State) -> c_int {
 
 impl FromLua for ClientCfg {
     unsafe fn from_lua(L: *mut lua_State, idx: c_int) -> Result<Self, String> {
-        let mut ctx = check::<TlsContext>(L, idx);
+        let mut ctx = try_check::<TlsContext>(L, idx)?;
         ctx.client_config().map(ClientCfg)
     }
 }
 
 impl FromLua for ServerCfg {
     unsafe fn from_lua(L: *mut lua_State, idx: c_int) -> Result<Self, String> {
-        let mut ctx = check::<TlsContext>(L, idx);
+        let mut ctx = try_check::<TlsContext>(L, idx)?;
         ctx.server_config().map(ServerCfg)
     }
 }

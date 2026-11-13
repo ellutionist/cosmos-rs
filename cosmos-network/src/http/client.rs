@@ -35,9 +35,6 @@ use rustls::{ClientConfig, RootCertStore};
 use tokio::net::TcpStream;
 use tokio::time::Instant;
 
-use cosmos::coroutine::AsyncOutput;
-use cosmos::userdata::{IntoOutput, PushLua};
-
 use super::{version_num, Conn, Headers, LuaBytes};
 use crate::error::classify_io;
 use crate::tcp::{timeout_from_ms, with_deadline};
@@ -173,12 +170,6 @@ pub(crate) struct ClientResponse {
     version: i64,
     headers: Headers,
     body: LuaBytes,
-}
-
-impl IntoOutput for ClientResponse {
-    fn into_output(self) -> AsyncOutput {
-        AsyncOutput::Custom(Box::new(move |L| self.push_lua(L)))
-    }
 }
 
 /// 客户端入口：静态方法

@@ -11,49 +11,27 @@ use crate::ffi::*;
 use crate::stack;
 use crate::userdata::PushLua;
 
-/// 异步 op 的输出：跨 yield 边界的 concrete 类型（Future<Output = AsyncOutput> 的类型系统要求）。
-/// 标量变体零分配；开放值域（userdata/table）走 Custom 闭包（闭包兼做值的存放与压栈）。
-/// AsyncOutput 本身实现 PushLua，各变体委托给标量 impl——压栈逻辑全代码库只有一份
-#[allow(dead_code)] // 变体随 op 库逐步启用，目前只有 Nil 被构造
-pub enum AsyncOutput {
-    Nil,
-    Boolean(bool),
-    Number(f64),
-    Integer(i64),
-    String(String),
-    /// Err 的标准 Lua 形态：压 nil + 错误串（两个返回值），
-    /// 让 Lua 侧 `local v, err = op()` 拿到错误信息
-    NilErr(String),
-    /// 逃生舱：任意 Rust 值 → 闭包负责压栈（userdata/table/序列化），
-    /// 闭包内不得触发 lua_error（此处不在 lua_resume 的保护帧内）。
-    /// 仅异步 op 输出使用；同步方法返回走 PushLua 的 userdata blanket impl 直接压栈
-    Custom(Box<dyn FnOnce(*mut lua_State) -> i32>),
+/// 擦除异步操作的具体类型，在完成的当次轮询中直接压栈。
+/// 输出仍是原生 Rust 值，只要求实现 PushLua，无需单独装箱返回值。
+pub trait PendingOp {
+    /// Pending 时不压栈；Ready 返回压入的值数，交给下一次 lua_resume。
+    /// 与 PushLua 相同，转换过程中不得调用 lua_error。
+    fn poll_push(self: Pin<&mut Self>, cx: &mut Context<'_>, L: *mut lua_State) -> Poll<i32>;
 }
 
-impl PushLua for AsyncOutput {
-    fn push_lua(self, L: *mut lua_State) -> i32 {
-        match self {
-            AsyncOutput::Nil => 0,
-            AsyncOutput::Boolean(b) => b.push_lua(L),
-            AsyncOutput::Number(n) => n.push_lua(L),
-            AsyncOutput::Integer(i) => i.push_lua(L),
-            AsyncOutput::String(s) => s.push_lua(L),
-            AsyncOutput::NilErr(msg) => {
-                unsafe {
-                    lua_pushnil(L);
-                    lua_pushlstring(L, msg.as_ptr() as *const c_char, msg.len());
-                }
-                2
-            }
-            AsyncOutput::Custom(push) => push(L),
-        }
+impl<F: Future> PendingOp for F
+where
+    F::Output: PushLua,
+{
+    fn poll_push(self: Pin<&mut Self>, cx: &mut Context<'_>, L: *mut lua_State) -> Poll<i32> {
+        self.poll(cx).map(|value| value.push_lua(L))
     }
 }
 
 /// 协程挂起期间等待的异步操作。
 /// 无 Send 约束：LuaCoroutine 本身 !Send（线程亲和），整个链路不会跨线程，
 /// 放宽后 op 可以捕获 !Send 的数据（如带 Rc 的用户对象）
-pub type PendingFuture = Pin<Box<dyn Future<Output = AsyncOutput>>>;
+pub type PendingFuture = Pin<Box<dyn PendingOp>>;
 
 // yield 通道：C 函数把 PendingFuture 塞进 TLS 槽再 lua_yield(L, 0)，
 // 同一线程上的 poll 侧从槽里取回（见 yield_with / LuaCoroutine::poll）。
@@ -115,11 +93,6 @@ impl LuaCoroutine {
             _not_send: PhantomData,
         }
     }
-
-    /// 绑定的协程状态（完成后读返回值用；在 Drop 前有效）
-    pub fn state(&self) -> *mut lua_State {
-        self.thread
-    }
 }
 
 impl Drop for LuaCoroutine {
@@ -146,9 +119,9 @@ impl Future for LuaCoroutine {
                 // 关键接线：内层 future 拿到的是外层 cx 的 waker，
                 // 事件（timer/epoll）到来时唤醒的就是本 future 所在的 task。
                 // Pending 时 future 留在枚举里原地保存（堆上，pinning 不变）
-                Phase::Awaiting(fut) => match fut.as_mut().poll(cx) {
+                Phase::Awaiting(fut) => match fut.as_mut().poll_push(cx, this.thread) {
                     Poll::Pending => return Poll::Pending,
-                    Poll::Ready(out) => out.push_lua(this.thread),
+                    Poll::Ready(nargs) => nargs,
                 },
             };
             match unsafe { lua_resume(this.thread, nargs) } {
@@ -175,6 +148,104 @@ impl Future for LuaCoroutine {
                     return Poll::Ready(Err(format!("lua_resume: unexpected status {status}")))
                 }
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::userdata::{FromLua, Nil};
+    use std::cell::Cell;
+    use std::task::Waker;
+
+    #[test]
+    fn pending_operation_pushes_only_when_ready_and_releases_borrow() {
+        unsafe {
+            let L = luaL_newstate();
+            assert!(!L.is_null());
+            let state = Rc::new(RefCell::new(7i64));
+            let owner = state.clone();
+            let mut op: PendingFuture = Box::pin(async move {
+                let guard = owner.borrow_mut();
+                let mut pending = true;
+                std::future::poll_fn(|cx| {
+                    if pending {
+                        pending = false;
+                        cx.waker().wake_by_ref();
+                        Poll::Pending
+                    } else {
+                        Poll::Ready(())
+                    }
+                })
+                .await;
+                (*guard, vec![0, 255, 1])
+            });
+            let mut cx = Context::from_waker(Waker::noop());
+            assert_eq!(op.as_mut().poll_push(&mut cx, L), Poll::Pending);
+            assert_eq!(lua_gettop(L), 0);
+            assert!(state.try_borrow_mut().is_err());
+
+            assert_eq!(op.as_mut().poll_push(&mut cx, L), Poll::Ready(2));
+            assert!(state.try_borrow_mut().is_ok());
+            assert_eq!(lua_gettop(L), 2);
+            assert_eq!(i64::from_lua(L, 1).unwrap(), 7);
+            assert_eq!(Vec::<u8>::from_lua(L, 2).unwrap(), [0, 255, 1]);
+            drop(op);
+            assert_eq!(Rc::strong_count(&state), 1);
+            lua_close(L);
+        }
+    }
+
+    #[test]
+    fn async_return_counts_distinguish_unit_none_and_errors() {
+        unsafe {
+            let L = luaL_newstate();
+            assert!(!L.is_null());
+            let mut cx = Context::from_waker(Waker::noop());
+            let mut operations: Vec<PendingFuture> = vec![
+                Box::pin(async {}),
+                Box::pin(async { None::<i64> }),
+                Box::pin(async { Err::<(), _>("失败") }),
+            ];
+            for (op, expected) in operations.iter_mut().zip([0, 1, 2]) {
+                lua_settop(L, 0);
+                assert_eq!(op.as_mut().poll_push(&mut cx, L), Poll::Ready(expected));
+                assert_eq!(lua_gettop(L), expected);
+                if expected > 0 {
+                    assert_eq!(lua_type(L, 1), LUA_TNIL);
+                }
+            }
+            assert_eq!(String::from_lua(L, 2).unwrap(), "失败");
+            drop(operations);
+            lua_close(L);
+        }
+    }
+
+    #[test]
+    fn cancelling_pending_operation_drops_captured_values_without_pushing() {
+        unsafe {
+            let L = luaL_newstate();
+            assert!(!L.is_null());
+            let dropped = Rc::new(Cell::new(false));
+            struct DropFlag(Rc<Cell<bool>>);
+            impl Drop for DropFlag {
+                fn drop(&mut self) {
+                    self.0.set(true);
+                }
+            }
+            let flag = DropFlag(dropped.clone());
+            let mut op: PendingFuture = Box::pin(async move {
+                std::future::pending::<()>().await;
+                drop(flag);
+                Nil
+            });
+            let mut cx = Context::from_waker(Waker::noop());
+            assert_eq!(op.as_mut().poll_push(&mut cx, L), Poll::Pending);
+            drop(op);
+            assert!(dropped.get());
+            assert_eq!(lua_gettop(L), 0);
+            lua_close(L);
         }
     }
 }

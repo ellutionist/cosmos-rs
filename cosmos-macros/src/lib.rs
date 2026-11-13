@@ -52,10 +52,7 @@ pub fn userdata(attr: TokenStream, item: TokenStream) -> TokenStream {
 
     let ty = &imp.self_ty;
     let ty_label = type_label(ty);
-    let lua_name = syn::LitStr::new(
-        name_override.as_deref().unwrap_or(&ty_label),
-        ty.span(),
-    );
+    let lua_name = syn::LitStr::new(name_override.as_deref().unwrap_or(&ty_label), ty.span());
 
     let mut trampolines = Vec::new();
     let mut registrations = Vec::new();
@@ -172,10 +169,10 @@ fn gen_method(
             }
             let binding = match (&r.reference, &r.mutability) {
                 (Some(_), None) => {
-                    quote!(let this = cosmos::userdata::check_shared::<#ty>(L, 1);)
+                    quote!(let this = cosmos::userdata::try_check_shared::<#ty>(L, 1)?;)
                 }
                 (Some(_), Some(_)) => {
-                    quote!(let mut this = cosmos::userdata::check::<#ty>(L, 1);)
+                    quote!(let mut this = cosmos::userdata::try_check::<#ty>(L, 1)?;)
                 }
                 _ => return err(r, "only &self and &mut self receivers are supported"),
             };
@@ -187,8 +184,7 @@ fn gen_method(
     };
 
     let mut arg_idents = Vec::new();
-    let mut arg_conversions_sync = Vec::new();
-    let mut arg_conversions_async = Vec::new();
+    let mut arg_conversions = Vec::new();
     let mut stack_idx: i32 = if is_static { 1 } else { 2 };
     let mut arg_n: usize = 0;
     let mut inputs = sig.inputs.iter();
@@ -211,14 +207,8 @@ fn gen_method(
         let ident = format_ident!("arg{arg_n}");
         arg_n += 1;
         arg_idents.push(ident.clone());
-        arg_conversions_sync.push(quote! {
+        arg_conversions.push(quote! {
             let #ident = <#arg_ty as cosmos::userdata::FromLua>::from_lua(L, #stack_idx)?;
-        });
-        arg_conversions_async.push(quote! {
-            let #ident = match <#arg_ty as cosmos::userdata::FromLua>::from_lua(L, #stack_idx) {
-                ::core::result::Result::Ok(v) => v,
-                ::core::result::Result::Err(e) => return cosmos::userdata::raise(L, &e),
-            };
         });
         stack_idx += 1;
     }
@@ -242,28 +232,20 @@ fn gen_method(
         // async 方法：守卫（RefMut/Ref）被 move 进外层 future 持有，
         // 整个 await 期间 RefCell borrow flag 保持"已借"，其他方法调用报 lua_error。
         // yield_with 必须是尾表达式（5.1 语义：lua_yield 的 -1 要作为返回值交出去）。
-        // Result<T, E> 由 IntoOutput 的 blanket impl 统一处理（Ok 走值 / Err 走 NilErr）
-        let async_body = match &sig.output {
-            ReturnType::Default => {
-                quote!(<() as cosmos::userdata::IntoOutput>::into_output(#call.await))
-            }
-            ReturnType::Type(_, ret_ty) => {
-                quote!(<#ret_ty as cosmos::userdata::IntoOutput>::into_output(#call.await))
-            }
-        };
+        // 保留原生返回值，PendingOp 完成轮询时统一经 PushLua 转换。
         quote! {
             #[allow(non_snake_case)]
             unsafe extern "C" fn #tramp_ident(
                 L: *mut cosmos::ffi::lua_State,
             ) -> cosmos::ffi::c_int {
-                unsafe {
+                cosmos::userdata::trampoline(L, |L| unsafe {
                     #self_binding
-                    #(#arg_conversions_async)*
-                    cosmos::coroutine::yield_with(
+                    #(#arg_conversions)*
+                    Ok(cosmos::coroutine::yield_with(
                         L,
-                        Box::pin(async move { #async_body }),
-                    )
-                }
+                        Box::pin(async move { #call.await }),
+                    ))
+                })
             }
         }
     } else {
@@ -286,7 +268,7 @@ fn gen_method(
             ) -> cosmos::ffi::c_int {
                 cosmos::userdata::trampoline(L, |L| unsafe {
                     #self_binding
-                    #(#arg_conversions_sync)*
+                    #(#arg_conversions)*
                     #ret_conv
                 })
             }
@@ -364,7 +346,8 @@ fn parse_container_default(attrs: &[syn::Attribute]) -> syn::Result<Option<Field
                 default = Some(FieldDefault::Fn(meta.value()?.parse()?));
                 Ok(())
             } else {
-                Err(meta.error("unknown struct-level lua attribute (expected default / default_fn)"))
+                Err(meta
+                    .error("unknown struct-level lua attribute (expected default / default_fn)"))
             }
         })?;
     }
@@ -423,6 +406,9 @@ pub fn derive_from_lua(input: TokenStream) -> TokenStream {
 }
 
 fn expand_from_lua(input: &DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
+    if matches!(&input.data, Data::Enum(_)) {
+        return expand_from_lua_enum(input);
+    }
     let name = &input.ident;
     let fields = lua_fields(input)?;
     let container_default = parse_container_default(&input.attrs)?;
@@ -516,15 +502,138 @@ fn expand_from_lua(input: &DeriveInput) -> syn::Result<proc_macro2::TokenStream>
                 L: *mut cosmos::ffi::lua_State,
                 idx: cosmos::ffi::c_int,
             ) -> ::core::result::Result<Self, ::std::string::String> {
+                let idx = cosmos::stack::abs_index(L, idx);
+                let __cosmos_top = cosmos::ffi::lua_gettop(L);
                 if cosmos::ffi::lua_type(L, idx) != cosmos::ffi::LUA_TTABLE {
                     return ::core::result::Result::Err(::std::format!(
                         "argument {}: expected table", idx
                     ));
                 }
-                #(#decls)*
-                #container_init
-                #scan
-                Ok(Self { #(#values),* })
+                let __cosmos_result = (|| {
+                    #(#decls)*
+                    #container_init
+                    #scan
+                    Ok(Self { #(#values),* })
+                })();
+                cosmos::ffi::lua_settop(L, __cosmos_top);
+                __cosmos_result
+            }
+        }
+    })
+}
+
+/// 无标签枚举按首个 Lua 值的类型分流，分支内字段按顺序读取多个槽位。
+/// 显式标注 `#[lua(type = "table")]` 等，避免试读分支带来的额外分配与副作用。
+fn expand_from_lua_enum(input: &DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
+    let Data::Enum(data) = &input.data else {
+        return err(&input.ident, "#[derive(FromLua)] expected an enum");
+    };
+    let name = &input.ident;
+    let (impl_generics, ty_generics, where_clause) = input.generics.split_for_impl();
+    let mut kinds = std::collections::HashSet::new();
+    let mut arms = Vec::new();
+    let mut expected = Vec::new();
+    let mut fallback = None;
+    for variant in &data.variants {
+        let mut kind = None;
+        let mut other = false;
+        for attr in variant.attrs.iter().filter(|a| a.path().is_ident("lua")) {
+            attr.parse_nested_meta(|meta| {
+                if kind.is_some() || other {
+                    return Err(meta.error("expected one Lua type selector per variant"));
+                }
+                if meta.path.is_ident("other") {
+                    other = true;
+                    return Ok(());
+                }
+                if !meta.path.is_ident("type") {
+                    return Err(meta.error("expected `type = \"Lua type\"` or `other`"));
+                }
+                kind = Some(meta.value()?.parse::<LitStr>()?);
+                Ok(())
+            })?;
+        }
+        if other {
+            if !matches!(variant.fields, Fields::Unit) || fallback.is_some() {
+                return err(
+                    variant,
+                    "#[lua(other)] requires a single unit fallback variant",
+                );
+            }
+            let vident = &variant.ident;
+            fallback = Some(quote!(_ => Ok(Self::#vident)));
+            continue;
+        }
+        let kind = kind.ok_or_else(|| {
+            syn::Error::new(
+                variant.span(),
+                "enum variants require #[lua(type = \"Lua type\")]",
+            )
+        })?;
+        let kind_name = kind.value();
+        let constant = match kind_name.as_str() {
+            "none" => quote!(cosmos::ffi::LUA_TNONE),
+            "nil" => quote!(cosmos::ffi::LUA_TNIL),
+            "boolean" => quote!(cosmos::ffi::LUA_TBOOLEAN),
+            "number" => quote!(cosmos::ffi::LUA_TNUMBER),
+            "string" => quote!(cosmos::ffi::LUA_TSTRING),
+            "table" => quote!(cosmos::ffi::LUA_TTABLE),
+            "function" => quote!(cosmos::ffi::LUA_TFUNCTION),
+            "userdata" => quote!(cosmos::ffi::LUA_TUSERDATA),
+            _ => return err(&kind, "unsupported Lua type"),
+        };
+        if !kinds.insert(kind_name.clone()) {
+            return err(&kind, "duplicate Lua type in enum variants");
+        }
+        expected.push(kind_name);
+        let vident = &variant.ident;
+        let reads: Vec<_> = variant
+            .fields
+            .iter()
+            .enumerate()
+            .map(|(i, field)| {
+                let ty = &field.ty;
+                let offset = i as i32;
+                quote!(<#ty as cosmos::userdata::FromLua>::from_lua(L, idx + #offset)?)
+            })
+            .collect();
+        let construct = match &variant.fields {
+            Fields::Unit => quote!(Self::#vident),
+            Fields::Unnamed(_) => quote!(Self::#vident(#(#reads),*)),
+            Fields::Named(fields) => {
+                let names = fields
+                    .named
+                    .iter()
+                    .map(|field| field.ident.as_ref().unwrap());
+                quote!(Self::#vident { #(#names: #reads),* })
+            }
+        };
+        arms.push(quote!(#constant => Ok(#construct)));
+    }
+    let expected = expected.join(" / ");
+    let fallback = fallback.unwrap_or_else(|| {
+        quote! {
+            kind => Err(::std::format!(
+                "argument {}: expected {} (got lua type {})", idx, #expected, kind,
+            ))
+        }
+    });
+    Ok(quote! {
+        impl #impl_generics cosmos::userdata::FromLua for #name #ty_generics #where_clause {
+            unsafe fn from_lua(
+                L: *mut cosmos::ffi::lua_State,
+                idx: cosmos::ffi::c_int,
+            ) -> ::core::result::Result<Self, ::std::string::String> {
+                let idx = cosmos::stack::abs_index(L, idx);
+                let __cosmos_top = cosmos::ffi::lua_gettop(L);
+                let __cosmos_result = (|| {
+                    match cosmos::ffi::lua_type(L, idx) {
+                        #(#arms,)*
+                        #fallback,
+                    }
+                })();
+                cosmos::ffi::lua_settop(L, __cosmos_top);
+                __cosmos_result
             }
         }
     })
@@ -539,6 +648,9 @@ pub fn derive_push_lua(input: TokenStream) -> TokenStream {
 }
 
 fn expand_push_lua(input: &DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
+    if matches!(&input.data, Data::Enum(_)) {
+        return expand_push_lua_enum(input);
+    }
     let name = &input.ident;
     let fields = lua_fields(input)?;
     let n = fields.len() as i32;
@@ -568,30 +680,22 @@ fn expand_push_lua(input: &DeriveInput) -> syn::Result<proc_macro2::TokenStream>
 }
 
 // ---------------------------------------------------------------------------
-// #[derive(IntoOutput)]：把一个 Rust 枚举派发成 Lua 的多返回值形态
+// #[derive(PushLua)] 的枚举分支：按字段顺序生成 Lua 多返回值
 //
 // 每个分支按字段声明顺序压栈（字段需实现 PushLua），返回值个数 = 各字段
 // 压栈个数之和。适合"一个 Rust 枚举对应多种 Lua 返回值形态"的场景：
 // 功能模块只描述变体本身的字段，不再手写 match 分支 + lua_push*。
 //
-//   #[derive(cosmos::IntoOutput)]
+//   #[derive(cosmos::PushLua)]
 //   enum Outcome {
 //       Data(Vec<u8>),                      // 1 值
 //       Closed(Nil, &'static str, Vec<u8>), // 3 值：nil, reason, partial
 //   }
 // ---------------------------------------------------------------------------
 
-#[proc_macro_derive(IntoOutput)]
-pub fn derive_into_output(input: TokenStream) -> TokenStream {
-    let input = parse_macro_input!(input as DeriveInput);
-    expand_into_output(&input)
-        .unwrap_or_else(|e| e.to_compile_error())
-        .into()
-}
-
-fn expand_into_output(input: &DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
+fn expand_push_lua_enum(input: &DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
     let Data::Enum(data) = &input.data else {
-        return err(&input.ident, "#[derive(IntoOutput)] only supports enums");
+        return err(&input.ident, "#[derive(PushLua)] expected an enum");
     };
     let name = &input.ident;
     let (impl_generics, ty_generics, where_clause) = input.generics.split_for_impl();
@@ -608,19 +712,16 @@ fn expand_into_output(input: &DeriveInput) -> syn::Result<proc_macro2::TokenStre
                 quote!(Self::#vident(#(#bindings),*))
             }
             Fields::Named(fields) => {
-                let bindings: Vec<_> = fields
-                    .named
-                    .iter()
-                    .map(|f| f.ident.clone().expect("named field"))
-                    .collect();
+                let bindings = fields.named.iter().enumerate().map(|(i, f)| {
+                    let field = f.ident.as_ref().expect("named field");
+                    let binding = format_ident!("__field_{i}");
+                    quote!(#field: #binding)
+                });
                 quote!(Self::#vident { #(#bindings),* })
             }
         };
-        let pushes = variant.fields.iter().enumerate().map(|(i, f)| {
-            let binding = match &f.ident {
-                Some(ident) => ident.clone(),
-                None => format_ident!("__field_{i}"),
-            };
+        let pushes = variant.fields.iter().enumerate().map(|(i, _)| {
+            let binding = format_ident!("__field_{i}");
             quote!(+ cosmos::userdata::PushLua::push_lua(#binding, L))
         });
         // `0 + a.push_lua(L) + b.push_lua(L)`：操作数从左到右求值，保证压栈顺序
@@ -628,13 +729,11 @@ fn expand_into_output(input: &DeriveInput) -> syn::Result<proc_macro2::TokenStre
     }
 
     Ok(quote! {
-        impl #impl_generics cosmos::userdata::IntoOutput for #name #ty_generics #where_clause {
-            fn into_output(self) -> cosmos::coroutine::AsyncOutput {
-                cosmos::coroutine::AsyncOutput::Custom(::std::boxed::Box::new(move |L| {
-                    match self {
-                        #(#arms),*
-                    }
-                }))
+        impl #impl_generics cosmos::userdata::PushLua for #name #ty_generics #where_clause {
+            fn push_lua(self, L: *mut cosmos::ffi::lua_State) -> cosmos::ffi::c_int {
+                match self {
+                    #(#arms),*
+                }
             }
         }
     })

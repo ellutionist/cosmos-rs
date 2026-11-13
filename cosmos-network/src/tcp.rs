@@ -255,7 +255,7 @@ pub enum ReceivePattern {
 ///   Data        → data
 ///   Eof         → nil
 ///   Closed/…    → nil, reason, partial
-#[derive(cosmos::IntoOutput)]
+#[derive(cosmos::PushLua)]
 pub enum ReceiveOutcome {
     Data(Vec<u8>),
     Eof(Nil),
