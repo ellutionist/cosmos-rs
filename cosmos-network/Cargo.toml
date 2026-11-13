@@ -1,0 +1,8 @@
+[package]
+name = "cosmos-network"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+cosmos = { path = "../cosmos" }
+tokio = { version = "1", features = ["net", "io-util", "time"] }

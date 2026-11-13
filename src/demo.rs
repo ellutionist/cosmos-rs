@@ -23,7 +23,7 @@ impl Counter {
         self.n = value;
     }
 
-    fn greet(&self, name: String) -> String {
+    fn greet(&self, name: &str) -> String {
         format!("hello, {name}! counter = {}", self.n)
     }
 

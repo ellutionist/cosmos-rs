@@ -18,10 +18,7 @@
 use proc_macro::TokenStream;
 use proc_macro2::Literal;
 use quote::{format_ident, quote};
-use syn::{
-    parse_macro_input, spanned::Spanned, FnArg, ImplItem, ItemImpl, PatType, PathArguments,
-    ReturnType, Type,
-};
+use syn::{parse_macro_input, spanned::Spanned, FnArg, ImplItem, ItemImpl, PatType, ReturnType, Type};
 
 #[proc_macro_attribute]
 pub fn userdata(_attr: TokenStream, item: TokenStream) -> TokenStream {
@@ -128,16 +125,6 @@ fn gen_method(
     if sig.variadic.is_some() {
         return err(&f.sig, "variadic methods are not supported");
     }
-    if is_async {
-        if let ReturnType::Type(_, ty) = &sig.output {
-            if as_result(ty).is_some() {
-                return err(
-                    &sig.output,
-                    "async methods returning Result are not supported yet",
-                );
-            }
-        }
-    }
 
     // 静态方法（无 self 接收者）：不做 self 检查，参数从栈 1 开始；
     // 实例方法：首参是 Receiver，check 后参数从栈 2 开始。
@@ -175,7 +162,15 @@ fn gen_method(
         let FnArg::Typed(PatType { ty: arg_ty, .. }) = arg else {
             return err(arg, "self must be the first argument");
         };
-        check_arg_ty(arg_ty)?;
+        if is_async {
+            if matches!(arg_ty.as_ref(), Type::Reference(_)) {
+                return err(
+                    arg_ty,
+                    "async methods cannot borrow Lua arguments across yield; \
+                     use owned types (e.g. String instead of &str)",
+                );
+            }
+        }
         let ident = format_ident!("arg{arg_n}");
         arg_n += 1;
         arg_idents.push(ident.clone());
@@ -209,10 +204,15 @@ fn gen_method(
     let tramp = if is_async {
         // async 方法：守卫（RefMut/Ref）被 move 进外层 future 持有，
         // 整个 await 期间 RefCell borrow flag 保持"已借"，其他方法调用报 lua_error。
-        // yield_with 必须是尾表达式（5.1 语义：lua_yield 的 -1 要作为返回值交出去）
-        let ret_ty = match &sig.output {
-            ReturnType::Default => quote!(()),
-            ReturnType::Type(_, t) => quote!(#t),
+        // yield_with 必须是尾表达式（5.1 语义：lua_yield 的 -1 要作为返回值交出去）。
+        // Result<T, E> 由 IntoOutput 的 blanket impl 统一处理（Ok 走值 / Err 走 NilErr）
+        let async_body = match &sig.output {
+            ReturnType::Default => {
+                quote!(<() as cosmos::userdata::IntoOutput>::into_output(#call.await))
+            }
+            ReturnType::Type(_, ret_ty) => {
+                quote!(<#ret_ty as cosmos::userdata::IntoOutput>::into_output(#call.await))
+            }
         };
         quote! {
             #[allow(non_snake_case)]
@@ -224,42 +224,23 @@ fn gen_method(
                     #(#arg_conversions_async)*
                     cosmos::coroutine::yield_with(
                         L,
-                        Box::pin(async move {
-                            let ret = #call.await;
-                            <#ret_ty as cosmos::userdata::IntoOutput>::into_output(ret)
-                        }),
+                        Box::pin(async move { #async_body }),
                     )
                 }
             }
         }
     } else {
-        // 同步方法：走 PushLua 直接压栈（trampoline 在 lua_resume 保护帧内，
-        // userdata 等任意值零装箱）；Result<T, E> → Ok 压栈 / Err 转 lua_error
+        // 同步方法：走 PushLua 直接压栈（trampoline 在 lua_resume 保护帧内）。
+        // Result<T, E> 由 PushLua 的 blanket impl 统一处理（Ok 压值 / Err 压 nil+err）
         let ret_conv = match &sig.output {
             ReturnType::Default => quote! {
                 let ret = #call;
                 Ok(<() as cosmos::userdata::PushLua>::push_lua(ret, L))
             },
-            ReturnType::Type(_, ret_ty) => {
-                if let Some((ok_ty, _)) = as_result(ret_ty) {
-                    quote! {
-                        let ret = #call;
-                        match ret {
-                            ::core::result::Result::Ok(v) => {
-                                Ok(<#ok_ty as cosmos::userdata::PushLua>::push_lua(v, L))
-                            }
-                            ::core::result::Result::Err(e) => {
-                                Err(::std::string::ToString::to_string(&e))
-                            }
-                        }
-                    }
-                } else {
-                    quote! {
-                        let ret = #call;
-                        Ok(<#ret_ty as cosmos::userdata::PushLua>::push_lua(ret, L))
-                    }
-                }
-            }
+            ReturnType::Type(_, ret_ty) => quote! {
+                let ret = #call;
+                Ok(<#ret_ty as cosmos::userdata::PushLua>::push_lua(ret, L))
+            },
         };
         quote! {
             #[allow(non_snake_case)]
@@ -276,39 +257,4 @@ fn gen_method(
     };
 
     Ok((c_name, tramp_ident, tramp))
-}
-
-fn check_arg_ty(ty: &Type) -> syn::Result<()> {
-    if let Type::Path(p) = ty {
-        if p.qself.is_none() {
-            if let Some(seg) = p.path.segments.last() {
-                if matches!(seg.ident.to_string().as_str(), "i64" | "f64" | "bool" | "String") {
-                    return Ok(());
-                }
-            }
-        }
-    }
-    err(ty, "unsupported argument type (supported: i64, f64, bool, String)")
-}
-
-/// 识别 Result<T, E>（路径末段为 Result 且带两个泛型参数）
-fn as_result(ty: &Type) -> Option<(&Type, &Type)> {
-    let Type::Path(p) = ty else { return None };
-    let seg = p.path.segments.last()?;
-    if seg.ident != "Result" {
-        return None;
-    }
-    let PathArguments::AngleBracketed(args) = &seg.arguments else {
-        return None;
-    };
-    let mut types = args.args.iter().filter_map(|a| match a {
-        syn::GenericArgument::Type(t) => Some(t),
-        _ => None,
-    });
-    let ok = types.next()?;
-    let err_ty = types.next()?;
-    if types.next().is_some() {
-        return None;
-    }
-    Some((ok, err_ty))
 }

@@ -21,6 +21,7 @@ use std::any::TypeId;
 use std::cell::{Ref, RefCell, RefMut};
 use std::collections::{HashMap, HashSet};
 use std::ffi::CString;
+use std::fmt::Display;
 use std::marker::PhantomData;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::ptr;
@@ -306,6 +307,101 @@ impl FromLua for String {
     }
 }
 
+/// 零拷贝借用：同步方法专用。借用 Lua 字符串的数据，不复制、不分配。
+/// 只能用于同步方法（方法体在 lua_resume 内执行完，字符串被栈锚定不会被 GC）；
+/// 异步方法不得使用——future 跨 yield 后栈帧已丢弃，借用会悬垂（宏会拒绝）。
+/// 异步方法要用字符串请用 LuaStr（按长度拷贝或锚定）
+impl<'a> FromLua for &'a str {
+    unsafe fn from_lua(L: *mut lua_State, idx: c_int) -> Result<Self, String> {
+        if lua_type(L, idx) != LUA_TSTRING {
+            return Err(format!("argument {idx}: expected string"));
+        }
+        let mut len: size_t = 0;
+        let p = lua_tolstring(L, idx, &mut len);
+        let bytes = std::slice::from_raw_parts(p as *const u8, len);
+        std::str::from_utf8(bytes).map_err(|_| format!("argument {idx}: invalid UTF-8 string"))
+    }
+}
+
+/// 长度阈值：超过则走 registry 锚定而非拷贝。
+/// 拷贝成本 ≈ malloc(10~50ns) + memcpy(~0.1ns/字节)，锚定成本 ≈ 10 次表操作
+/// （300~800ns 固定）；二者在约 4KB 处交叉，短串拷贝更省
+pub const STR_ANCHOR_THRESHOLD: usize = 4096;
+
+/// 异步方法的字符串参数：≤阈值拷贝为 Owned，>阈值 registry 锚定借用（Borrowed）。
+/// 同步方法请直接用 &str（零拷贝且无需锚定）。
+/// 实现 Deref<Target=str>，方法体里当 &str 用（as_bytes/len/format 都行）。
+///
+/// 为什么异步方法不能裸借实参 &str（必须拷贝或锚定）：
+/// 协程挂起时 lua_yield 把栈 top 设回 base，实参所在的 C 函数帧槽位（base 之上）
+/// 被丢弃；若该串没有其它强引用，就成为不可达对象被 GC 回收，捕获的 &str 随之
+/// 悬垂（deref 即 UB）。强制 GC 实测：同样位于被丢弃槽位上的临时对象，无锚定时
+/// GC 后 collected=true、8MB 串 freed≈8MB；luaL_ref 锚定后 collected=false、
+/// freed=0——锚定使串成为 registry 里的 GC 根，数据在整个借用期内有效。
+///
+/// 注意这是"可能悬垂、而非必悬垂"：若串在 Lua 侧仍有残留强引用（如赋给了局部
+/// 变量、或留在顶层 chunk 帧的临时寄存器），GC 不会回收它。正因是否回收取决于
+/// 调用点写法、无法依赖，才必须保守地拷贝或锚定。
+///
+/// （附注：Lua 规定字符串不从弱表移除，别用弱值表观测字符串回收；用内存计数，
+/// 或对 table/userdata 等显式构造对象做弱表观测。）
+pub enum LuaStr {
+    Owned(String),
+    Borrowed(StrAnchor),
+}
+
+/// registry 锚定守卫：持有一个 luaL_ref 引用，drop 时 luaL_unref。
+/// 被锚定的字符串是 GC 根，其数据指针在守卫存活期间一直有效，
+/// 因此 s 的 'static 生命周期是 sound 的（transmute 延展）
+pub struct StrAnchor {
+    s: &'static str,
+    L: *mut lua_State,
+    ref_: c_int,
+}
+
+impl Drop for StrAnchor {
+    fn drop(&mut self) {
+        unsafe { luaL_unref(self.L, LUA_REGISTRYINDEX, self.ref_) };
+    }
+}
+
+impl std::ops::Deref for LuaStr {
+    type Target = str;
+    fn deref(&self) -> &str {
+        match self {
+            LuaStr::Owned(s) => s,
+            LuaStr::Borrowed(a) => a.s,
+        }
+    }
+}
+
+impl FromLua for LuaStr {
+    unsafe fn from_lua(L: *mut lua_State, idx: c_int) -> Result<Self, String> {
+        if lua_type(L, idx) != LUA_TSTRING {
+            return Err(format!("argument {idx}: expected string"));
+        }
+        let mut len: size_t = 0;
+        let p = lua_tolstring(L, idx, &mut len);
+        let bytes = std::slice::from_raw_parts(p as *const u8, len);
+        if len <= STR_ANCHOR_THRESHOLD {
+            Ok(LuaStr::Owned(
+                String::from_utf8_lossy(bytes).into_owned(),
+            ))
+        } else {
+            // 先校验 UTF-8（此时字符串还在栈上、锚定前不会被 GC），再锚定
+            let s = std::str::from_utf8(bytes)
+                .map_err(|_| format!("argument {idx}: invalid UTF-8 string"))?;
+            lua_pushvalue(L, idx);
+            let ref_ = luaL_ref(L, LUA_REGISTRYINDEX);
+            Ok(LuaStr::Borrowed(StrAnchor {
+                s: std::mem::transmute::<&str, &'static str>(s),
+                L,
+                ref_,
+            }))
+        }
+    }
+}
+
 /// 统一的压栈协议：把 Rust 值压上 Lua 栈，返回压入个数。
 ///
 /// 两条路径共用这一个协议：
@@ -365,6 +461,33 @@ impl<T: UserData> PushLua for T {
     }
 }
 
+/// 多返回值：2 元组依次压栈（split 这类"一次返回多个 userdata"的同步方法用）
+impl<A: PushLua, B: PushLua> PushLua for (A, B) {
+    fn push_lua(self, L: *mut lua_State) -> i32 {
+        let (a, b) = self;
+        a.push_lua(L) + b.push_lua(L)
+    }
+}
+
+/// Result<T, E> 统一走 nil + 错误串（标准 Lua 形态）：
+/// Ok(v) 压 v，Err(e) 压 nil + e.to_string()（两个返回值）。
+/// 同步方法经 PushLua、异步方法经 IntoOutput，都命中这一份语义
+impl<T: PushLua, E: Display> PushLua for Result<T, E> {
+    fn push_lua(self, L: *mut lua_State) -> i32 {
+        match self {
+            Ok(v) => v.push_lua(L),
+            Err(e) => {
+                let msg = e.to_string();
+                unsafe {
+                    lua_pushnil(L);
+                    lua_pushlstring(L, msg.as_ptr() as *const c_char, msg.len());
+                }
+                2
+            }
+        }
+    }
+}
+
 /// 值 → 异步边界类型 AsyncOutput：async 方法/op 的返回值要跨 yield 边界，
 /// 必须收敛进枚举（标量零分配，开放值域走 Custom 闭包）。
 ///
@@ -416,5 +539,16 @@ impl<T: UserData> IntoOutput for T {
             push::<T>(L, self);
             1
         }))
+    }
+}
+
+/// Result<T, E> 的异步形态：Ok 走 IntoOutput，Err 走 NilErr（nil + 错误串）。
+/// 与 PushLua 的 Result impl 语义一致，同步/异步统一
+impl<T: IntoOutput, E: Display> IntoOutput for Result<T, E> {
+    fn into_output(self) -> AsyncOutput {
+        match self {
+            Ok(v) => v.into_output(),
+            Err(e) => AsyncOutput::NilErr(e.to_string()),
+        }
     }
 }

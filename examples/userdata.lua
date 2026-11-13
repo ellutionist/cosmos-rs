@@ -35,10 +35,11 @@ local ok2, err2 = pcall(function() Counter.new("x") end)
 assert(not ok2, "expected constructor arg error")
 print("constructor arg error:", err2)
 
--- Result 的 Err → lua_error
-local ok3, err3 = pcall(function() c:try_div(0) end)
-assert(not ok3, "expected div-by-zero error")
-print("result error:", err3)
+-- Result 的 Err → nil + err（标准 Lua 形态）
+local v3, err3 = c:try_div(0)
+assert(v3 == nil, "expected nil on error")
+assert(err3 == "division by zero", "expected err string, got " .. tostring(err3))
+print("result nil+err:", v3, err3)
 
 -- dup 出来的是独立对象
 d:inc(1)

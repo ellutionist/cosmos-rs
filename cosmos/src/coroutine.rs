@@ -21,6 +21,9 @@ pub enum AsyncOutput {
     Number(f64),
     Integer(i64),
     String(String),
+    /// Err 的标准 Lua 形态：压 nil + 错误串（两个返回值），
+    /// 让 Lua 侧 `local v, err = op()` 拿到错误信息
+    NilErr(String),
     /// 逃生舱：任意 Rust 值 → 闭包负责压栈（userdata/table/序列化），
     /// 闭包内不得触发 lua_error（此处不在 lua_resume 的保护帧内）。
     /// 仅异步 op 输出使用；同步方法返回走 PushLua 的 userdata blanket impl 直接压栈
@@ -35,6 +38,13 @@ impl PushLua for AsyncOutput {
             AsyncOutput::Number(n) => n.push_lua(L),
             AsyncOutput::Integer(i) => i.push_lua(L),
             AsyncOutput::String(s) => s.push_lua(L),
+            AsyncOutput::NilErr(msg) => {
+                unsafe {
+                    lua_pushnil(L);
+                    lua_pushlstring(L, msg.as_ptr() as *const c_char, msg.len());
+                }
+                2
+            }
             AsyncOutput::Custom(push) => push(L),
         }
     }
