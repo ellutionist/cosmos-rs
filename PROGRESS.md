@@ -350,3 +350,39 @@
 - 按用户要求，将 TCP stream/TLS 与 WebSocket 的目录整理、Rust 引用更新及配套文档一并提交到本地 Git，不 push。
 - 提交前差异检查通过；沿用已完成的构建、严格 Clippy、18 项单元测试以及 TCP/TLS、HTTP、WebSocket 等 examples 验证结果。
 - 下一步按实际模块扩展继续维护文件层级与 Lua 声明路径的一致性。
+
+## 2026-11-13 按声明式模块注册方式重写 time
+
+### 核心逻辑
+
+- 用 Time + #[userdata(name = "time")] 实现时间模块，builtin 统一 register，父表与 require 入口自动生成。
+  删除 time.rs 的裸 FFI、手写 C trampoline 和方法注册函数；模块只保留普通 Rust 同步/异步方法。
+- Lua 入口统一为 cosmos.time.sleep/now_ms/now_us（也可 require("cosmos.time")），迁移所有 examples、
+  压测脚本和类型化回调测试中的旧根表调用。sleep 仍返回零个值，两个时钟仍共用首次读取时初始化的单调起点。
+- 新增基层 Duration: FromLua，统一读取有限、非负、至多 1e12 的毫秒数，time.sleep 与 sync.Timeout 共用。
+  参数转换在挂起前完成，非法参数仍抛 Lua 错误；同时按 trait 规范严格拒绝非 number，移除旧 lua_tonumber 的隐式转换。
+
+### 验证与下一步
+
+- 扩充 examples/sleep.lua，实际验证 require 表身份、非法/缺省参数、零与小数毫秒、零返回值、
+  单调时钟单位与共用起点、实际休眠时长，以及上限时长等待的取消。
+- cargo build、18 项单元测试及严格 Clippy 通过；sync.lua 215 项检查通过，error.lua 按预期退出 1。
+- websocket/http/userdata/spawn/ext/sleep、TCP/TLS 单进程及双进程 examples 回归通过。
+- HTTP 压测服务端和客户端使用短窗口实际运行，完成 1215 个请求、0 错误，验证迁移后的毫秒/微秒计时与服务端休眠。
+- 已更新 AGENTS.md 与 HANDOFF.md；本轮未 commit / push。下一步继续按声明式注册维护内建模块。
+
+## 2026-11-13 修正 now 为真实系统时间
+
+- 根据用户明确的语义要求，now_ms / now_us 改用 SystemTime 读取当前 Unix 毫秒/微秒整数时间戳，
+  删除 OnceLock/Instant 的首次调用起点；系统时间调整会反映到返回值。sleep 仍使用 Tokio 定时器。
+- 上一轮沿用旧单调计时语义不符合 now 的含义，现已修正；同步更新 HANDOFF.md 与时间模块注释。
+- examples/sleep.lua 改用 os.time 校验时间戳范围和单位，移除单调时钟起点与不倒退断言。
+  另用宿主 Python 的 time.time_ns 在执行脚本前后夹取时间，确认两个返回值均落在当前系统时间范围内。
+- 构建、18 项单元测试及严格 Clippy 通过，sleep/ext/http/sync 实际用例通过，sync 仍为 215 项检查。
+- 本轮未 commit / push；后续时间接口继续明确时间戳单位与时钟语义。
+
+## 2026-11-13 提交时间模块重写
+
+- 按用户要求，提交 time 声明式注册、真实 Unix 毫秒/微秒时间戳、共用 Duration 转换及配套示例和文档，不 push。
+- 提交前差异检查通过；沿用已完成的构建、严格 Clippy、18 项测试、examples 回归及宿主系统时间核对结果。
+- 后续时间接口继续明确时间戳单位与时钟语义。

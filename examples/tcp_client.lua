@@ -13,10 +13,10 @@ w1:write("slow\n")
 local c2 = assert(Tcp.connect("127.0.0.1", port, 2000))
 c2:settimeout(2000)
 local r2, w2 = c2:split()
-local t0 = cosmos.now_ms()
+local t0 = cosmos.time.now_ms()
 w2:write("fast\n")
 assert(r2:receive("*l") == "fast", "fast echo")
-local fast_ms = cosmos.now_ms() - t0
+local fast_ms = cosmos.time.now_ms() - t0
 assert(fast_ms < 200, "handlers should run concurrently, fast took " .. fast_ms .. "ms")
 print(string.format("fast response in %.0fms", fast_ms))
 

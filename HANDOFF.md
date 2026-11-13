@@ -39,12 +39,14 @@ cosmos-rs/
 
 ## 3. 工作区现状
 
-- time/thread 内建功能已集中到 `cosmos/src/builtin`，由 `builtin::open` 统一初始化；Lua 调用入口保持原样。
+- time/thread 内建功能已集中到 `cosmos/src/builtin`，由 `builtin::open` 统一初始化。
+- time 已改为 `#[userdata(name = "time")]` 自动注册，入口统一为 `cosmos.time.*`，
+  时间函数不再放在 cosmos 根表，examples 与类型化回调测试已同步迁移。
 - `cosmos.sync` 已实现：有界 channel、通知、信号量和 mutex，见下文接口与回收语义。
 - 模块注册已按 userdata 声明路径自动组装父表；手写 Sync 与 TCP 聚合表已删除，sync 构造改为各类型的 `.new(...)`。
 - 上述 sync 与模块注册改动已提交为 `9a093b4`，未 push。网络文件已按模块层级整理为
   `tcp/mod.rs`、`tcp/stream.rs`、`tcp/tls.rs` 及 `websocket/mod.rs`、`websocket/conn.rs`，
-  Rust 引用同步更新，Lua require 路径保持原样。
+  Rust 引用同步更新，Lua require 路径保持原样；目录整理已提交为 `6c0067a`。
 
 - 本次命名整理提交：`Thread` → `LightThread`，`thread.rs` → `light_thread.rs`；当前 Rust 模块为 `cosmos::builtin::light_thread`，Lua 类型表为 `cosmos.LightThread`。
 - Lua 状态指针（含宏生成代码和外部扩展）已从 `L` 改为 `lua_state`，未使用参数为 `_lua_state`。
@@ -150,8 +152,19 @@ lua_close(lua_state);
   `builtin/light_thread.rs` 负责轻线程，`builtin/sync/` 负责同步原语；底层 `LuaCoroutine` 留在 `coroutine.rs`。
 - 宿主顺序：`luaL_openlibs` → `userdata::init` → `builtin::open` → 注册外部扩展和网络类型。
   `builtin::open` 自行注册 LightThread，宿主不再单独调用线程注册函数。
-- Lua 入口仍为 `cosmos.sleep/now_ms/now_us`、`cosmos.thread.spawn/wait`，类型表为 `cosmos.LightThread`。
+- Lua 时间入口为 `cosmos.time.sleep/now_ms/now_us`，轻线程入口为 `cosmos.thread.spawn/wait`，类型表为 `cosmos.LightThread`。
 - `libs.rs` 仅保留 `run_lua_source`，不再承担内建模块实现或注册。
+
+### 时间模块：cosmos.time
+
+- `Time` 通过 `#[userdata(name = "time")]` 声明，builtin 只需 register；
+  `require("cosmos.time")` 与 `cosmos.time` 指向同一张表。
+- `sleep(ms)` 是普通 Rust async 方法，由宏生成参数读取、yield 和返回值桥接；成功返回零个值。
+  参数必须是 0..=1e12 的有限毫秒数，接受小数；负数、非有限值、缺省/nil 和非 number 均抛 Lua 参数错误。
+- `now_ms()` / `now_us()` 使用 SystemTime 返回当前 Unix 毫秒/微秒整数时间戳（自 1970-01-01 UTC 起），
+  随真实系统时间调整；没有进程内起点或缓存。sleep 仍由 Tokio 的定时器驱动。
+- `Duration: FromLua` 在 userdata 基层统一完成毫秒转换和校验，time.sleep 与 sync 的可选 Timeout 共用。
+  time.rs 不再包含裸 Lua 栈操作、手写 C trampoline 或方法注册表。
 
 ### 模块表按声明路径自动组装
 
@@ -194,7 +207,7 @@ lua_close(lua_state);
 local sync = require("cosmos.sync")
 local mutex = sync.mutex.new()
 local value, err = mutex:with_lock(function()
-    cosmos.sleep(1)
+    cosmos.time.sleep(1)
     return "完成"
 end, 100)
 assert(err == nil, err)
@@ -214,7 +227,7 @@ assert(err == nil, err)
 | `cosmos/src/userdata.rs` | 桥接核心：`UserData`/`PushLua`/`FromLua`、userdata 存放与 GC、类型化 `LuaFunction::call`、fallible userdata 借用、`Nil`/`LuaStrMap`/`LuaValue`、derive 单元测试 |
 | `cosmos/src/coroutine.rs` | `LuaCoroutine`（Future）、`PendingOp`/`PendingFuture`、TLS yield 通道、`yield_with` |
 | `cosmos/src/builtin/mod.rs` | time/thread 内建功能统一初始化与 LightThread 类型注册 |
-| `cosmos/src/builtin/time.rs` | sleep、now_ms、now_us 时间功能 |
+| `cosmos/src/builtin/time.rs` | 声明 cosmos.time 模块，sleep、now_ms、now_us 通过宏生成桥接 |
 | `cosmos/src/builtin/light_thread.rs` | `LightThread` 句柄、spawn/wait/join/kill |
 | `cosmos/src/builtin/sync/` | channel、notify、semaphore、mutex 及统一超时转换；mod.rs 只注册类型，模块表由声明路径自动生成 |
 | `cosmos/src/libs.rs` | 内嵌 Lua 源码加载工具 |

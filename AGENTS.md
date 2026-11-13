@@ -43,7 +43,7 @@
 - 不做死抽象：公共层只在有明确复用点（至少两个使用方）时抽取，
   避免无意义的包装函数。
 - Lua 状态指针统一命名为 `lua_state`，未使用时为 `_lua_state`；宏生成代码同样遵守。
-- Lua 模块命名统一 `cosmos.network.*`、`cosmos.thread`、`cosmos.sync`；
+- Lua 模块命名统一 `cosmos.network.*`、`cosmos.time`、`cosmos.thread`、`cosmos.sync`；
   userdata 用 `#[cosmos::userdata(name = "…")]` 指定相对 `cosmos` 的路径，注册层自动组装父模块表，
   父表字段与对应 `require` 入口复用同一张类型表。
 

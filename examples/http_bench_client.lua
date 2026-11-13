@@ -36,11 +36,11 @@ local function run_worker(deadline)
   local n, errs, sum, max_us, bytes = 0, 0, 0.0, 0.0, 0
   local hist = {}
   local last_err = nil
-  local t_start = cosmos.now_us()
-  while cosmos.now_ms() < deadline do
-    local t0 = cosmos.now_us()
+  local t_start = cosmos.time.now_us()
+  while cosmos.time.now_ms() < deadline do
+    local t0 = cosmos.time.now_us()
     local r, e = HttpClient.request(method, url, opts)
-    local dt = cosmos.now_us() - t0
+    local dt = cosmos.time.now_us() - t0
     if r and r.status == 200 then
       n = n + 1
       sum = sum + dt
@@ -64,14 +64,14 @@ local function run_worker(deadline)
     hist = hist,
     last_err = last_err,
     t_start = t_start,
-    t_end = cosmos.now_us(),
+    t_end = cosmos.time.now_us(),
   }
 end
 
 -- 预热：建立连接 + 触发 JIT
 assert(HttpClient.request(method, url, opts))
 
-local deadline = cosmos.now_ms() + seconds * 1000
+local deadline = cosmos.time.now_ms() + seconds * 1000
 local results = {}
 local threads = {}
 for i = 1, conns do

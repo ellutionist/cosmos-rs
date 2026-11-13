@@ -53,7 +53,7 @@ do
     failure("timeout", ch:send(2, 2))
     local sent = false
     local sender = spawn(function() check(ch:send(3)); sent = true end)
-    cosmos.sleep(2)
+    cosmos.time.sleep(2)
     check(not sent)
     check(ch:recv() == 1)
     join(sender)
@@ -61,7 +61,7 @@ do
     failure("timeout", ch:recv(0))
     check(ch:send(4))
     local victim = spawn(function() ch:send(5) end)
-    cosmos.sleep(2)
+    cosmos.time.sleep(2)
     cancel(victim)
     check(ch:recv() == 4)
     failure("timeout", ch:recv(1))
@@ -82,7 +82,7 @@ do
             received[value] = true
         end)
     end
-    cosmos.sleep(2)
+    cosmos.time.sleep(2)
     for i = 1, 8 do
         workers[#workers + 1] = spawn(function() check(ch:send(i)) end)
     end
@@ -93,7 +93,7 @@ do
     for i = 1, 3 do
         workers[i] = spawn(function() failure("closed", ch:recv()) end)
     end
-    cosmos.sleep(2)
+    cosmos.time.sleep(2)
     ch:close()
     for _, worker in ipairs(workers) do join(worker) end
 
@@ -102,7 +102,7 @@ do
     for i = 1, 3 do
         workers[i] = spawn(function() failure("closed", ch:send(i)) end)
     end
-    cosmos.sleep(2)
+    cosmos.time.sleep(2)
     ch:close()
     for _, worker in ipairs(workers) do join(worker) end
     check(ch:recv() == 1)
@@ -133,7 +133,7 @@ do
         check(ch:send(object))
     end
     local worker = spawn(pending_send)
-    cosmos.sleep(2)
+    cosmos.time.sleep(2)
     collectgarbage("collect")
     check(weak[2] ~= nil)
     check(ch:recv() == true)
@@ -150,7 +150,7 @@ do
         weak[3] = object
         ch:send(object)
     end)
-    cosmos.sleep(2)
+    cosmos.time.sleep(2)
     check(weak[3] ~= nil)
     cancel(victim)
     collectgarbage("collect")
@@ -171,9 +171,9 @@ do
     for i = 1, 3 do
         workers[i] = spawn(function() check(event:wait()); hits = hits + 1 end)
     end
-    cosmos.sleep(2)
+    cosmos.time.sleep(2)
     check(event:notify_one())
-    cosmos.sleep(2)
+    cosmos.time.sleep(2)
     check(hits == 1)
     check(event:notify_all())
     for _, worker in ipairs(workers) do join(worker) end
@@ -181,7 +181,7 @@ do
     for i = 1, 3 do
         workers[i] = spawn(function() failure("closed", event:wait()) end)
     end
-    cosmos.sleep(2)
+    cosmos.time.sleep(2)
     event:close()
     for _, worker in ipairs(workers) do join(worker) end
     failure("closed", event:wait(0))
@@ -194,7 +194,7 @@ do
     local event = sync.notify.new()
     local victim = spawn(function() event:wait() end)
     local survivor = spawn(function() check(event:wait(100)) end)
-    cosmos.sleep(2)
+    cosmos.time.sleep(2)
     check(event:notify_one())
     victim:kill()
     join(survivor)
@@ -210,7 +210,7 @@ do
             local permit = assert(sem:acquire())
             active = active + 1
             peak = math.max(peak, active)
-            cosmos.sleep(2)
+            cosmos.time.sleep(2)
             active = active - 1
             permit:release()
             permit:release()
@@ -221,7 +221,7 @@ do
     local a, b = assert(sem:acquire()), assert(sem:acquire())
     failure("timeout", sem:acquire(1))
     local victim = spawn(function() sem:acquire() end)
-    cosmos.sleep(2)
+    cosmos.time.sleep(2)
     cancel(victim)
     a:release()
     b:release()
@@ -232,7 +232,7 @@ do
     check(sem:available() == 2, "GC 应归还配额")
     a, b = assert(sem:acquire()), assert(sem:acquire())
     local waiter = spawn(function() failure("closed", sem:acquire()) end)
-    cosmos.sleep(2)
+    cosmos.time.sleep(2)
     sem:close()
     join(waiter)
     a:release()
@@ -248,7 +248,7 @@ do
             for j = 1, 5 do
                 check(mutex:with_lock(function()
                     local value = total
-                    cosmos.sleep(0)
+                    cosmos.time.sleep(0)
                     total = value + 1
                     return true
                 end))
@@ -277,7 +277,7 @@ do
     local holder = spawn(function()
         mutex:with_lock(function()
             check(entered:send(true))
-            cosmos.sleep(10000)
+            cosmos.time.sleep(10000)
         end)
     end)
     check(entered:recv())
@@ -286,7 +286,7 @@ do
     assert(mutex:lock(0)):release()
     local waiting_guard = assert(mutex:lock())
     local waiter = spawn(function() mutex:lock() end)
-    cosmos.sleep(2)
+    cosmos.time.sleep(2)
     cancel(waiter)
     waiting_guard:release()
     assert(mutex:lock(0)):release()
@@ -326,7 +326,7 @@ do
     join(worker)
     spawn(function() sync.channel.new(1):recv() end)
     spawn(function() sync.notify.new():wait() end)
-    cosmos.sleep(2)
+    cosmos.time.sleep(2)
 end
 
 print("all sync checks passed:", checks)

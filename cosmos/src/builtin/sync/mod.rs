@@ -36,14 +36,7 @@ struct Timeout(Option<Duration>);
 
 impl FromLua for Timeout {
     unsafe fn from_lua(lua_state: *mut lua_State, idx: c_int) -> Result<Self, String> {
-        let millis = Option::<f64>::from_lua(lua_state, idx)?;
-        match millis {
-            None => Ok(Self(None)),
-            Some(ms) if ms.is_finite() && (0.0..=1e12).contains(&ms) => {
-                Ok(Self(Some(Duration::from_secs_f64(ms / 1000.0))))
-            }
-            _ => Err(format!("argument {idx}: invalid timeout (ms)")),
-        }
+        Ok(Self(Option::<Duration>::from_lua(lua_state, idx)?))
     }
 }
 

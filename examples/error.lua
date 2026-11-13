@@ -1,2 +1,2 @@
-cosmos.sleep(-1)
+cosmos.time.sleep(-1)
 print("should not reach here")

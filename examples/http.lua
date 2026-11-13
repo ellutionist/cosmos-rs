@@ -33,7 +33,7 @@ local function handler(req)
       body = req:body(),
     }
   elseif path == "/slow" then
-    cosmos.sleep(200) -- 毫秒
+    cosmos.time.sleep(200) -- 毫秒
     return { status = 200, headers = { ["x-remote"] = req:remote_addr() }, body = "slow done" }
   elseif path == "/redirect" then
     return { status = 302, headers = { location = "/echo?from=redirect" }, body = "" }
@@ -154,7 +154,7 @@ check(resp == nil and err == "timeout", "整体超时返回 nil, timeout")
 
 -- 并发：两个 /slow 请求同时进行，总耗时接近单个（而不是两倍）
 local results = {}
-local t0 = cosmos.now_ms()
+local t0 = cosmos.time.now_ms()
 local t1 = cosmos.thread.spawn(function()
   results[1] = assert(HttpClient.request("GET", base .. "/slow"))
 end)
@@ -163,7 +163,7 @@ local t2 = cosmos.thread.spawn(function()
 end)
 t1:join()
 t2:join()
-local elapsed = cosmos.now_ms() - t0
+local elapsed = cosmos.time.now_ms() - t0
 check(results[1].body == "slow done" and results[2].body == "slow done", "并发请求都成功")
 check(elapsed < 350, string.format("两个 200ms 请求并发完成（%.0fms）", elapsed))
 
@@ -196,7 +196,7 @@ check(r.version == 11 and r.body == "hello /hello", "ALPN 只有 http/1.1 时走
 -- h2 单连接多路复用：先热身建立 h2 连接，再并发两个 /slow（同一连接的不同 stream）
 assert(HttpClient.request("GET", tls_base .. "/slow", { ctx = cctx }))
 local h2r = {}
-local ht0 = cosmos.now_ms()
+local ht0 = cosmos.time.now_ms()
 local ta = cosmos.thread.spawn(function()
   h2r[1] = assert(HttpClient.request("GET", tls_base .. "/slow", { ctx = cctx }))
 end)
@@ -205,7 +205,7 @@ local tb = cosmos.thread.spawn(function()
 end)
 ta:join()
 tb:join()
-local helapsed = cosmos.now_ms() - ht0
+local helapsed = cosmos.time.now_ms() - ht0
 check(h2r[1].version == 20 and h2r[2].version == 20, "两个并发请求都走 HTTP/2")
 check(h2r[1].headers["x-remote"] == h2r[2].headers["x-remote"], "两个请求复用了同一条 h2 连接")
 check(helapsed < 350, string.format("h2 多路复用并发完成（%.0fms）", helapsed))
@@ -239,7 +239,7 @@ small:close()
 tls_srv:close()
 srv:close()
 -- 连接池里的 keep-alive 连接仍可用（与 C++ 行为一致）；这里验证监听已停止
-cosmos.sleep(10)
+cosmos.time.sleep(10)
 local conn, cerr = Tcp.connect("127.0.0.1", srv:port(), 200)
 check(conn == nil and cerr ~= nil, "close() 后不再监听")
 other:close()

@@ -27,6 +27,7 @@ use std::marker::PhantomData;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::ptr;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
 
 use crate::ffi::*;
 
@@ -407,6 +408,17 @@ impl FromLua for f64 {
             return Err(format!("argument {idx}: expected number"));
         }
         Ok(lua_tonumber(lua_state, idx))
+    }
+}
+
+/// 毫秒数转换为拥有型时长，时间模块与同步原语共用参数校验。
+impl FromLua for Duration {
+    unsafe fn from_lua(lua_state: *mut lua_State, idx: c_int) -> Result<Self, String> {
+        let millis = f64::from_lua(lua_state, idx)?;
+        if !millis.is_finite() || !(0.0..=1e12).contains(&millis) {
+            return Err(format!("argument {idx}: invalid duration (ms)"));
+        }
+        Ok(Duration::from_secs_f64(millis / 1000.0))
     }
 }
 
@@ -1288,7 +1300,7 @@ mod derive_tests {
             assert_eq!(
                 luaL_loadstring(
                     lua_state,
-                    c"return function(value) cosmos.sleep(1); return nil, value end".as_ptr()
+                    c"return function(value) cosmos.time.sleep(1); return nil, value end".as_ptr()
                 ),
                 0
             );

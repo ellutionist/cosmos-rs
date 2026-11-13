@@ -16,7 +16,7 @@ for i = 1, 2 do
         assert(line, "handler read: " .. tostring(err))
         -- 第一个连接故意慢，验证第二个连接不被串行阻塞
         if line == "slow" then
-            cosmos.sleep(300)
+            cosmos.time.sleep(300)
         end
         w:write(line .. "\n")
         w:close()

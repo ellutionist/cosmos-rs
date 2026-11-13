@@ -22,5 +22,5 @@ print(string.format("listening on 127.0.0.1:%d (body=%d bytes)", srv:port(), bod
 
 -- 主协程返回会触发 lua_close；压测期间需要进程一直活着
 while true do
-  cosmos.sleep(60000)
+  cosmos.time.sleep(60000)
 end
