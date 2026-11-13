@@ -24,6 +24,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "cosmos-ext-demo"
+version = "0.1.0"
+dependencies = [
+ "cosmos",
+ "tokio",
+]
+
+[[package]]
 name = "cosmos-macros"
 version = "0.1.0"
 dependencies = [
@@ -37,6 +45,7 @@ name = "cosmos-rs"
 version = "0.1.0"
 dependencies = [
  "cosmos",
+ "cosmos-ext-demo",
  "tokio",
 ]
 

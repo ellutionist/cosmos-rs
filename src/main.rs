@@ -39,6 +39,7 @@ async fn run(code: &str, args: &[String]) -> Result<(), String> {
         libs::open_cosmos(L);
         userdata::init(L);
         demo::register(L);
+        cosmos_ext_demo::register(L);
 
         // 脚本跑在独立协程上（主栈只承载全局状态），这样 sleep 才能 yield
         let thread = lua_newthread(L);

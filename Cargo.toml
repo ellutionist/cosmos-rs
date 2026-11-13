@@ -9,3 +9,4 @@ members = ["cosmos", "cosmos-macros"]
 [dependencies]
 cosmos = { path = "cosmos" }
 tokio = { version = "1", features = ["rt", "time"] }
+cosmos-ext-demo = { path = "../cosmos-ext-demo" }
