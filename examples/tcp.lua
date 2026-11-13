@@ -104,4 +104,68 @@ assert(r3:receive("*l") == "still alive", "conn unusable after timeout")
 r3:settimeout(0) -- 清除超时
 print("timeout ok")
 
+-- *L：保留行尾 \n（以及前置 \r）
+local conn4 = assert(Tcp.connect("127.0.0.1", port))
+local r4, w4 = conn4:split()
+w4:write("keep me\r\n")
+assert(r4:receive("*L") == "keep me\r\n", "*L should keep EOL")
+w4:write("starless\n")
+assert(r4:receive("L") == "starless\n", "pattern without '*' should work")
+w4:write("a\rb\r\n")
+assert(r4:receive("*l") == "a\rb", "*l only trims the trailing CR/LF")
+print("*L ok")
+
+-- receiveuntil：返回分隔符之前的数据，分隔符被消费
+w4:write("hello--world--tail")
+assert(r4:receiveuntil("--") == "hello", "receiveuntil 1")
+assert(r4:receiveuntil("--") == "world", "receiveuntil 2")
+assert(r4:receive(4) == "tail", "rest after receiveuntil")
+
+-- 分隔符跨 BufReader 分块边界：先写满 8192 字节并停在 "\r"，再补 "\n"
+local pad = string.rep("x", 8191)
+w4:write(pad .. "\r")
+cosmos.sleep(50)
+w4:write("\nTAIL")
+local cross = r4:receiveuntil("\r\n")
+assert(#cross == 8191 and cross == pad, "cross-boundary receiveuntil")
+assert(r4:receive(4) == "TAIL", "rest after cross-boundary until")
+print("receiveuntil ok")
+
+-- setbufsize：*l 上限，超限返回 nil,"buffer overflow",partial，解除后继续读不丢数据
+local conn5 = assert(Tcp.connect("127.0.0.1", port))
+local r5, w5 = conn5:split()
+r5:setbufsize(4)
+w5:write("abcdefgh\n")
+local od, oerr, opart = r5:receive("*l")
+assert(od == nil and oerr == "buffer overflow" and opart == "abcd",
+    string.format("line cap: d=%s err=%s partial=%s",
+        tostring(od), tostring(oerr), tostring(opart)))
+r5:setbufsize(0) -- 解除上限：未读的 "efgh\n" 还在流里
+assert(r5:receive("*l") == "efgh", "line rest after overflow")
+
+-- *a 上限
+w5:write("0123456789")
+w5:close() -- 关写半，*a 靠 EOF 结束
+r5:setbufsize(4)
+local ad, aerr, apart = r5:receive("*a")
+assert(ad == nil and aerr == "buffer overflow" and apart == "0123", "*a cap")
+r5:setbufsize(0)
+local ad2 = r5:receive("*a")
+assert(ad2 == "456789", "*a rest after overflow: " .. tostring(ad2))
+
+-- receiveuntil 上限
+local conn6 = assert(Tcp.connect("127.0.0.1", port))
+local r6, w6 = conn6:split()
+r6:setbufsize(4)
+w6:write("0123456789")
+w6:close()
+local ud, uerr, upart = r6:receiveuntil("--")
+assert(ud == nil and uerr == "buffer overflow" and upart == "0123", "until cap")
+r6:setbufsize(0)
+local ud2, uerr2, upart2 = r6:receiveuntil("--")
+assert(ud2 == nil and uerr2 == "closed" and upart2 == "456789",
+    string.format("until rest: d=%s err=%s partial=%s",
+        tostring(ud2), tostring(uerr2), tostring(upart2)))
+print("setbufsize ok")
+
 print("OK")
