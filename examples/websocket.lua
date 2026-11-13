@@ -3,6 +3,7 @@
 
 local HttpServer = require("cosmos.network.http.server")
 local HttpClient = require("cosmos.network.http.client")
+local client = HttpClient.new()
 local Ws = require("cosmos.network.websocket")
 local TlsContext = require("cosmos.network.tcp.tls.context")
 local thread = cosmos.thread
@@ -63,11 +64,11 @@ local ws_base = "ws://127.0.0.1:" .. port
 local http_base = "http://127.0.0.1:" .. port
 
 -- 同一端口上的普通 HTTP 请求不受影响
-local r = assert(HttpClient.request("GET", http_base .. "/hello"))
+local r = assert(client:request("GET", http_base .. "/hello"))
 check(r.status == 200 and r.body == "http:/hello", "同端口的普通 HTTP 仍可用")
 
 -- 非升级请求打到 /ws：400
-r = assert(HttpClient.request("GET", http_base .. "/ws"))
+r = assert(client:request("GET", http_base .. "/ws"))
 check(r.status == 400, "非 upgrade 请求 /ws 返回 400")
 
 -- 文本 echo

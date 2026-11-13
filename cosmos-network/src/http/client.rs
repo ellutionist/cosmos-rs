@@ -2,22 +2,20 @@
 //!
 //! Lua 侧：
 //!   local HttpClient = require("cosmos.network.http.client")
-//!   local resp, err = HttpClient.request("GET", "http://host/path", {
+//!   local client = HttpClient.new({ ctx = tls_ctx }) -- ctx 可选，创建时固定 TLS 配置
+//!   local resp, err = client:request("GET", "http://host/path", {
 //!     headers = { ["x-a"] = "1" },
 //!     body = "...",          -- 任意方法都可带 body
 //!     timeout = 3000,        -- 毫秒，覆盖连接+重定向+读完 body
-//!     ctx = tls_ctx,         -- 可选 TlsContext（信任根/客户端证书/ALPN）
 //!     redirects = 5,         -- 最多跟随几次重定向，0 关闭
 //!     max_body = 1048576,    -- 可选：响应体上限，超过返回错误
 //!   })
 //!   -- resp = { status=200, version=11, headers={...}, body="..." }
 //!
-//! 连接池按 TlsContext 的配置对象（Arc 指针）缓存：TLS 配置绑定在 connector 上，
-//! 不同信任根不能共用同一个池。默认（不传 ctx）池用 webpki 公有根 + ALPN h2/http1.1。
+//! 每个 client 独立持有连接池，克隆句柄和并发请求共享该实例的池。
+//! 默认（不传 ctx）使用 webpki 公有根 + ALPN h2/http1.1。
 //! v1 不处理 gzip（固定发 Accept-Encoding: identity）。
 
-use std::cell::RefCell;
-use std::collections::HashMap;
 use std::error::Error as StdError;
 use std::future::Future;
 use std::pin::Pin;
@@ -30,7 +28,7 @@ use http_body_util::{BodyExt, Full, Limited};
 use hyper::header::{HeaderName, HeaderValue, ACCEPT_ENCODING};
 use hyper::{Method, Request, StatusCode, Uri};
 use hyper_util::client::legacy::Client;
-use hyper_util::rt::{TokioExecutor, TokioIo};
+use hyper_util::rt::{TokioExecutor, TokioIo, TokioTimer};
 use rustls::{ClientConfig, RootCertStore};
 use tokio::net::TcpStream;
 use tokio::time::Instant;
@@ -64,41 +62,10 @@ pub(crate) fn default_tls_config() -> Arc<ClientConfig> {
         .clone()
 }
 
-// 连接池按 runtime 与 TLS 配置缓存，避免不同宿主 runtime 复用旧连接驱动。
-// TLS 键为 TlsContext 缓存的 Arc 指针（0 = 默认配置），配置更新时使用新池。
-thread_local! {
-    static CLIENTS: RefCell<HashMap<(tokio::runtime::Id, usize), HttpPool>> = RefCell::new(HashMap::new());
-}
-
-fn client_for(tls: Option<Arc<ClientConfig>>) -> HttpPool {
-    let key = (
-        tokio::runtime::Handle::current().id(),
-        tls.as_ref().map(|c| Arc::as_ptr(c) as usize).unwrap_or(0),
-    );
-    if let Some(c) = CLIENTS.with(|m| m.borrow().get(&key).cloned()) {
-        return c;
-    }
-    let cfg = match tls {
-        None => default_tls_config(),
-        Some(c) if c.alpn_protocols.is_empty() => {
-            let mut c = (*c).clone();
-            c.alpn_protocols = default_alpn();
-            Arc::new(c)
-        }
-        Some(c) => c,
-    };
-    let client = Client::builder(TokioExecutor::new())
-        .pool_idle_timeout(Duration::from_secs(30))
-        .pool_max_idle_per_host(32)
-        .build::<Connector, Full<Bytes>>(Connector { tls: Some(cfg) });
-    CLIENTS.with(|m| m.borrow_mut().insert(key, client.clone()));
-    client
-}
-
 /// connector：按 URI scheme 选择明文 TCP 或 TLS，返回统一的 Conn
 #[derive(Clone)]
 struct Connector {
-    tls: Option<Arc<ClientConfig>>,
+    tls: Arc<ClientConfig>,
 }
 
 impl tower_service::Service<Uri> for Connector {
@@ -124,8 +91,7 @@ impl tower_service::Service<Uri> for Connector {
                 .unwrap_or(host);
             let port = uri.port_u16().unwrap_or(if https { 443 } else { 80 });
             if https {
-                let cfg = tls.ok_or_else(|| -> BoxErr { "https requires TLS support".into() })?;
-                let io = connect_tls_io(host, port, None, Some(ClientCfg(cfg)))
+                let io = connect_tls_io(host, port, None, Some(ClientCfg(tls)))
                     .await
                     .map_err(|e| -> BoxErr { e.into() })?;
                 Ok(TokioIo::new(Conn::Tls(io)))
@@ -139,23 +105,31 @@ impl tower_service::Service<Uri> for Connector {
     }
 }
 
-/// request 的第三个参数（options table）。
+/// 构造时固定的 TLS 配置，由该 client 的全部请求与重定向共用。
+#[derive(Default, cosmos::FromLua)]
+#[lua(default)]
+pub(crate) struct ClientOptions {
+    ctx: Option<ClientCfg>,
+}
+
+/// request 的 options table。
 /// 表的逐字段读取由 `#[derive(FromLua)]` 生成（见 cosmos-macros）；
 /// `#[lua(default)]` 表示整张表缺省时按 `Default` 取同名字段。
 #[derive(cosmos::FromLua)]
 #[lua(default)]
-pub(crate) struct ClientOptions {
+pub(crate) struct RequestOptions {
     headers: Headers,
     body: LuaBytes,
     timeout: Option<i64>,
-    ctx: Option<ClientCfg>,
+    // 显式拒绝请求级 ctx，避免旧调用把 TLS 设置误当成已生效。
+    ctx: Option<()>,
     redirects: i64,
     max_body: Option<i64>,
 }
 
-impl Default for ClientOptions {
+impl Default for RequestOptions {
     fn default() -> Self {
-        ClientOptions {
+        RequestOptions {
             headers: Headers::default(),
             body: LuaBytes::default(),
             timeout: None,
@@ -175,24 +149,49 @@ pub(crate) struct ClientResponse {
     body: LuaBytes,
 }
 
-/// 客户端入口：静态方法
-///   HttpClient.request(method, url, opts?) → resp
-pub struct HttpClient;
+/// 一个 client 对应一个连接池；拥有型句柄让并发请求不占用 userdata 借用。
+#[derive(Clone)]
+pub struct HttpClient {
+    pool: HttpPool,
+}
 
 #[cosmos::userdata(name = "network.http.client")]
 impl HttpClient {
+    fn new(opts: Option<ClientOptions>) -> Self {
+        let cfg = match opts.unwrap_or_default().ctx {
+            None => default_tls_config(),
+            Some(ClientCfg(cfg)) if cfg.alpn_protocols.is_empty() => {
+                let mut cfg = (*cfg).clone();
+                cfg.alpn_protocols = default_alpn();
+                Arc::new(cfg)
+            }
+            Some(ClientCfg(cfg)) => cfg,
+        };
+        Self {
+            pool: Client::builder(TokioExecutor::new())
+                .pool_idle_timeout(Duration::from_secs(30))
+                .pool_timer(TokioTimer::new())
+                .pool_max_idle_per_host(32)
+                .build(Connector { tls: cfg }),
+        }
+    }
+
     /// 发一次请求（含重定向跟随）；失败返回 nil + 错误串
     async fn request(
+        self,
         method: String,
         url: String,
-        opts: Option<ClientOptions>,
+        opts: Option<RequestOptions>,
     ) -> Result<ClientResponse, String> {
         let opts = opts.unwrap_or_default();
+        if opts.ctx.is_some() {
+            return Err("ctx must be set in HttpClient.new".to_string());
+        }
         let deadline = opts
             .timeout
             .and_then(timeout_from_ms)
             .map(|d| Instant::now() + d);
-        match with_deadline(deadline, do_request(method, url, opts)).await {
+        match with_deadline(deadline, do_request(&self.pool, method, url, opts)).await {
             Ok(res) => res,
             Err(()) => Err("timeout".to_string()),
         }
@@ -200,9 +199,10 @@ impl HttpClient {
 }
 
 async fn do_request(
+    client: &HttpPool,
     method: String,
     url: String,
-    opts: ClientOptions,
+    opts: RequestOptions,
 ) -> Result<ClientResponse, String> {
     let mut method = Method::from_bytes(method.as_bytes())
         .map_err(|e| format!("invalid method '{method}': {e}"))?;
@@ -215,7 +215,6 @@ async fn do_request(
     let mut redirects = 0i64;
 
     loop {
-        let client = client_for(opts.ctx.as_ref().map(|c| c.0.clone()));
         let request = build_request(&method, &uri, &headers, &body)?;
         let resp = client
             .request(request)
@@ -282,9 +281,9 @@ async fn do_request(
         if to_get {
             method = Method::GET;
             body = Bytes::new();
-            headers
-                .0
-                .retain(|(k, _)| k != "content-length" && k != "content-type" && k != "transfer-encoding");
+            headers.0.retain(|(k, _)| {
+                k != "content-length" && k != "content-type" && k != "transfer-encoding"
+            });
         }
         if origin(&next) != origin(&uri) {
             headers.0.retain(|(k, _)| {

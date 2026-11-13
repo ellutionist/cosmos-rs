@@ -9,6 +9,7 @@
 io.stdout:setvbuf("no")
 
 local HttpClient = require("cosmos.network.http.client")
+local client = HttpClient.new()
 
 local a_port, a_conns, a_secs, a_path, a_method, a_body = ...
 local port = tonumber(a_port) or 18090
@@ -39,7 +40,7 @@ local function run_worker(deadline)
   local t_start = cosmos.time.now_us()
   while cosmos.time.now_ms() < deadline do
     local t0 = cosmos.time.now_us()
-    local r, e = HttpClient.request(method, url, opts)
+    local r, e = client:request(method, url, opts)
     local dt = cosmos.time.now_us() - t0
     if r and r.status == 200 then
       n = n + 1
@@ -69,7 +70,7 @@ local function run_worker(deadline)
 end
 
 -- 预热：建立连接 + 触发 JIT
-assert(HttpClient.request(method, url, opts))
+assert(client:request(method, url, opts))
 
 local deadline = cosmos.time.now_ms() + seconds * 1000
 local results = {}

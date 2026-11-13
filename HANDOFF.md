@@ -60,7 +60,8 @@ cosmos-rs/
 - 本次提交范围：统一 `PushLua`、类型化 Lua 回调、枚举 `FromLua`、userdata fallible 借用、统一错误边界、冗余清理与回归记录。
 - 外部演示 crate 已移除，主程序构建不再依赖工作区外的源码目录。
 - Machine 管理 VM/LocalSet，Runtime 只注入 Handle；网络作为 Module 插件加载，CLI 已迁移。
-  外部演示删除改动已一并整理。
+  外部演示删除改动一并提交为 `5a5ada0`。
+- HTTP client 已改为实例独占连接池，构造时固定 TLS 配置，调用迁移为 new + 冒号 request。
 
 ## 4. 最近完成的工作
 
@@ -140,8 +141,29 @@ runtime.block_on(machine.exec("cosmos.time.sleep(10)")).unwrap();
   Runtime 身份不匹配或缺少 Tokio 上下文时返回错误，不执行 Lua；不在 Machine 内嵌套 block_on。
 - 多线程 Runtime 的普通 Rust 任务可以在工作线程运行；Lua 与 HTTP handler 通过 LocalSet 留在固定宿主线程，
   不能直接将 Machine 或其执行 Future 交给要求 Send 的 tokio::spawn。
-- HTTP 连接池缓存键包含 Runtime ID 与 TLS 配置，避免第二个宿主 Runtime 复用第一个暂停驱动的连接。
+- HTTP 连接池由各 client 实例持有，不同实例独立，避免不同宿主 Runtime 或 VM 复用隐藏的全局池。
 - 完整 Rust 插件示例见 examples/machine.rs，外部调用不需要 Lua 裸指针。
+
+### 4.5 HTTP client 实例与连接池
+
+```lua
+local HttpClient = require("cosmos.network.http.client")
+local client = HttpClient.new({ ctx = tls_ctx }) -- 缺省使用公有信任根
+local response, err = client:request("GET", url, {
+    timeout = 3000,
+    headers = { ["x-name"] = "value" },
+})
+```
+
+- 每次 new 创建独立 Hyper 连接池，同一 client 内复用 HTTP/1.1 keep-alive 与 HTTP/2 连接；
+  即使多个 client 使用相同 TLS context，它们也不共享池。已删除线程局部 CLIENTS、client_for 及 Runtime/TLS 指针索引。
+- ctx 仅在构造时读取，信任根、客户端证书与 ALPN 为配置快照；修改原 context 只影响后来构造的 client。
+  请求级 opts.ctx 会明确返回 nil, err，提示移到 HttpClient.new，不会被静默忽略。
+- headers/body/timeout/redirects/max_body 仍为请求选项；重定向与整体超时语义不变。
+- request 采用拥有型 self，通过 Clone 取得共享池句柄，不跨 await 借用原 Lua userdata；
+  多协程可并发使用同一实例，原 userdata 被 GC 后在途请求仍正常完成。
+- 最后一个 client/请求句柄释放后，池及空闲连接随之回收；默认 TLS 配置仍可共享，但不保留连接池。
+- 连接池配置为空闲超时 30 秒、每 host 最多 32 条空闲连接，并显式安装 TokioTimer 使空闲超时生效。
 
 ## 5. 本轮完成：统一 `PushLua`
 
@@ -277,7 +299,7 @@ assert(err == nil, err)
 | `cosmos-network/src/websocket/conn.rs` | `WsConn`、帧收发、关闭与服务端升级后的回调执行 |
 | `src/lib.rs` | 对外重导出核心 Machine/Module 与网络插件 Network |
 | `src/main.rs` | CLI 参数、宿主 Runtime 驱动与测试 echo 服务 |
-| `tests/machine.rs` | 嵌入、插件、线程亲和、VM/Runtime 隔离、错误与关闭顺序回归 |
+| `tests/machine.rs` | 嵌入、插件、线程亲和、VM/Runtime 隔离、错误、关闭顺序与 client 池释放回归 |
 
 ## 7. 验证清单
 
@@ -286,7 +308,7 @@ cargo build
 
 # 单进程
 ./target/debug/cosmos-rs examples/websocket.lua   # 期望最后一行 all websocket checks passed
-./target/debug/cosmos-rs examples/http.lua        # 期望 http ok（32 项）
+./target/debug/cosmos-rs examples/http.lua        # 期望 http ok
 ./target/debug/cosmos-rs examples/userdata.lua    # OK
 ./target/debug/cosmos-rs examples/spawn.lua       # OK
 ./target/debug/cosmos-rs examples/sleep.lua       # OK
@@ -301,7 +323,7 @@ cargo run --example machine                    # 多线程 Runtime 下的 Rust �
 (./target/debug/cosmos-rs examples/tls_server.lua 19443 &) ; sleep 1
 ./target/debug/cosmos-rs examples/tls_client.lua 19443     # OK
 
-cargo test --workspace  # 24 项测试及 Machine !Send 编译失败用例通过
+cargo test --workspace  # 25 项测试及 Machine !Send 编译失败用例通过
 ```
 
 ## 8. 坑与注意事项

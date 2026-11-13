@@ -438,3 +438,33 @@
 - 按用户要求，提交 Machine、Module、Handle 注入、隔离与生命周期修复、嵌入示例及配套文档，包含此前外部演示清理。
 - 提交前差异检查通过，沿用已完成的 24 项测试、Machine !Send 检查、严格 Clippy 及 examples 回归结果，不 push。
 - 下一步评估 HTTP 连接池由 client 实例持有的接口与生命周期。
+
+## 2026-11-13 HTTP 连接池改为 per-client
+
+### 核心逻辑
+
+- HttpClient 从静态入口改为持有 Hyper 连接池的可克隆 userdata，HttpClient.new({ ctx = ... }) 每次创建独立池，
+  client:request(method, url, opts) 复用该实例的连接；删除线程局部 CLIENTS、client_for 和 Runtime/TLS 指针索引。
+- ctx 在构造时读取为 TLS 配置快照，后续修改原 TlsContext 只影响新建 client；headers/body/timeout/redirects/max_body
+  保留在请求选项。请求级 ctx 显式报错，提示移到构造函数，避免配置被静默忽略。
+- request 使用拥有型 self，经 FromLua 克隆共享 Hyper 句柄，不跨 await 占用原 Lua userdata 借用，
+  同一 client 的并发请求与 HTTP/2 多路复用保持可用；原 userdata 被 GC 后在途请求仍可完成。
+- 池由 client/在途句柄持有，最后一个句柄释放后回收空闲连接；TLS 默认配置可以共享，连接池不共享。
+  移除 connector 中不可能出现的无 TLS 配置分支；补齐 TokioTimer，使原本配置的 30 秒空闲超时实际生效。
+- 迁移 HTTP/WebSocket/压测示例及 Machine 嵌入测试，更新 HANDOFF.md 的接口和生命周期说明。
+
+### 验证与下一步
+
+- 扩充 examples/http.lua：验证同实例 keep-alive 复用、不同实例及同 TLS context 的池隔离、TLS 快照、
+  非法请求级 ctx、userdata GC 后在途请求完成；既有重定向、超时、HTTP/HTTPS、h2 并发和大 body 回归通过。
+- 新增服务端保持 keep-alive、等待客户端 EOF 的回归，确认 GC 回收 client 会释放空闲连接，且不依赖 Machine 关闭。
+- all-targets 构建、cargo test --workspace --locked（25 项及 Machine !Send 编译失败用例）、严格 Clippy 通过。
+- 实际运行 HTTP 与 WebSocket examples、Rust Machine 示例通过；压测脚本 4 个并发 worker 共享同一 client，
+  短窗口完成 2954 次请求、0 错误。
+- 本轮未 commit / push。后续 HTTP 调用统一显式创建并复用 client 实例。
+
+## 2026-11-13 提交 per-client HTTP 连接池
+
+- 按用户要求，将实例连接池、TLS 配置快照、调用迁移、生命周期回归及配套文档提交到本地 Git，不 push。
+- 提交前差异检查通过，沿用已完成的构建、25 项测试、严格 Clippy、HTTP/WebSocket 回归及压测脚本验证结果。
+- 后续 HTTP 调用统一显式创建并复用 client 实例。

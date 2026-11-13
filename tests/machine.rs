@@ -109,7 +109,7 @@ fn injected_runtimes_keep_lua_on_the_host_thread_and_plugins_are_optional() {
                 assert(cosmos.test.probe.on_host_thread())
                 return "ok"
             end))
-            local reply = assert(Client.request("GET", "http://127.0.0.1:" .. server:port() .. "/"))
+            local reply = assert(Client.new():request("GET", "http://127.0.0.1:" .. server:port() .. "/"))
             assert(reply.body == "ok")
             server:close()
         "#,
@@ -272,13 +272,66 @@ fn http_pools_do_not_reuse_a_paused_runtime_connection() {
         machine.add_module(Network).unwrap();
         runtime.block_on(machine.exec(&format!(r#"
             local Client = require("cosmos.network.http.client")
-            local reply = assert(Client.request("GET", "http://127.0.0.1:{port}/", {{ timeout = 250 }}))
+            local reply = assert(Client.new():request("GET", "http://127.0.0.1:{port}/", {{ timeout = 250 }}))
             assert(reply.body == "ok")
         "#))).unwrap();
         drop(machine);
         runtimes.push(runtime);
     }
     server.abort();
+}
+
+#[test]
+fn collecting_a_client_releases_its_idle_connection() {
+    use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+
+    let runtime = runtime(false);
+    let listener = runtime
+        .block_on(tokio::net::TcpListener::bind(("127.0.0.1", 0)))
+        .unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let server = runtime.spawn(async move {
+        let (socket, _) = listener.accept().await.unwrap();
+        let mut reader = BufReader::new(socket);
+        let mut line = String::new();
+        loop {
+            line.clear();
+            assert_ne!(reader.read_line(&mut line).await.unwrap(), 0);
+            if line == "\r\n" {
+                break;
+            }
+        }
+        reader
+            .get_mut()
+            .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok")
+            .await
+            .unwrap();
+        // 服务端保持 keep-alive，只有 client 的池释放后才会读到 EOF。
+        assert_eq!(reader.read(&mut [0]).await.unwrap(), 0);
+    });
+    let mut machine = Machine::new(runtime.handle().clone()).unwrap();
+    machine.add_module(Network).unwrap();
+    runtime.block_on(async {
+        machine
+            .exec(&format!(
+                r#"
+            local Client = require("cosmos.network.http.client")
+            local function request_once()
+                local client = Client.new()
+                assert(client:request("GET", "http://127.0.0.1:{port}/").body == "ok")
+            end
+            request_once()
+            collectgarbage("collect")
+            cosmos.time.sleep(0)
+        "#
+            ))
+            .await
+            .unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(1), server)
+            .await
+            .unwrap()
+            .unwrap();
+    });
 }
 
 #[test]
