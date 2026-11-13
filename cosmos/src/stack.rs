@@ -18,7 +18,7 @@ pub(crate) unsafe fn err_message(lua_state: *mut lua_State) -> String {
 ///
 /// # Safety
 /// lua_state 必须是当前线程上的有效状态，idx 是栈索引或合法伪索引。
-pub unsafe fn abs_index(lua_state: *mut lua_State, idx: c_int) -> c_int {
+pub(crate) unsafe fn abs_index(lua_state: *mut lua_State, idx: c_int) -> c_int {
     if idx < 0 && idx > LUA_REGISTRYINDEX {
         lua_gettop(lua_state) + idx + 1
     } else {

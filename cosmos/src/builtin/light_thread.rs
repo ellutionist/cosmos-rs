@@ -50,7 +50,9 @@ unsafe extern "C" fn wait_impl(lua_state: *mut lua_State) -> c_int {
         }
         let mut threads = Vec::with_capacity(n as usize);
         for i in 1..=n {
-            threads.push(LightThread::from_lua(lua_state, i)?);
+            threads.push(LightThread::from_lua(crate::userdata::Value::new(
+                lua_state, i,
+            ))?);
         }
         Ok(yield_with(
             lua_state,

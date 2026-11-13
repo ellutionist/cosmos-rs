@@ -39,7 +39,7 @@ fn with_thread(source: &CStr, probe: Probe, test: impl FnOnce(*mut lua_State, Li
         luaL_openlibs(vm.0);
         let lua_state = lua_newthread(vm.0);
         assert_eq!(luaL_loadstring(lua_state, source.as_ptr()), 0);
-        probe.push_lua(lua_state);
+        probe.push_lua(&mut crate::userdata::Output::new(lua_state));
         test(vm.0, LightThread::new(vm.0, lua_state));
     }
 }

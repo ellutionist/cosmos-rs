@@ -17,7 +17,7 @@
 ```
 cosmos-rs/
   cosmos/            # 运行时 + 桥接层：machine / ffi / userdata / light_thread / stack / libs / builtin
-  cosmos-macros/     # #[userdata]、#[derive(FromLua/PushLua)]，生成全部 trampoline
+  cosmos-macros/     # #[userdata]、#[derive(FromLua/PushLua)]，只生成 Rust 调用/转换组合
   cosmos-network/    # 功能模块：tcp/{stream,tls} / http / websocket + bridge.rs（叶子转换）
   Cargo.toml         # 虚拟 workspace，默认成员为 cosmos-cli
   cosmos-cli/        # clap 命令行入口，注入 Runtime Handle/Network
@@ -36,7 +36,7 @@ cosmos-rs/
 1. **功能模块零 FFI**：tcp / tls / http / websocket 里不出现 `cosmos::ffi`、不直接调 `lua_*`、不做裸栈操作。
 2. **桥接 = 组合**：基层类型各实现 `PushLua` / `FromLua`，结构体靠 derive，枚举靠 derive，
    多返回值靠元组/枚举字段顺序。**禁止**把命令式栈操作换个文件存放（用户明确说过那是"马甲"，没有意义）。
-3. 允许裸 FFI：cosmos 运行时/桥接层（含 machine）、`cosmos-network/src/bridge.rs` 的叶子转换与 C trampoline。
+3. 裸 FFI 仅限 cosmos 运行时/桥接层；network bridge 与宏生成代码均只能使用受控上下文，不能引用 ffi。
 4. 不做死抽象；公共层要有明确复用点。
 5. 任何行为改动必须实际跑 `examples/` 对应用例（含回归），不能只看编译通过。
 6. 只有用户明确要求才 commit / push。
@@ -87,9 +87,9 @@ cosmos-rs/
 
 ### 4.2 桥接分层与回调
 
-- `cosmos-network/src/bridge.rs` 只保留叶子转换、`until` trampoline 与类型注册。
-  `Headers` 组合 `LuaStrMap`，`LuaBytes` 对接 `Bytes` 与 Lua 字符串，TLS 配置组合 fallible userdata 借用。
-- cosmos 基层原语包括：`Nil`、`Vec<u8>`、`LuaStrMap`、`push_closure`、元组和标量的转换。
+- `cosmos-network/src/bridge.rs` 只保留叶子转换、迭代器的 Rust LuaCallable 适配与类型注册，不含 FFI。
+  `Headers` 组合 `StringPairs`，`LuaBytes` 对接 `Bytes` 与 Lua 字符串，TLS 配置组合 fallible userdata 借用。
+- cosmos 基层原语包括：`Nil`、`Vec<u8>`、`StringPairs`、`LuaClosure`、元组和标量的转换。
   `()` 是 0 个输出值；`Nil` 是 1 个 nil；读取无返回值的回调可选择 `R = ()` 忽略结果。
 - `LuaFunction::call<A: PushLua, R: FromLua>` 在内部创建并锚定协程，完成后读取拥有型结果；
   HTTP 和 WebSocket 都使用该入口。功能模块不再接触 Lua 指针、栈索引或类型编号。
@@ -185,28 +185,48 @@ local response, err = client:request("GET", url, {
 
 ### 4.7 Rust 可见性边界
 
-- cosmos 公开宿主入口 Machine/Module、可克隆的 LightThread 句柄，以及 userdata/ffi 桥接协议；
-  builtin、light_thread、stack 实现模块均为私有，libs 仅测试构建存在。
+- cosmos 公开宿主入口 Machine/Module、可克隆的 LightThread 句柄，以及 userdata 的受控桥接协议；
+  builtin、light_thread、stack、ffi 实现模块均为私有，libs 仅测试构建存在。
 - VM 创建/关闭/恢复、registry 操作与 userdata 初始化/清理/裸注册/底层 push 均限 crate 内；
   main_state、MethodTable::new、字符串锚点及拷贝阈值为私有。
 - LuaStr 是私有字段的公开类型，仅提供 FromLua 和 Deref<str>；外部不能匹配或构造内部拷贝/锚定分支。
-- 宏与叶子桥接所需的 yield_with、PendingOp/PendingFuture、abs_index 经 cosmos::userdata 公开导出；
-  宏生成代码与 network bridge 统一使用该桥接入口，不访问私有运行时模块。
-- ffi 只公开宏/叶子转换实际需要的函数与类型/常量；luaL_loadstring、lua_pcall 仅测试编译，
+- FromLua<'lua> 绑定 Value 的读取生命周期；同步方法可借用字符串及结构体字段，
+  LuaFunction::call 与 LightThread::run 要求结果对所有读取生命周期均可转换，拒绝返回临时协程的裸借用。
+  同步表字段的借用字符串由 Call 内部 ReadScope 按需 registry 锚定，重入删除字段及 GC 不会使其悬垂；
+  普通标量、拥有型字段和直接字符串参数不增加该锚点分配。
+- 宏与叶子桥接通过 Value/Output/Call、TableReader/TableWriter 及 LuaCallable/LuaClosure 组合；
+  yield_with、PendingOp/PendingFuture、abs_index 和所有原始状态/索引/ABI 均限内部，不再公开导出。
+- ffi 模块及全部函数/类型/常量均限 crate 内；luaL_loadstring、lua_pcall 仅测试编译，
   未使用的 luaL_newmetatable 声明已删除。外部不能绕过 Machine 直接管理 VM 生命周期。
 - cosmos-network 仅公开 Network；协议实体和跨功能模块转换类型限 crate 内，
   仅本文件使用的选项/响应类型为私有，TCP/TLS 共用的状态、读写半和字段限 tcp 模块。
 - cosmos-macros 仅保留 3 个过程宏入口公开；CLI 函数与 Args 均私有。四个 crate 都启用 unreachable_pub。
 - 可见性调整不改变 Lua require 路径或方法语义；Rust 外部代码应使用上述公开入口，不依赖实现模块。
 
+### 4.8 受控桥接与 FFI 封闭
+
+- FromLua<'lua> 接收 Value<'lua>，PushLua 接收 Output；原始状态、索引和上下文构造仅在 cosmos 内部可见。
+  同步字符串及表字段借用受读取生命周期约束；LuaFunction::call 和轻线程结果要求 for<'lua> FromLua<'lua>，不能泄漏临时协程借用。
+- Value/TableReader 统一完成类型选择、单次表遍历、嵌套读取和栈恢复；Output/TableWriter 统一构造字段，
+  字段必须输出一个值，构造中断或 Rust 展开时回收未完成表。StringPairs 与 derive 复用这些完整操作，不是逐个转发 C API。
+- userdata 宏生成 Rust LuaCallable 标记类型，MethodTable::add 单态化内部 C trampoline；
+  LuaClosure 捕获 userdata 状态，与方法调用共用 Call、panic 边界和异步挂起协议，不增加回调元数据分配。
+- LuaCallable 是 unsafe trait：适配必须由 Call::returns 或 suspend 生成准确结果，守卫只存活于本次执行。
+  同步借用可以直接回传；异步参数仍使用拥有值或 registry 锚点，挂起只装箱 Future 一次，不装箱返回值。
+- network bridge 不再使用原始 Lua 类型、栈常量或 C 入口：Bytes 经 &[u8] PushLua 输出，无中间 Vec；
+  TCP 迭代器仅组合 LuaClosure 和 Rust 状态读取，TLS 配置通过受控 userdata 借用构造快照。
+- 私有 ffi 全部使用 crate 内可见性，且没有公开函数或类型重导出。公开模块仅 userdata，宿主入口保持 Machine/Module/LightThread。
+- Rust 自定义叶子转换需迁移到 FromLua<'lua>/Value 和 PushLua/Output；不再依赖 cosmos::ffi 或裸状态参数。
+  Lua 模块路径、返回值顺序及 Machine 的执行/退出语义不变。
+
 ## 5. 本轮完成：统一 `PushLua`
 
 - 删除 `IntoOutput` trait、derive、全部 impl，以及 `AsyncOutput` 枚举。
 - `PendingFuture = Pin<Box<dyn PendingOp>>`；`PendingOp` 对所有输出实现 `PushLua` 的 Future
-  提供 blanket impl：Pending 时不动 Lua 栈，Ready 时立即 `value.push_lua(lua_state)`，返回压栈个数。
+  提供 blanket impl：Pending 时不动 Lua 栈，Ready 时立即 `value.push_lua(output)`，返回压栈个数。
 - Future 本身仍只装箱一次；标量没有新增返回值分配，原先 userdata/table/元组/枚举的
   `Custom` 闭包装箱也已消除。业务值自身与 Lua 栈的内存分配不包含在这个结论里。
-- `#[userdata]` 的 async trampoline 直接返回原生 Rust 值；同步和异步都经 `PushLua`。
+- `#[userdata]` 的异步 Rust 调用适配直接返回原生 Rust 值；同步和异步都经 `PushLua`。
 - `#[derive(PushLua)]`：struct 仍生成 Lua table；enum 按分支字段顺序生成多返回值。
   TCP `ReceiveOutcome` 和线程 `WaitOutcome` 都采用该机制。
 - `()` 仍返回 0 个值，`Nil` 返回 1 个 nil；异步 `Option::None` 从旧实现的 0 个值统一为
@@ -218,17 +238,17 @@ local response, err = client:request("GET", url, {
 
 - `try_check` / `try_check_shared` 通过 metatable 比较和 `RefCell` 检查返回 `Result`；
   类型错误和借用冲突均不直接调用 `lua_error`。借用守卫受调用栈/协程锚点保护，不能作为拥有型回调结果。
-- 同步/异步宏、TCP until、sleep、thread.spawn/wait 共用 `userdata::trampoline`；
+- 同步/异步方法与 TCP until 共用内部 callable trampoline；builtin 的原始入口也共用内部错误边界；
   参数解析和守卫获取失败先释放 Rust 局部值，再压错误串，释放该串后才调用 `lua_error`。
-- `FromLua` 及其 derive 在成功、失败时恢复入口栈高度；宏中的相对索引通过公开桥接 `userdata::abs_index` 固定，底层 stack 模块保持私有。
+- `FromLua` 及其 derive 在成功、失败时恢复入口栈高度；相对索引固定和栈恢复由 Value/TableReader 统一处理，不再由宏生成手工操作。
 - userdata 注册恢复入口栈高度，`push` 只增加一个值；类型表与模块路径对应的表复用。
 - 移除了无调用方的 `with_alpn_server`、`LuaFunction::registry_ref/main/push_to`、`UserData::type_name`，
   旧 throwing check、重复 raise、状态别名与示例注册包装。
 
 ### Clippy 与底层安全契约
 
-- `PushLua::push_lua`、`PendingOp::poll_push`、`yield_with`、userdata 的注册/压栈/trampoline/cleanup
-  均为 unsafe 接口；调用方必须保证状态有效、线程亲和、栈空间与 VM 生命周期。具体约束见各接口的 `# Safety`。
+- PushLua/FromLua 接收受控 Output/Value，仍保留借用、线程亲和与 VM 生命周期的 unsafe 转换契约。
+  LuaCallable 为 unsafe trait，必须由 Call 产生准确结果数量或挂起操作；内部 PendingOp、yield、注册及错误边界不对外公开。
 - derive 会生成匹配的 unsafe 实现；功能模块继续只描述值，裸指针操作留在运行时/桥接层。
 - 验证命令：`cargo clippy --workspace --all-targets -- -D warnings`。
 - 两项局部例外带有明确理由：Conn 内联 TLS 流避免额外 Box；回归测试故意保持 RefCell 借用跨 await。
@@ -312,9 +332,9 @@ assert(err == nil, err)
 
 | 文件 | 职责 |
 |---|---|
-| `cosmos/src/ffi.rs` | LuaJIT C API 声明；仅宏/叶子转换所需的类型、常量和 9 个函数公开，其余限 crate 内 |
+| `cosmos/src/ffi.rs` | 全部限 crate 内的 LuaJIT C API 声明，模块不对外公开 |
 | `cosmos/src/machine.rs` | Machine/Module、安全嵌入 API、Handle 注入、LocalSet 与 VM 生命周期 |
-| `cosmos/src/userdata.rs` | 桥接核心：`UserData`/`PushLua`/`FromLua`、userdata 存放与 GC、类型化 `LuaFunction::call`、fallible userdata 借用、`Nil`/`LuaStrMap`/`LuaValue`、derive 单元测试 |
+| `cosmos/src/userdata.rs` | 桥接核心：`UserData`/`PushLua`/`FromLua`、userdata 存放与 GC、类型化 `LuaFunction::call`、fallible userdata 借用、`Nil`/`StringPairs`/`LuaValue`、derive 单元测试 |
 | `cosmos/src/light_thread/mod.rs` | 统一 LightThread、唯一执行权、直接/后台调度与执行守卫 |
 | `cosmos/src/light_thread/execution.rs` | 私有 Lua 执行状态机、锚点、结果读取、PendingOp 与 TLS yield 协议；不实现 Future |
 | `cosmos/src/light_thread/control.rs` | 私有取消请求、最终结果与等待者通知，不接触 Lua 或 Tokio |
@@ -323,9 +343,9 @@ assert(err == nil, err)
 | `cosmos/src/builtin/light_thread.rs` | Lua spawn/wait/join/kill 参数与结果桥接、类型注册，不定义第二个线程实体 |
 | `cosmos/src/builtin/sync/` | channel、notify、semaphore、mutex 及统一超时转换；mod.rs 只注册类型，模块表由声明路径自动生成 |
 | `cosmos/src/libs.rs` | cfg(test) 下的内部同步 Lua 测试工具，不进入正式构建 |
-| `cosmos/src/stack.rs` | 私有栈辅助；err_message 限 crate 内，abs_index 经 userdata 导出供宏使用 |
+| `cosmos/src/stack.rs` | 私有栈辅助，不通过 userdata 公开重导出 |
 | `cosmos-macros/src/lib.rs` | `#[userdata]`、`FromLua`/`PushLua` derive |
-| `cosmos-network/src/bridge.rs` | 本 crate 的叶子转换、`until` trampoline、注册入口 |
+| `cosmos-network/src/bridge.rs` | 只组合受控上下文的叶子转换、until Rust 调用适配及类型注册 |
 | `cosmos-network/src/tcp/mod.rs` | TCP 协议族模块声明：stream 与 tls |
 | `cosmos-network/src/tcp/stream.rs` | TCP 状态机、`ReceivePattern`/`ReceiveOutcome`、`receiveuntil` |
 | `cosmos-network/src/tcp/tls.rs` | rustls 客户端/服务端、`TlsContext`（证书/信任根/ALPN/mTLS） |
@@ -335,6 +355,10 @@ assert(err == nil, err)
 | `cosmos-network/src/websocket/mod.rs` | ws/wss 客户端入口与连接选项 |
 | `cosmos-network/src/websocket/conn.rs` | `WsConn`、帧收发、关闭与服务端升级后的回调执行 |
 | `cosmos-cli/src/main.rs` | clap 参数解析、脚本/标准输入、宿主 Runtime 与 Machine 驱动 |
+| `cosmos/src/userdata/context.rs` | 受控 Value/Output、表遍历/构造、栈恢复与按需字符串借用锚点 |
+| `cosmos/src/userdata/call.rs` | Rust LuaCallable 与捕获状态闭包共用的内部 C ABI/挂起边界 |
+| `cosmos/tests/bridge.rs` | 外部插件、derive、异步参数、闭包及错误恢复回归 |
+| `cosmos-network/tests/bridge.rs` | TCP 迭代器的二进制、超时与取消后借用释放回归 |
 | `cosmos-cli/tests/cli.rs` | 命令行帮助、版本、参数透传、标准输入与退出码回归 |
 | `cosmos-network/tests/machine.rs` | 嵌入、插件、线程亲和、VM/Runtime 隔离、错误、关闭顺序与 client 池释放回归 |
 
@@ -361,7 +385,7 @@ cargo run -p cosmos-network --example machine                    # 多线程 Run
 (./target/debug/cosmos-cli examples/tls_server.lua 19443 &) ; sleep 1
 ./target/debug/cosmos-cli examples/tls_client.lua 19443     # OK
 
-cargo test --workspace  # 32 项测试及 Machine/LightThread 的 2 项 !Send 编译失败用例通过
+cargo test --workspace  # 36 项测试及 5 项编译失败检查通过（线程约束、FFI 封闭与借用生命周期）
 ```
 
 ## 8. 坑与注意事项
@@ -371,7 +395,7 @@ cargo test --workspace  # 32 项测试及 Machine/LightThread 的 2 项 !Send �
   跨 await 一直占着借用；同一 userdata 的另一次调用会 `lua_error`。需要并发等待的共享句柄使用拥有型 self，
   经 FromLua clone 后跨 await 持有独立句柄，不持有原实例的借用。
 - **FromLua 只返回 Err，不抛 Lua 错误**；借用守卫必须先释放，再由外层 trampoline 调用 lua_error。
-- **FromLua 嵌套取值要用绝对索引**：`lua_next` 遍历后再用 `-1` 会错位（`value_idx = lua_gettop(lua_state)`）。
+- **嵌套转换不能保存字段视图**：Value/TableReader 内部固定索引，visit 的字段视图只用于当前回调；宏和模块不再自行计算栈位置。
 - **hyper upgrade**：必须 `serve_connection_with_upgrades` 且保留 `http::request::Parts`
   （`OnUpgrade` 在 extensions 里），否则 101 之后连接不会被接管。
 - **h2 不能走 WebSocket upgrade**（无 RFC 8441），当前直接 400。

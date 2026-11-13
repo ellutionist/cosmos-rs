@@ -9,8 +9,8 @@
 //! ```
 //! 默认路径取类型短名，name 指定相对 cosmos 的模块路径。
 //!
-//! 每个方法生成一个 extern "C" trampoline（参数转换 / panic 捕获 /
-//! 返回值压栈，见 cosmos::userdata::trampoline），并生成
+//! 每个方法生成一个 Rust LuaCallable 适配，负责组合参数和返回值转换；
+//! C ABI、panic 捕获及异步挂起由 cosmos 内部的共用 trampoline 处理，并生成
 //! `impl cosmos::userdata::UserData` 把它们注册进 MethodTable。
 //! `__gc` 不需要宏处理：运行时用 `ptr::drop_in_place` 统一生成，
 //! 对没有 Drop 的类型同样是合法空操作。
@@ -58,7 +58,7 @@ pub fn userdata(attr: TokenStream, item: TokenStream) -> TokenStream {
         match item {
             ImplItem::Fn(f) => match gen_method(ty, &ty_label, f) {
                 Ok((c_name, tramp_ident, tramp)) => {
-                    registrations.push(quote! { methods.add(#c_name, #tramp_ident); });
+                    registrations.push(quote! { methods.add::<#tramp_ident>(#c_name); });
                     trampolines.push(tramp);
                 }
                 Err(e) => errors.push(e),
@@ -137,7 +137,7 @@ fn type_label(ty: &Type) -> String {
     }
 }
 
-/// 生成单个方法的 trampoline。返回 (方法名 c 字面量, trampoline 项)
+/// 生成单个方法的 Rust 调用适配。返回方法名和用于单态化内部 trampoline 的类型。
 fn gen_method(
     ty: &Type,
     ty_label: &str,
@@ -167,14 +167,14 @@ fn gen_method(
             }
             let binding = match (&r.reference, &r.mutability) {
                 (Some(_), None) => {
-                    quote!(let this = cosmos::userdata::try_check_shared::<#ty>(lua_state, 1)?;)
+                    quote!(let this = invocation.argument(1).borrow::<#ty>()?;)
                 }
                 (Some(_), Some(_)) => {
-                    quote!(let mut this = cosmos::userdata::try_check::<#ty>(lua_state, 1)?;)
+                    quote!(let mut this = invocation.argument(1).borrow_mut::<#ty>()?;)
                 }
                 (None, _) => {
                     // 拥有型接收者经 FromLua 取得独立句柄，异步等待不占用 userdata 借用。
-                    quote!(let this = <#ty as cosmos::userdata::FromLua>::from_lua(lua_state, 1)?;)
+                    quote!(let this = invocation.argument(1).read::<#ty>()?;)
                 }
             };
             (false, binding)
@@ -206,7 +206,7 @@ fn gen_method(
         let ident = format_ident!("arg{arg_n}");
         arg_idents.push(ident.clone());
         arg_conversions.push(quote! {
-            let #ident = <#arg_ty as cosmos::userdata::FromLua>::from_lua(lua_state, #stack_idx)?;
+            let #ident = invocation.argument(#stack_idx as usize).read::<#arg_ty>()?;
         });
     }
 
@@ -218,47 +218,32 @@ fn gen_method(
     };
 
     let tramp_ident = format_ident!("__cosmos_m_{}_{}", ty_label, method);
-    // c 字面量（&'static CStr，NUL 结尾）：&str 字面量不保证 NUL，
-    // 直接传给 lua_setfield 会读越界
+    // 静态字段名在编译时构造 CStr，注册时无需临时分配 CString。
     let c_name = {
         let cs = std::ffi::CString::new(method.to_string()).unwrap();
         Literal::c_string(&cs)
     };
 
-    let tramp = if is_async {
-        // async 方法：守卫（RefMut/Ref）被 move 进外层 future 持有，
-        // 整个 await 期间 RefCell borrow flag 保持"已借"，其他方法调用报 lua_error。
-        // yield_with 必须是尾表达式（5.1 语义：lua_yield 的 -1 要作为返回值交出去）。
-        // 保留原生返回值，PendingOp 完成轮询时统一经 PushLua 转换。
-        quote! {
-            #[allow(non_snake_case)]
-            unsafe extern "C" fn #tramp_ident(
-                lua_state: *mut cosmos::ffi::lua_State,
-            ) -> cosmos::ffi::c_int {
-                cosmos::userdata::trampoline(lua_state, |lua_state| unsafe {
-                    #self_binding
-                    #(#arg_conversions)*
-                    Ok(cosmos::userdata::yield_with(
-                        lua_state,
-                        Box::pin(async move { #call.await }),
-                    ))
-                })
-            }
-        }
+    let execute = if is_async {
+        quote!(Ok(invocation.suspend(async move { #call.await })))
     } else {
-        // 同步方法：走 PushLua 直接压栈（trampoline 在 lua_resume 保护帧内）。
-        // Result<T, E> 由 PushLua 的 blanket impl 统一处理（Ok 压值 / Err 压 nil+err）
         quote! {
-            #[allow(non_snake_case)]
-            unsafe extern "C" fn #tramp_ident(
-                lua_state: *mut cosmos::ffi::lua_State,
-            ) -> cosmos::ffi::c_int {
-                cosmos::userdata::trampoline(lua_state, |lua_state| unsafe {
+            let ret = #call;
+            Ok(invocation.returns(ret))
+        }
+    };
+    let tramp = quote! {
+        #[allow(non_camel_case_types)]
+        struct #tramp_ident;
+        unsafe impl cosmos::userdata::LuaCallable for #tramp_ident {
+            // 参数及返回类型决定是否需要 unsafe，零参数异步调用也使用此统一模板。
+            #[allow(unused_unsafe)]
+            fn call(invocation: &mut cosmos::userdata::Call<'_>) -> ::core::result::Result<i32, ::std::string::String> {
+                unsafe {
                     #self_binding
                     #(#arg_conversions)*
-                    let ret = #call;
-                    Ok(cosmos::userdata::PushLua::push_lua(ret, lua_state))
-                })
+                    #execute
+                }
             }
         }
     };
@@ -281,7 +266,7 @@ fn gen_method(
 //   #[lua(default_fn = path)]       缺省字段取 path() 得到的 Self 的同名字段
 //
 // 缺省且没有 default/default_fn、结构体也没有默认的字段读表时报错；
-// 未知键忽略；非字符串键跳过（绝不对键做会改写键值的转换，避免破坏 lua_next）。
+// 未知键忽略；非字符串键跳过（绝不对键做会改写键值的转换，避免破坏表遍历状态）。
 // 键比较直接用字节切片，不为每个键分配 Rust String。
 // ---------------------------------------------------------------------------
 
@@ -398,6 +383,9 @@ fn expand_from_lua(input: &DeriveInput) -> syn::Result<proc_macro2::TokenStream>
         return expand_from_lua_enum(input);
     }
     let name = &input.ident;
+    let generics = from_lua_generics(input);
+    let (impl_generics, _, where_clause) = generics.split_for_impl();
+    let (_, ty_generics, _) = input.generics.split_for_impl();
     let fields = lua_fields(input)?;
     let container_default = parse_container_default(&input.attrs)?;
     let span = proc_macro2::Span::call_site();
@@ -420,12 +408,7 @@ fn expand_from_lua(input: &DeriveInput) -> syn::Result<proc_macro2::TokenStream>
         let ty = &f.ty;
         quote! {
             if key == &#key[..] {
-                // 传绝对下标：嵌套 from_lua 可能先 push 再按 idx 取表（如 Headers），
-                // 负下标此时会指向新压入的值
-                let value_idx = cosmos::ffi::lua_gettop(lua_state);
-                #s = ::core::option::Option::Some(
-                    <#ty as cosmos::userdata::FromLua>::from_lua(lua_state, value_idx)?,
-                );
+                #s = ::core::option::Option::Some(value.read::<#ty>()?);
             }
         }
     });
@@ -470,44 +453,71 @@ fn expand_from_lua(input: &DeriveInput) -> syn::Result<proc_macro2::TokenStream>
         quote!()
     } else {
         quote! {
-            cosmos::ffi::lua_pushnil(lua_state);
-            while cosmos::ffi::lua_next(lua_state, idx) != 0 {
-                if cosmos::ffi::lua_type(lua_state, -2) == cosmos::ffi::LUA_TSTRING {
-                    let mut key_len: cosmos::ffi::size_t = 0;
-                    let key_ptr = cosmos::ffi::lua_tolstring(lua_state, -2, &mut key_len);
-                    let key: &[u8] =
-                        ::core::slice::from_raw_parts(key_ptr as *const u8, key_len);
-                    #(#checks)*
-                }
-                cosmos::ffi::lua_settop(lua_state, -2);
-            }
+            __cosmos_table.visit(|key, value| {
+                #(#checks)*
+                Ok(())
+            })?;
         }
     };
 
     Ok(quote! {
-        impl cosmos::userdata::FromLua for #name {
-            unsafe fn from_lua(
-                lua_state: *mut cosmos::ffi::lua_State,
-                idx: cosmos::ffi::c_int,
-            ) -> ::core::result::Result<Self, ::std::string::String> {
-                let idx = cosmos::userdata::abs_index(lua_state, idx);
-                let __cosmos_top = cosmos::ffi::lua_gettop(lua_state);
-                if cosmos::ffi::lua_type(lua_state, idx) != cosmos::ffi::LUA_TTABLE {
-                    return ::core::result::Result::Err(::std::format!(
-                        "argument {}: expected table", idx
-                    ));
-                }
-                let __cosmos_result = (|| {
-                    #(#decls)*
-                    #container_init
-                    #scan
-                    Ok(Self { #(#values),* })
-                })();
-                cosmos::ffi::lua_settop(lua_state, __cosmos_top);
-                __cosmos_result
+        impl #impl_generics cosmos::userdata::FromLua<'__cosmos_lua> for #name #ty_generics #where_clause {
+            unsafe fn from_lua(value: cosmos::userdata::Value<'__cosmos_lua>) -> ::core::result::Result<Self, ::std::string::String> {
+                let __cosmos_table = value.table()?;
+                #(#decls)*
+                #container_init
+                #scan
+                Ok(Self { #(#values),* })
             }
         }
     })
+}
+
+fn from_lua_generics(input: &DeriveInput) -> syn::Generics {
+    let mut generics = input.generics.clone();
+    generics.params.insert(0, syn::parse_quote!('__cosmos_lua));
+    let fields: Vec<_> = match &input.data {
+        Data::Struct(data) => data.fields.iter().collect(),
+        Data::Enum(data) => data
+            .variants
+            .iter()
+            .flat_map(|variant| variant.fields.iter())
+            .collect(),
+        Data::Union(_) => Vec::new(),
+    };
+    for field in fields {
+        let ty = &field.ty;
+        let type_tokens = quote!(#ty).to_string();
+        // 已有高阶读取约束足以覆盖新生命周期；重复添加会使 Rust 的 trait 选择产生歧义。
+        let is_read_bound = |bound: &syn::TypeParamBound| {
+            matches!(
+                bound,
+                syn::TypeParamBound::Trait(bound)
+                    if bound.lifetimes.is_some()
+                        && bound.path.segments.last().is_some_and(|segment| segment.ident == "FromLua")
+            )
+        };
+        let parameter_bound = input.generics.type_params().any(|parameter| {
+            parameter.ident == type_tokens && parameter.bounds.iter().any(&is_read_bound)
+        });
+        let where_bound = input.generics.where_clause.as_ref().is_some_and(|clause| {
+            clause.predicates.iter().any(|predicate| match predicate {
+                syn::WherePredicate::Type(predicate) => {
+                    let bounded = &predicate.bounded_ty;
+                    type_tokens == quote!(#bounded).to_string()
+                        && predicate.bounds.iter().any(&is_read_bound)
+                }
+                _ => false,
+            })
+        });
+        if !parameter_bound && !where_bound {
+            generics
+                .make_where_clause()
+                .predicates
+                .push(syn::parse_quote!(#ty: cosmos::userdata::FromLua<'__cosmos_lua>));
+        }
+    }
+    generics
 }
 
 /// 无标签枚举按首个 Lua 值的类型分流，分支内字段按顺序读取多个槽位。
@@ -517,7 +527,9 @@ fn expand_from_lua_enum(input: &DeriveInput) -> syn::Result<proc_macro2::TokenSt
         return err(&input.ident, "#[derive(FromLua)] expected an enum");
     };
     let name = &input.ident;
-    let (impl_generics, ty_generics, where_clause) = input.generics.split_for_impl();
+    let generics = from_lua_generics(input);
+    let (impl_generics, _, where_clause) = generics.split_for_impl();
+    let (_, ty_generics, _) = input.generics.split_for_impl();
     let mut kinds = std::collections::HashSet::new();
     let mut arms = Vec::new();
     let mut expected = Vec::new();
@@ -560,14 +572,14 @@ fn expand_from_lua_enum(input: &DeriveInput) -> syn::Result<proc_macro2::TokenSt
         })?;
         let kind_name = kind.value();
         let constant = match kind_name.as_str() {
-            "none" => quote!(cosmos::ffi::LUA_TNONE),
-            "nil" => quote!(cosmos::ffi::LUA_TNIL),
-            "boolean" => quote!(cosmos::ffi::LUA_TBOOLEAN),
-            "number" => quote!(cosmos::ffi::LUA_TNUMBER),
-            "string" => quote!(cosmos::ffi::LUA_TSTRING),
-            "table" => quote!(cosmos::ffi::LUA_TTABLE),
-            "function" => quote!(cosmos::ffi::LUA_TFUNCTION),
-            "userdata" => quote!(cosmos::ffi::LUA_TUSERDATA),
+            "none" => quote!(cosmos::userdata::ValueKind::Missing),
+            "nil" => quote!(cosmos::userdata::ValueKind::Nil),
+            "boolean" => quote!(cosmos::userdata::ValueKind::Boolean),
+            "number" => quote!(cosmos::userdata::ValueKind::Number),
+            "string" => quote!(cosmos::userdata::ValueKind::String),
+            "table" => quote!(cosmos::userdata::ValueKind::Table),
+            "function" => quote!(cosmos::userdata::ValueKind::Function),
+            "userdata" => quote!(cosmos::userdata::ValueKind::UserData),
             _ => return err(&kind, "unsupported Lua type"),
         };
         if !kinds.insert(kind_name.clone()) {
@@ -581,8 +593,8 @@ fn expand_from_lua_enum(input: &DeriveInput) -> syn::Result<proc_macro2::TokenSt
             .enumerate()
             .map(|(i, field)| {
                 let ty = &field.ty;
-                let offset = i as i32;
-                quote!(<#ty as cosmos::userdata::FromLua>::from_lua(lua_state, idx + #offset)?)
+                let offset = i;
+                quote!(value.offset(#offset).read::<#ty>()?)
             })
             .collect();
         let construct = match &variant.fields {
@@ -601,27 +613,16 @@ fn expand_from_lua_enum(input: &DeriveInput) -> syn::Result<proc_macro2::TokenSt
     let expected = expected.join(" / ");
     let fallback = fallback.unwrap_or_else(|| {
         quote! {
-            kind => Err(::std::format!(
-                "argument {}: expected {} (got lua type {})", idx, #expected, kind,
-            ))
+            _ => Err(value.expected(#expected))
         }
     });
     Ok(quote! {
-        impl #impl_generics cosmos::userdata::FromLua for #name #ty_generics #where_clause {
-            unsafe fn from_lua(
-                lua_state: *mut cosmos::ffi::lua_State,
-                idx: cosmos::ffi::c_int,
-            ) -> ::core::result::Result<Self, ::std::string::String> {
-                let idx = cosmos::userdata::abs_index(lua_state, idx);
-                let __cosmos_top = cosmos::ffi::lua_gettop(lua_state);
-                let __cosmos_result = (|| {
-                    match cosmos::ffi::lua_type(lua_state, idx) {
-                        #(#arms,)*
-                        #fallback,
-                    }
-                })();
-                cosmos::ffi::lua_settop(lua_state, __cosmos_top);
-                __cosmos_result
+        impl #impl_generics cosmos::userdata::FromLua<'__cosmos_lua> for #name #ty_generics #where_clause {
+            unsafe fn from_lua(value: cosmos::userdata::Value<'__cosmos_lua>) -> ::core::result::Result<Self, ::std::string::String> {
+                match value.kind() {
+                    #(#arms,)*
+                    #fallback,
+                }
             }
         }
     })
@@ -641,27 +642,24 @@ fn expand_push_lua(input: &DeriveInput) -> syn::Result<proc_macro2::TokenStream>
     }
     let name = &input.ident;
     let fields = lua_fields(input)?;
-    let n = fields.len() as i32;
+    let n = fields.len();
+    let mutable = (!fields.is_empty()).then(|| quote!(mut));
 
     let sets = fields.iter().map(|f| {
         let ident = &f.ident;
-        let ty = &f.ty;
         let cstr = std::ffi::CString::new(f.key.clone()).expect("field name contains NUL");
         let cname = Literal::c_string(&cstr);
         quote! {
-            <#ty as cosmos::userdata::PushLua>::push_lua(self.#ident, lua_state);
-            cosmos::ffi::lua_setfield(lua_state, -2, #cname.as_ptr());
+            table.field(#cname, self.#ident);
         }
     });
 
     Ok(quote! {
         impl cosmos::userdata::PushLua for #name {
-            unsafe fn push_lua(self, lua_state: *mut cosmos::ffi::lua_State) -> cosmos::ffi::c_int {
-                unsafe {
-                    cosmos::ffi::lua_createtable(lua_state, 0, #n as cosmos::ffi::c_int);
-                    #(#sets)*
-                }
-                1
+            unsafe fn push_lua(self, output: &mut cosmos::userdata::Output<'_>) -> i32 {
+                let #mutable table = output.table(#n);
+                #(#sets)*
+                table.finish()
             }
         }
     })
@@ -710,15 +708,15 @@ fn expand_push_lua_enum(input: &DeriveInput) -> syn::Result<proc_macro2::TokenSt
         };
         let pushes = variant.fields.iter().enumerate().map(|(i, _)| {
             let binding = format_ident!("__field_{i}");
-            quote!(+ cosmos::userdata::PushLua::push_lua(#binding, lua_state))
+            quote!(+ cosmos::userdata::PushLua::push_lua(#binding, output))
         });
-        // `0 + a.push_lua(lua_state) + b.push_lua(lua_state)`：操作数从左到右求值，保证压栈顺序
+        // `0 + a.push_lua(output) + b.push_lua(output)`：操作数从左到右求值，保证压栈顺序
         arms.push(quote!(#pattern => 0i32 #(#pushes)*));
     }
 
     Ok(quote! {
         impl #impl_generics cosmos::userdata::PushLua for #name #ty_generics #where_clause {
-            unsafe fn push_lua(self, lua_state: *mut cosmos::ffi::lua_State) -> cosmos::ffi::c_int {
+            unsafe fn push_lua(self, output: &mut cosmos::userdata::Output<'_>) -> i32 {
                 match self {
                     #(#arms),*
                 }

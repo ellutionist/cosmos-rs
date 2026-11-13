@@ -13,7 +13,7 @@
 桥接的正确做法是**逐层组合**，不是把命令式栈操作换个文件存放（那只是马甲，没有意义）：
 
 1. 基层类型各自实现 `PushLua` / `FromLua`：
-   标量、`String` / `&str` / `Vec<u8>`、`Nil`、字符串 map、userdata 等，
+   标量、`String` / `&str` / `&[u8]` / `Vec<u8>`、`Nil`、字符串 map、userdata 等，
    每个类型只在桥接层实现一次；
 2. 结构体用 `#[derive(cosmos::FromLua)]` / `#[derive(cosmos::PushLua)]`，
    枚举用 `#[derive(cosmos::PushLua)]`，由过程宏按字段/分支生成压栈与读取；
@@ -22,12 +22,14 @@
 4. 功能模块只负责构造"值"（如 `ReceiveOutcome::Closed(Nil, "closed", partial)`），
    值如何变成 Lua 返回值完全由原语 + 宏决定。
 
-允许出现裸 FFI 的位置仅限：
+裸 FFI 仅允许出现在 cosmos 的运行时/桥接层（`ffi` / `userdata` / `light_thread` / `stack` / `libs` / `builtin` / `machine`）。
+`ffi` 模块及其声明全部限 crate 内，禁止向外重导出。
 
-- cosmos 的运行时/桥接层（`ffi` / `userdata` / `light_thread` / `stack` / `libs` / `builtin` / `machine`
-  以及 `#[cosmos::userdata]` 生成的 trampoline）；
-- `cosmos-network/src/bridge.rs`：只放无法下沉到 cosmos 的叶子转换
-  （如 `Bytes` ↔ Lua 字符串）、C 闭包 trampoline 与类型注册；
+`cosmos-network/src/bridge.rs` 只放叶子转换、Rust 调用适配和类型注册，
+通过 `Value` / `Output` / `Call` 等受控上下文组合，不持有裸状态指针、不使用 C 函数或栈常量。
+过程宏只生成 Rust `LuaCallable` 与转换组合；C ABI、错误边界和异步挂起协议统一由 cosmos 内部承担。
+`FromLua<'lua>` 的读取生命周期必须与 `Value<'lua>` 一致；同步方法可以借用，跨异步回调的结果必须拥有数据或独立锚点。
+表遍历的字段视图不能保存；同步借用表字段字符串时由调用作用域按需锚定，不能依赖字段在重入或 GC 后仍存在。
 
 宿主通过 `Machine` 创建/执行/销毁 VM，`cosmos-cli/src/main.rs` 只处理命令行与脚本执行，不再手动管理 Lua 栈。
 
@@ -43,8 +45,8 @@
   不允许调用方依赖执行状态、registry 锚点、缓存或存储阈值等实现细节。
 - `cosmos` 的公开面以宿主 API（`Machine`、`Module`、`LightThread` 句柄）和插件必需的桥接为限；
   VM 生命周期、内建模块初始化、执行状态机及底层管理函数保持内部可见。测试辅助代码不作为正式公开 API。
-- 过程宏在使用方 crate 中展开，所需桥接必须保持跨 crate 可访问；通过 `cosmos::userdata` 的必要导出和最小
-  `cosmos::ffi` 原语支持，不为宏展开公开整个实现模块。收窄前必须核对生成代码和外部插件调用方。
+- 过程宏在使用方 crate 中展开，所需桥接通过 `cosmos::userdata` 的受控上下文公开提供；
+  不允许生成 `cosmos::ffi`、`lua_*` 或手工栈操作，也不为宏展开公开底层实现。收窄前必须核对生成代码和外部插件调用方。
 - `cosmos-network` 对外只提供 `Network` 插件，协议实体及其状态、选项、返回 DTO、字段按内部实际使用范围开放；
   `cosmos-macros` 仅公开过程宏入口；`cosmos-cli` 的参数类型与执行函数保持私有。
 - 各 crate 保持 `#![warn(unreachable_pub)]`；不能靠私有父模块掩盖过宽的 `pub` 声明，

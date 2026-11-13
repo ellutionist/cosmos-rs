@@ -11,7 +11,7 @@
 //!          ws_max_message = 4 * 1024 * 1024 }))
 //!   srv:close()
 //!
-//! handler 在注册表里锚定（LuaFunction），每个请求新建 lua_State 协程执行；
+//! handler 在注册表里锚定（LuaFunction），每个请求由运行时创建独立轻线程执行；
 //! 协程之间、以及握手/读写任务之间都在同一个 LocalSet 上交错推进。
 //! 连接由 hyper auto builder 处理（h1 keep-alive、h2 多路复用），
 //! 请求体在 v1 全量读入内存（max_body 封顶）。

@@ -3,14 +3,15 @@
 //! 职责仅限本 crate 无法下沉到 cosmos 的叶子转换：
 //! - 本 crate 自有类型的 `FromLua` / `PushLua`（Headers、LuaBytes、ReceivePattern 等），
 //!   实现里只组合 cosmos 的基层原语，不写多值压栈逻辑；
-//! - TCP 迭代器闭包的 C trampoline（upvalue 挂 userdata）；
+//! - TCP 迭代器状态与通用 Rust 调用桥接的组合；
 //! - 全部 userdata 类型注册。
 //!
 //! 多返回值/表结构一律由 `#[derive(cosmos::PushLua)]` 与 `&str` / `Vec<u8>` /
-//! `Nil` / `LuaStrMap` 等 cosmos 基层类型组合而成，功能模块只构造值。
+//! `Nil` / `StringPairs` 等 cosmos 基层类型组合而成，功能模块只构造值。
 
-use cosmos::ffi::{c_char, c_int, lua_State, lua_pushlstring};
-use cosmos::userdata::{push_closure, trampoline, try_check, FromLua, LuaStrMap, PushLua};
+use cosmos::userdata::{
+    Call, FromLua, LuaCallable, LuaClosure, Output, PushLua, StringPairs, Value,
+};
 
 use crate::http::client::HttpClient;
 use crate::http::server::{HttpRequest, HttpServer, HttpServerHandle};
@@ -26,11 +27,12 @@ use crate::websocket::Ws;
 // HTTP：Headers / LuaBytes
 // ---------------------------------------------------------------------------
 
-impl FromLua for Headers {
-    unsafe fn from_lua(lua_state: *mut lua_State, idx: c_int) -> Result<Self, String> {
-        let map = LuaStrMap::from_lua(lua_state, idx)?;
+impl<'lua> FromLua<'lua> for Headers {
+    unsafe fn from_lua(value: Value<'lua>) -> Result<Self, String> {
+        let pairs = value.read::<StringPairs>()?;
         Ok(Headers(
-            map.0
+            pairs
+                .0
                 .into_iter()
                 .map(|(k, v)| (k.to_ascii_lowercase(), v))
                 .collect(),
@@ -39,22 +41,21 @@ impl FromLua for Headers {
 }
 
 impl PushLua for Headers {
-    unsafe fn push_lua(self, lua_state: *mut lua_State) -> i32 {
-        LuaStrMap(self.0).push_lua(lua_state)
+    unsafe fn push_lua(self, output: &mut Output<'_>) -> i32 {
+        StringPairs(self.0).push_lua(output)
     }
 }
 
 /// Bytes ↔ Lua 字符串（持有 Bytes 零拷贝，push 时拷进 Lua）
 impl PushLua for LuaBytes {
-    unsafe fn push_lua(self, lua_state: *mut lua_State) -> i32 {
-        unsafe { lua_pushlstring(lua_state, self.0.as_ptr() as *const c_char, self.0.len()) };
-        1
+    unsafe fn push_lua(self, output: &mut Output<'_>) -> i32 {
+        self.0.as_ref().push_lua(output)
     }
 }
 
-impl FromLua for LuaBytes {
-    unsafe fn from_lua(lua_state: *mut lua_State, idx: c_int) -> Result<Self, String> {
-        let bytes = <Vec<u8> as FromLua>::from_lua(lua_state, idx)?;
+impl<'lua> FromLua<'lua> for LuaBytes {
+    unsafe fn from_lua(value: Value<'lua>) -> Result<Self, String> {
+        let bytes = value.read::<Vec<u8>>()?;
         Ok(LuaBytes(bytes.into()))
     }
 }
@@ -71,9 +72,9 @@ enum ReceiveArg {
     Pattern(String),
 }
 
-impl FromLua for ReceivePattern {
-    unsafe fn from_lua(lua_state: *mut lua_State, idx: c_int) -> Result<Self, String> {
-        match ReceiveArg::from_lua(lua_state, idx)? {
+impl<'lua> FromLua<'lua> for ReceivePattern {
+    unsafe fn from_lua(value: Value<'lua>) -> Result<Self, String> {
+        match value.read::<ReceiveArg>()? {
             ReceiveArg::Size(size) => Ok(ReceivePattern::Size(size.max(0) as usize)),
             ReceiveArg::Pattern(s) => {
                 let pat = s.strip_prefix('*').unwrap_or(&s);
@@ -93,41 +94,33 @@ impl FromLua for ReceivePattern {
 /// receiveuntil 返回的迭代器：压栈时构造 TcpUntil userdata 并包成 Lua 闭包
 /// （upvalue = userdata）。Lua 用法：local iter = reader:receiveuntil("--"); iter()
 impl PushLua for UntilIter {
-    unsafe fn push_lua(self, lua_state: *mut lua_State) -> i32 {
-        unsafe { push_closure::<TcpUntil>(lua_state, until_call, self.0) };
-        1
+    unsafe fn push_lua(self, output: &mut Output<'_>) -> i32 {
+        LuaClosure(self.0).push_lua(output)
     }
 }
 
-/// lua_upvalueindex(1)：5.1 宏展开为 LUA_GLOBALSINDEX - 1
-const UPVALUE_1: c_int = cosmos::ffi::LUA_GLOBALSINDEX - 1;
-
-/// 闭包本体：从 upvalue 取 TcpUntil（RefMut 移进 future 持有），
-/// 像异步方法一样 yield 出去等读取结果
-unsafe extern "C" fn until_call(lua_state: *mut lua_State) -> c_int {
-    trampoline(lua_state, |lua_state| unsafe {
-        let mut this = try_check::<TcpUntil>(lua_state, UPVALUE_1)?;
-        Ok(cosmos::userdata::yield_with(
-            lua_state,
-            Box::pin(async move { this.next().await }),
-        ))
-    })
+// 返回值经 suspend 生成，捕获守卫仅由当前挂起操作持有。
+unsafe impl LuaCallable for TcpUntil {
+    fn call(call: &mut Call<'_>) -> Result<i32, String> {
+        let mut state = unsafe { call.capture().borrow_mut::<Self>()? };
+        Ok(call.suspend(async move { state.next().await }))
+    }
 }
 
 // ---------------------------------------------------------------------------
 // TLS：ctx 参数
 // ---------------------------------------------------------------------------
 
-impl FromLua for ClientCfg {
-    unsafe fn from_lua(lua_state: *mut lua_State, idx: c_int) -> Result<Self, String> {
-        let mut ctx = try_check::<TlsContext>(lua_state, idx)?;
+impl<'lua> FromLua<'lua> for ClientCfg {
+    unsafe fn from_lua(value: Value<'lua>) -> Result<Self, String> {
+        let mut ctx = value.borrow_mut::<TlsContext>()?;
         ctx.client_config().map(ClientCfg)
     }
 }
 
-impl FromLua for ServerCfg {
-    unsafe fn from_lua(lua_state: *mut lua_State, idx: c_int) -> Result<Self, String> {
-        let mut ctx = try_check::<TlsContext>(lua_state, idx)?;
+impl<'lua> FromLua<'lua> for ServerCfg {
+    unsafe fn from_lua(value: Value<'lua>) -> Result<Self, String> {
+        let mut ctx = value.borrow_mut::<TlsContext>()?;
         ctx.server_config().map(ServerCfg)
     }
 }

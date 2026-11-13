@@ -613,3 +613,93 @@
 - 按用户要求，先提交各 crate 的可见性收窄、LuaStr 表示封装、宏桥接导出、文档及 AGENTS.md 可见性核心约束。
 - 提交前差异检查通过，沿用已完成的构建、32 项测试、2 项 !Send 检查、严格 Clippy/rustdoc、外部插件和 15 项访问拒绝验证，不 push。
 - 下一步按已确认方案改造受控读写/调用上下文，迁移宏及 network bridge，最后将 ffi 完全设为内部模块。
+
+## 2026-11-13 封闭 FFI 并迁移受控桥接协议
+
+### 核心逻辑
+
+- 按用户要求先提交此前可见性及约束改动，提交为 af92e5f；本轮 FFI 改造未自动提交。
+- ffi 模块以及全部声明改为 crate 内可见，不再重导出 C API、状态类型、栈常量或 ABI。
+  外部仅通过 userdata 的 Value/Output/Call、表读写器和类型转换协议组合功能。
+- FromLua<'lua> 接收 Value<'lua>，PushLua 接收 Output；TableReader 统一字符串键遍历、绝对索引、
+  嵌套转换与错误/panic 时栈恢复，TableWriter 与 LuaStrMap 共用字段构造，拒绝零/多返回值作为单个表字段。
+- 过程宏只生成字段/分支转换及 Rust LuaCallable 适配；MethodTable 按适配类型单态化 cosmos 内部 C trampoline，
+  不在使用方生成 extern C、裸指针或 lua_* 调用，也不分配回调元数据。Call 统一参数、借用、返回和异步挂起。
+- LuaClosure 组合 userdata 状态与同一 LuaCallable 协议，TCP until 不再手写 upvalue 索引、C 闭包或 yield。
+  network bridge 只组合值转换、配置快照、Rust 调用适配和类型注册，整个 network crate 不再依赖 ffi。
+- 新增 &[u8] 基层 PushLua，String/&str/Vec<u8> 与网络 Bytes 输出复用它，不为 Bytes 先构造中间 Vec。
+  每个异步操作仍只装箱一次 Future，不引入返回值闭包装箱。
+
+### 生命周期与踩坑
+
+- 旧的无生命周期 FromLua 允许安全的 LuaFunction::call 泛型返回未锚定的 &str；改为读取生命周期约束，
+  回调与运行入口要求结果对所有读取生命周期均可转换，裸借用结果不能逃逸，拥有型数据/registry 引用继续支持。
+- 同步参数仍支持字符串及带借用字段的结构体。表字段可能被重入回调删除，不能只依赖原表存活；
+  Call 内部 ReadScope 仅为借用字段字符串按需保存 registry 锚点，直到输出完成才释放。
+  普通标量、拥有型字段和直接字符串参数不增加该锚点分配。
+- Value/Output/Call 构造器及原始字段均私有，保持线程亲和；userdata 借用仍须由调用帧、捕获状态或独立锚点保活。
+  LuaCallable 是 unsafe trait，明确要求准确输出数量、挂起及守卫生命周期，宏自动履行该契约。
+- 泛型 derive 合并读取生命周期与字段约束；已有高阶 FromLua 约束不重复添加，避免 Rust trait 选择歧义。
+  空结构体、零参数异步方法及调用方 Result 别名纳入跨 crate 验证。
+
+### 验证与下一步
+
+- all-targets 构建、36 项测试、5 项编译失败检查（线程约束、私有 ffi、借用不能逃逸）、严格 Clippy/rustdoc 通过。
+- 新增表构造/遍历中途 panic 的栈恢复、NUL 键/值及非字符串键回归；外部插件实际覆盖 derive、
+  同步借用、异步长字符串、捕获状态闭包、二进制输出、空结构体、错误恢复及重入删除字段后 GC。
+- 网络跨 crate 回归覆盖 TCP 迭代器的 8 KiB 二进制数据、超时、取消挂起调用后再次使用及关闭 partial 返回。
+- 实际运行 http/websocket/spawn/sleep/sync/machine、TCP/TLS 双进程及 Rust Machine 示例全部通过；
+  HTTP 短窗口压测 4 worker 完成 2947 次请求、0 错误，仅作为功能与并发验证。
+- 扫描确认 network、macros、CLI 与外部桥接测试没有裸 Lua API/状态类型/C ABI；
+  文档公开模块只剩 userdata，9 项外部访问私有 ffi、上下文构造器/原始字段及裸桥接函数均被编译器拒绝。
+- AGENTS.md 与 HANDOFF.md 更新更严格的 FFI 边界、上下文签名、生命周期和源码地图。Lua 接口保持原样；
+  Rust 自定义转换实现需要使用新上下文及 FromLua 生命周期。本轮未 commit / push，后续桥接能力继续在 cosmos 内逐层组合。
+
+## 2026-11-13 封闭 FFI 并引入受控桥接上下文
+
+### 核心逻辑
+
+- 前序可见性与 AGENTS.md 约束已按用户要求提交为 af92e5f；本轮 FFI 封装未自动 commit / push。
+- FromLua<'lua> 改为读取不暴露状态/索引的 Value<'lua>，PushLua 改为写入 Output；
+  同步字符串及表字段借用由生命周期约束，回调/执行结果要求高阶 FromLua，阻止临时协程借用逃逸。
+- Value/TableReader 封装类型选择、绝对索引、表遍历与失败恢复；Output/TableWriter 统一构造表字段，
+  LuaStrMap 与 derive 共用这些转换操作，保持非字符串键跳过、未知字段忽略、默认值及多返回值顺序。
+- userdata 宏只生成 Rust LuaCallable 标记类型和参数/结果组合；MethodTable::add 在内部单态化 C trampoline，
+  LuaClosure 的捕获状态调用与宏方法共用 Call、错误边界和挂起协议，无额外回调元数据分配。
+- LuaCallable 为 unsafe trait，必须通过 Call 生成准确结果或挂起操作；Future 仍只装箱一次，返回值不额外装箱。
+  同步结果可借用输入；异步输入必须拥有数据或锚点，取消时先释放借用再解除协程锚点。
+- network bridge 全面迁移为上下文组合：Bytes 通过新增 &[u8] 基层 PushLua 输出，不增加中间 Vec；
+  TCP 迭代器只提供 Rust 状态调用，TLS 参数只构造受控借用后的配置值，不再出现 C 函数、栈常量或裸状态。
+- ffi 模块、全部声明/类型/常量限制在 cosmos 内；移除公开 yield、PendingOp、abs_index、原始 trampoline 等入口，
+  文档确认公开模块仅 userdata。更新 AGENTS.md 与 HANDOFF.md 的边界、接口迁移及源码地图。
+
+### 踩坑与验证
+
+- C ABI 不能通过换路径重导出来；本轮把完整的参数转换、错误处理、输出与挂起收回通用调用桥接，
+  仅让宏描述字段、分支和方法组合。方法和捕获闭包确实复用同一内部 trampoline。
+- 表构造必须检查字段单值输出，并在未完成、错误或 panic 时恢复栈；同步借用回传不能借用整个 Call 的可变引用。
+  FromLua derive 同时处理生命周期/泛型约束，避免调用方 Result 别名和空字段/空参数场景影响宏展开。
+- 新增外部插件、带状态异步闭包、二进制字节、长字符串/GC、同步借用回传与表字段借用回归；
+  新增表上下文错误/panic 栈恢复和 NUL 字符串 map 回归，以及 TCP 迭代器超时、取消、部分数据/EOF 回归。
+- all-targets 构建、36 项测试、5 项编译失败检查（FFI 私有、借用逃逸/回调结果约束和两项 !Send）、
+  严格 Clippy/rustdoc 与差异检查通过；12 项独立外部底层访问尝试被编译器拒绝。
+- 实际运行 http/websocket/spawn/sleep/sync/machine、TCP/TLS 双进程及 Rust Machine 嵌入示例通过；
+  4 worker 短窗口 HTTP 压测完成 3040 次请求、0 错误，仅作为并发调用链验证，不作性能对比。
+- 回答用户的 C .so 问题时，在仓库外用当前 LuaJIT 头文件编译临时 C 模块，macOS 上 require 加载、
+  含 NUL 字符串回显及参数错误处理均通过。本轮未新增 C 依赖、专用注入接口或符号导出配置，其他平台未验证。
+- 后续功能模块与宏展开只依赖受控上下文；Rust FFI 可见性与 C 动态模块的 ABI/符号导出分别处理，不自动提交。
+
+## 2026-11-14 按实际容器语义重命名 StringPairs
+
+- LuaStrMap 实际封装 Vec<(String, String)>，是可包含重复键的字符串键值对列表；改名为 StringPairs，
+  同步核心转换实现、network Headers 组合、回归与交接文档，不保留冗余别名。
+- 注释区分 Rust 列表与 Lua table 的语义：输出时后项覆盖同名键，读取顺序取决于 Lua 遍历。
+  本轮仅修改名称与说明，数据结构和转换行为不变。
+- cargo test --workspace --locked 的 36 项测试及 5 项编译失败检查通过，差异检查通过。
+  未 commit / push；后续采用 StringPairs 表达该列表转换原语。
+
+## 2026-11-14 提交受控桥接与 StringPairs 重命名
+
+- 按用户要求，将私有 FFI、受控读写/调用上下文、宏与 network bridge 迁移、借用生命周期及锚点、回归与文档一并提交，包含 StringPairs 重命名。
+- 提交前差异与遗留引用检查通过，沿用已完成的 36 项测试、5 项编译失败检查、严格 Clippy/rustdoc、外部边界与 examples 验证结果，不 push。
+- 后续外部模块继续通过受控上下文组合值，字符串键值对列表统一使用 StringPairs。

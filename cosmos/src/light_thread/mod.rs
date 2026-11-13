@@ -15,7 +15,7 @@ use crate::userdata::FromLua;
 use control::Control;
 use execution::{Execution, Step};
 
-pub use execution::{yield_with, PendingFuture, PendingOp};
+pub(crate) use execution::{yield_with, PendingFuture};
 
 const CANCELLED: &str = "thread: cancelled";
 // 限制连续立即完成的异步操作，防止单次轮询独占宿主线程。
@@ -55,7 +55,9 @@ impl LightThread {
 
     /// 构造 Future 时就取得唯一执行权，尚未轮询即被丢弃也会取消并清理。
     /// 直接执行与后台调度共用此入口，结果读取先于 registry 锚点释放。
-    pub(crate) fn run<R: FromLua>(&self) -> impl Future<Output = Result<R, String>> {
+    pub(crate) fn run<R: for<'lua> FromLua<'lua>>(
+        &self,
+    ) -> impl Future<Output = Result<R, String>> {
         let execution = self.inner.execution.borrow_mut().take();
         let guard = execution.map(|execution| RunGuard {
             execution: Some(execution),

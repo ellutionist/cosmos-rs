@@ -11,7 +11,7 @@ use crate::userdata::{FromLua, PushLua, RegistryRef};
 
 /// 擦除异步操作的具体类型，在完成的当次轮询中直接压栈。
 /// 输出仍是原生 Rust 值，只要求实现 PushLua，无需单独装箱返回值。
-pub trait PendingOp {
+pub(crate) trait PendingOp {
     /// Pending 时不压栈；Ready 返回压入的值数，交给下一次 lua_resume。
     /// 与 PushLua 相同，转换过程中不得调用 lua_error。
     ///
@@ -34,14 +34,14 @@ where
         lua_state: *mut lua_State,
     ) -> Poll<i32> {
         self.poll(cx)
-            .map(|value| unsafe { value.push_lua(lua_state) })
+            .map(|value| unsafe { value.push_lua(&mut crate::userdata::Output::new(lua_state)) })
     }
 }
 
 /// 协程挂起期间等待的异步操作。
 /// 无 Send 约束：LightThread 本身 !Send（线程亲和），整个链路不会跨线程，
 /// 放宽后 op 可以捕获 !Send 的数据（如带 Rc 的用户对象）
-pub type PendingFuture = Pin<Box<dyn PendingOp>>;
+pub(crate) type PendingFuture = Pin<Box<dyn PendingOp>>;
 
 // yield 通道：C 函数把 PendingFuture 塞进 TLS 槽再 lua_yield(lua_state, 0)，
 // 同一线程上的 poll 侧从槽里取回（见 yield_with / Execution::poll_step）。
@@ -60,7 +60,7 @@ thread_local! {
 /// # Safety
 /// lua_state 必须是当前 Lua C 回调中可 yield 的有效协程，fut 只能在同一线程执行。
 /// 返回值必须直接交给 Lua VM；宿主关闭 VM 前必须先回收挂起任务。
-pub unsafe fn yield_with(lua_state: *mut lua_State, fut: PendingFuture) -> c_int {
+pub(crate) unsafe fn yield_with(lua_state: *mut lua_State, fut: PendingFuture) -> c_int {
     PENDING_OP.with(|slot| {
         debug_assert!(slot.borrow().is_none(), "previous pending op was not taken");
         *slot.borrow_mut() = Some(fut);
@@ -138,8 +138,8 @@ impl Execution {
     }
 
     /// 锚点仍有效时转换返回值，调用方随后才可释放本执行状态。
-    pub(super) fn read_result<R: FromLua>(&self) -> Result<R, String> {
-        unsafe { R::from_lua(self.lua_state, 1) }
+    pub(super) fn read_result<R: for<'lua> FromLua<'lua>>(&self) -> Result<R, String> {
+        unsafe { crate::userdata::Value::new(self.lua_state, 1).read::<R>() }
     }
 }
 
@@ -185,8 +185,14 @@ mod tests {
             assert_eq!(op.as_mut().poll_push(&mut cx, lua_state), Poll::Ready(2));
             assert!(state.try_borrow_mut().is_ok());
             assert_eq!(lua_gettop(lua_state), 2);
-            assert_eq!(i64::from_lua(lua_state, 1).unwrap(), 7);
-            assert_eq!(Vec::<u8>::from_lua(lua_state, 2).unwrap(), [0, 255, 1]);
+            assert_eq!(
+                i64::from_lua(crate::userdata::Value::new(lua_state, 1)).unwrap(),
+                7
+            );
+            assert_eq!(
+                Vec::<u8>::from_lua(crate::userdata::Value::new(lua_state, 2)).unwrap(),
+                [0, 255, 1]
+            );
             drop(op);
             assert_eq!(Rc::strong_count(&state), 1);
             lua_close(lua_state);
@@ -215,7 +221,10 @@ mod tests {
                     assert_eq!(lua_type(lua_state, 1), LUA_TNIL);
                 }
             }
-            assert_eq!(String::from_lua(lua_state, 2).unwrap(), "失败");
+            assert_eq!(
+                String::from_lua(crate::userdata::Value::new(lua_state, 2)).unwrap(),
+                "失败"
+            );
             drop(operations);
             lua_close(lua_state);
         }

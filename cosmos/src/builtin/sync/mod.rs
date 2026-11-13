@@ -11,6 +11,7 @@ use std::task::Poll;
 use std::time::Duration;
 
 use crate::ffi::*;
+use crate::userdata::Value;
 use crate::userdata::{register, FromLua};
 use channel::Channel;
 use mutex::Mutex;
@@ -20,12 +21,12 @@ use semaphore::{Permit, Semaphore};
 /// channel 容量和信号量配额使用相同的严格正整数转换，拒绝截断小数。
 struct Count(usize);
 
-impl FromLua for Count {
-    unsafe fn from_lua(lua_state: *mut lua_State, idx: c_int) -> Result<Self, String> {
-        let count = f64::from_lua(lua_state, idx)?;
+impl<'lua> FromLua<'lua> for Count {
+    unsafe fn from_lua(value: Value<'lua>) -> Result<Self, String> {
+        let count = value.read::<f64>()?;
         let max = (u32::MAX as usize).min(tokio::sync::Semaphore::MAX_PERMITS);
         if !count.is_finite() || count.fract() != 0.0 || !(1.0..=max as f64).contains(&count) {
-            return Err(format!("argument {idx}: expected integer in 1..={max}"));
+            return Err(value.expected(&format!("integer in 1..={max}")));
         }
         Ok(Self(count as usize))
     }
@@ -34,9 +35,9 @@ impl FromLua for Count {
 /// 所有等待接口的末参为可选毫秒超时；缺省/nil 表示无限等待，0 表示只尝试立即完成。
 struct Timeout(Option<Duration>);
 
-impl FromLua for Timeout {
-    unsafe fn from_lua(lua_state: *mut lua_State, idx: c_int) -> Result<Self, String> {
-        Ok(Self(Option::<Duration>::from_lua(lua_state, idx)?))
+impl<'lua> FromLua<'lua> for Timeout {
+    unsafe fn from_lua(value: Value<'lua>) -> Result<Self, String> {
+        Ok(Self(value.read::<Option<Duration>>()?))
     }
 }
 
