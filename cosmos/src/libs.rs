@@ -6,7 +6,7 @@ use crate::ffi::*;
 use libc::{c_char, c_int};
 
 // lua_error 是 longjmp，返回值仅用于满足签名
-unsafe fn raise(L: *mut lua_State, msg: &str) -> c_int {
+pub(crate) unsafe fn raise(L: *mut lua_State, msg: &str) -> c_int {
     lua_pushlstring(L, msg.as_ptr() as *const c_char, msg.len());
     lua_error(L)
 }
@@ -46,6 +46,8 @@ pub unsafe fn open_cosmos(L: *mut lua_State) {
     lua_setfield(L, -2, c"sleep".as_ptr());
     lua_pushcclosure(L, now_ms_impl, 0);
     lua_setfield(L, -2, c"now_ms".as_ptr());
+    crate::thread::open(L);
+    lua_setfield(L, -2, c"thread".as_ptr());
     lua_setfield(L, LUA_GLOBALSINDEX, c"cosmos".as_ptr());
 }
 

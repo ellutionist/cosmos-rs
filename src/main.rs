@@ -31,7 +31,9 @@ fn main() {
         rt.spawn(tls_echo_server(port));
     }
 
-    match rt.block_on(run(&code, &script_args)) {
+    // LocalSet：cosmos.thread.spawn 产生的 LuaCoroutine 是 !Send，只能跑在本地任务集上
+    let local = tokio::task::LocalSet::new();
+    match local.block_on(&rt, run(&code, &script_args)) {
         Ok(()) => {}
         Err(msg) => {
             eprintln!("lua error: {msg}");
@@ -126,6 +128,7 @@ async fn run(code: &str, args: &[String]) -> Result<(), String> {
         luaL_openlibs(L);
         libs::open_cosmos(L);
         userdata::init(L);
+        cosmos::thread::register_types(L);
         demo::register(L);
         cosmos_ext_demo::register(L);
         cosmos_network::register(L);

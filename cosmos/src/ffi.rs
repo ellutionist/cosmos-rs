@@ -40,6 +40,7 @@ extern "C" {
     pub fn lua_close(L: *mut lua_State);
 
     pub fn lua_newthread(L: *mut lua_State) -> *mut lua_State;
+    pub fn lua_xmove(from: *mut lua_State, to: *mut lua_State, n: c_int);
     pub fn lua_resume(L: *mut lua_State, nargs: c_int) -> c_int;
     pub fn lua_yield(L: *mut lua_State, nresults: c_int) -> c_int;
 

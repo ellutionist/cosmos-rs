@@ -127,7 +127,7 @@ impl AsyncWrite for WriteSide {
     }
 }
 
-/// 连接入口：静态方法 Tcp.connect(host, port, timeout_ms?)
+/// 连接入口：静态方法 Tcp.connect / Tcp.listen
 pub struct Tcp;
 
 #[cosmos::userdata]
@@ -146,6 +146,49 @@ impl Tcp {
             Ok(Err(e)) => Err(classify_io(&e)),
             Err(()) => Err("timeout".to_string()),
         }
+    }
+
+    /// 监听 0.0.0.0:port；timeout_ms 作用于每次 accept
+    async fn listen(port: i64, timeout_ms: Option<i64>) -> Result<TcpListener, String> {
+        let listener = tokio::net::TcpListener::bind(("0.0.0.0", port as u16))
+            .await
+            .map_err(|e| classify_io(&e))?;
+        Ok(TcpListener {
+            listener: Some(listener),
+            timeout: timeout_ms.and_then(timeout_from_ms),
+        })
+    }
+}
+
+/// TCP 监听器：accept 出普通 TcpConn（close 后 accept 返回 nil,"closed"）
+pub struct TcpListener {
+    listener: Option<tokio::net::TcpListener>,
+    timeout: Option<Duration>,
+}
+
+#[cosmos::userdata]
+impl TcpListener {
+    /// 接受一个连接；timeout 到点返回 nil,"timeout"
+    async fn accept(&mut self) -> Result<TcpConn, String> {
+        let Some(listener) = self.listener.as_ref() else {
+            return Err("closed".to_string());
+        };
+        let deadline = self.timeout.map(|d| Instant::now() + d);
+        let (stream, _) = match with_deadline(deadline, listener.accept()).await {
+            Ok(Ok(v)) => v,
+            Ok(Err(e)) => return Err(classify_io(&e)),
+            Err(()) => return Err("timeout".to_string()),
+        };
+        Ok(TcpConn {
+            stream: Some(stream),
+            state: Rc::new(Cell::new(State::Connected)),
+            timeout: None,
+            max_buf: None,
+        })
+    }
+
+    fn close(&mut self) {
+        self.listener.take();
     }
 }
 
@@ -668,4 +711,5 @@ pub unsafe fn register(L: *mut lua_State) {
     cosmos::userdata::register::<TcpReader>(L);
     cosmos::userdata::register::<TcpWriter>(L);
     cosmos::userdata::register::<TcpUntil>(L);
+    cosmos::userdata::register::<TcpListener>(L);
 }
