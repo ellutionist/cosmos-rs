@@ -19,14 +19,14 @@
 //! 参数转换与借用失败只返回 Err，最外层 trampoline 在 Rust 局部值释放后才调用 lua_error。
 
 use std::any::TypeId;
-use std::cell::{Ref, RefCell, RefMut};
+use std::cell::{Cell, Ref, RefCell, RefMut};
 use std::collections::{HashMap, HashSet};
 use std::ffi::CString;
 use std::fmt::Display;
 use std::marker::PhantomData;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::ptr;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::rc::Rc;
 use std::time::Duration;
 
 use crate::ffi::*;
@@ -74,19 +74,68 @@ impl<T> MethodTable<T> {
 // （LuaJIT 也没有 lua_mainthread），所以 init 时把主状态以 lightuserdata
 // 锚定在 registry（registry 对所有协程可见），之后经 main_state 取回
 thread_local! {
-    static REGISTERED: RefCell<HashMap<*mut lua_State, HashSet<TypeId>>> =
+    static REGISTERED: RefCell<HashMap<*mut lua_State, VmRegistration>> =
         RefCell::new(HashMap::new());
 }
 
 const MAIN_STATE_KEY: &std::ffi::CStr = c"__cosmos_main_state";
 
-/// VM 是否还活着：lua_close 之后挂着未 drop 的锚定对象（LuaFunction /
-/// 挂起的 LuaCoroutine）会因为任务延后回收而在已释放的状态上 luaL_unref。
-/// Drop 里查这个标志，已关闭则直接放弃释放（进程即将退出，泄漏无害）
-static VM_ALIVE: AtomicBool = AtomicBool::new(false);
+struct VmRegistration {
+    types: HashSet<TypeId>,
+    alive: Rc<Cell<bool>>,
+}
 
-pub(crate) fn vm_alive() -> bool {
-    VM_ALIVE.load(Ordering::Relaxed)
+impl Default for VmRegistration {
+    fn default() -> Self {
+        Self {
+            types: HashSet::new(),
+            alive: Rc::new(Cell::new(true)),
+        }
+    }
+}
+
+/// registry 引用统一使用所属 VM 的主状态释放，并持有该次 VM 生命周期的独立标记。
+/// 即使后来新 VM 复用了相同地址，旧引用也不会访问新 VM 或已经释放的状态。
+pub(crate) struct RegistryRef {
+    main: *mut lua_State,
+    value: c_int,
+    alive: Rc<Cell<bool>>,
+}
+
+impl RegistryRef {
+    /// 消费栈顶值并锚定；lua_state 必须属于初始化后的存活 VM。
+    pub(crate) unsafe fn new(lua_state: *mut lua_State) -> Self {
+        let main = main_state(lua_state);
+        let alive =
+            REGISTERED.with(|states| states.borrow_mut().entry(main).or_default().alive.clone());
+        Self {
+            main,
+            value: luaL_ref(lua_state, LUA_REGISTRYINDEX),
+            alive,
+        }
+    }
+
+    fn is_alive(&self) -> bool {
+        self.alive.get()
+    }
+
+    unsafe fn push_to(&self, lua_state: *mut lua_State) {
+        assert!(self.is_alive(), "Lua VM 已关闭");
+        debug_assert_eq!(main_state(lua_state), self.main, "Lua 引用不属于目标 VM");
+        if self.value == LUA_REFNIL {
+            lua_pushnil(lua_state);
+        } else {
+            lua_rawgeti(lua_state, LUA_REGISTRYINDEX, self.value);
+        }
+    }
+}
+
+impl Drop for RegistryRef {
+    fn drop(&mut self) {
+        if self.is_alive() {
+            unsafe { luaL_unref(self.main, LUA_REGISTRYINDEX, self.value) };
+        }
+    }
 }
 
 /// 状态初始化：把主状态指针锚定进 registry，必须早于任何 push 调用
@@ -96,7 +145,9 @@ pub(crate) fn vm_alive() -> bool {
 pub unsafe fn init(lua_state: *mut lua_State) {
     lua_pushlightuserdata(lua_state, lua_state);
     lua_setfield(lua_state, LUA_REGISTRYINDEX, MAIN_STATE_KEY.as_ptr());
-    VM_ALIVE.store(true, Ordering::Relaxed);
+    REGISTERED.with(|states| {
+        states.borrow_mut().entry(lua_state).or_default();
+    });
 }
 
 /// 返回所属 VM 的主状态；未初始化时使用传入状态。
@@ -133,7 +184,7 @@ unsafe fn ensure_metatable<T: UserData>(main: *mut lua_State, lua_state: *mut lu
     let registered = REGISTERED.with(|m| {
         m.borrow()
             .get(&main)
-            .map(|s| s.contains(&TypeId::of::<T>()))
+            .map(|state| state.types.contains(&TypeId::of::<T>()))
             .unwrap_or(false)
     });
     if registered {
@@ -169,6 +220,7 @@ unsafe fn ensure_metatable<T: UserData>(main: *mut lua_State, lua_state: *mut lu
             m.borrow_mut()
                 .entry(main)
                 .or_default()
+                .types
                 .insert(TypeId::of::<T>());
         });
     }
@@ -379,10 +431,11 @@ pub unsafe fn cleanup(lua_state: *mut lua_State) {
     unsafe {
         let main = main_state(lua_state);
         REGISTERED.with(|m| {
-            m.borrow_mut().remove(&main);
+            if let Some(state) = m.borrow_mut().remove(&main) {
+                state.alive.set(false);
+            }
         });
     }
-    VM_ALIVE.store(false, Ordering::Relaxed);
 }
 
 /// 方法参数：从 Lua 栈取值
@@ -563,14 +616,7 @@ pub enum LuaStr {
 /// 因此 s 的 'static 生命周期是 sound 的（transmute 延展）
 pub struct StrAnchor {
     s: &'static str,
-    lua_state: *mut lua_State,
-    ref_: c_int,
-}
-
-impl Drop for StrAnchor {
-    fn drop(&mut self) {
-        unsafe { luaL_unref(self.lua_state, LUA_REGISTRYINDEX, self.ref_) };
-    }
+    anchor: RegistryRef,
 }
 
 impl std::ops::Deref for LuaStr {
@@ -578,7 +624,10 @@ impl std::ops::Deref for LuaStr {
     fn deref(&self) -> &str {
         match self {
             LuaStr::Owned(s) => s,
-            LuaStr::Borrowed(a) => a.s,
+            LuaStr::Borrowed(a) => {
+                assert!(a.anchor.is_alive(), "Lua VM 已关闭");
+                a.s
+            }
         }
     }
 }
@@ -598,11 +647,9 @@ impl FromLua for LuaStr {
             let s = std::str::from_utf8(bytes)
                 .map_err(|_| format!("argument {idx}: invalid UTF-8 string"))?;
             lua_pushvalue(lua_state, idx);
-            let ref_ = luaL_ref(lua_state, LUA_REGISTRYINDEX);
             Ok(LuaStr::Borrowed(StrAnchor {
                 s: std::mem::transmute::<&str, &'static str>(s),
-                lua_state,
-                ref_,
+                anchor: RegistryRef::new(lua_state),
             }))
         }
     }
@@ -623,8 +670,7 @@ impl<T: FromLua> FromLua for Option<T> {
 /// registry 锚点允许值跨 yield、跨协程传递；不复制 Lua 对象。
 /// LuaValue 必须在所属 VM 的同一线程使用，宿主须先回收任务再关闭 VM。
 pub struct LuaValue {
-    main: *mut lua_State,
-    registry_ref: c_int,
+    anchor: RegistryRef,
 }
 
 impl FromLua for LuaValue {
@@ -632,30 +678,17 @@ impl FromLua for LuaValue {
         if lua_type(lua_state, idx) == LUA_TNONE {
             return Err(format!("argument {idx}: expected a value"));
         }
-        let main = main_state(lua_state);
         lua_pushvalue(lua_state, idx);
-        let registry_ref = luaL_ref(lua_state, LUA_REGISTRYINDEX);
-        Ok(Self { main, registry_ref })
+        Ok(Self {
+            anchor: RegistryRef::new(lua_state),
+        })
     }
 }
 
 impl PushLua for LuaValue {
     unsafe fn push_lua(self, lua_state: *mut lua_State) -> i32 {
-        // luaL_ref(nil) 返回 LUA_REFNIL，不能将负引用当作普通 registry 下标读取。
-        if self.registry_ref == LUA_REFNIL {
-            lua_pushnil(lua_state);
-        } else {
-            lua_rawgeti(lua_state, LUA_REGISTRYINDEX, self.registry_ref);
-        }
+        self.anchor.push_to(lua_state);
         1
-    }
-}
-
-impl Drop for LuaValue {
-    fn drop(&mut self) {
-        if vm_alive() {
-            unsafe { luaL_unref(self.main, LUA_REGISTRYINDEX, self.registry_ref) };
-        }
     }
 }
 
@@ -663,8 +696,7 @@ impl Drop for LuaValue {
 /// 锚定在 registry（luaL_ref），可跨 yield、跨协程使用；Drop 时解除锚定。
 /// 借用 VM 的单线程约束与 lua_State 相同。
 pub struct LuaFunction {
-    main: *mut lua_State,
-    registry_ref: c_int,
+    anchor: RegistryRef,
 }
 
 impl LuaFunction {
@@ -672,13 +704,16 @@ impl LuaFunction {
     /// 协程锚点覆盖整个等待与结果读取过程，取消时随 Future 一起回收。
     /// 宿主必须先回收任务，再关闭所属 VM。
     pub async fn call<A: PushLua, R: FromLua>(&self, args: A) -> Result<R, String> {
+        if !self.anchor.is_alive() {
+            return Err("Lua VM 已关闭".to_string());
+        }
         let (thread, mut co) = unsafe {
-            let thread = lua_newthread(self.main);
-            lua_rawgeti(thread, LUA_REGISTRYINDEX, self.registry_ref);
+            let thread = lua_newthread(self.anchor.main);
+            self.anchor.push_to(thread);
             args.push_lua(thread);
             (
                 thread,
-                crate::coroutine::LuaCoroutine::new(self.main, thread),
+                crate::coroutine::LuaCoroutine::new(self.anchor.main, thread),
             )
         };
         (&mut co).await?;
@@ -693,18 +728,10 @@ impl FromLua for LuaFunction {
         if lua_type(lua_state, idx) != LUA_TFUNCTION {
             return Err(format!("argument {idx}: expected function"));
         }
-        let main = main_state(lua_state);
         lua_pushvalue(lua_state, idx);
-        let registry_ref = luaL_ref(lua_state, LUA_REGISTRYINDEX);
-        Ok(LuaFunction { main, registry_ref })
-    }
-}
-
-impl Drop for LuaFunction {
-    fn drop(&mut self) {
-        if vm_alive() {
-            unsafe { luaL_unref(self.main, LUA_REGISTRYINDEX, self.registry_ref) };
-        }
+        Ok(LuaFunction {
+            anchor: RegistryRef::new(lua_state),
+        })
     }
 }
 

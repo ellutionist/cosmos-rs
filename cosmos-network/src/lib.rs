@@ -9,9 +9,12 @@ mod http;
 mod tcp;
 mod websocket;
 
-/// 本 crate 的 Lua 部分：编译期嵌入二进制，启动时由宿主执行（见 cosmos::libs::run_lua_source）。
-/// (名称用于报错定位, 源码)
-pub const LUA_SOURCES: &[(&str, &str)] = &[("cosmos.network.tcp", include_str!("../lua/tcp.lua"))];
+/// 网络插件：注册协议类型，并加载编译进来的 Lua 定义。
+pub struct Network;
 
-/// 注册本 crate 的全部 userdata 类型（桥接层入口）
-pub use bridge::register;
+impl cosmos::Module for Network {
+    fn register(&self, machine: &mut cosmos::Machine) -> Result<(), String> {
+        bridge::register(machine);
+        machine.load("cosmos.network.tcp", include_str!("../lua/tcp.lua"))
+    }
+}

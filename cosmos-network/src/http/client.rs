@@ -64,14 +64,17 @@ pub(crate) fn default_tls_config() -> Arc<ClientConfig> {
         .clone()
 }
 
-// 连接池按 TLS 配置缓存。键为 TlsContext 缓存的 Arc 指针（0 = 默认配置）：
-// 配置一变 TlsContext 就重建 Arc，自然落到新的池，旧连接不会串用新信任根
+// 连接池按 runtime 与 TLS 配置缓存，避免不同宿主 runtime 复用旧连接驱动。
+// TLS 键为 TlsContext 缓存的 Arc 指针（0 = 默认配置），配置更新时使用新池。
 thread_local! {
-    static CLIENTS: RefCell<HashMap<usize, HttpPool>> = RefCell::new(HashMap::new());
+    static CLIENTS: RefCell<HashMap<(tokio::runtime::Id, usize), HttpPool>> = RefCell::new(HashMap::new());
 }
 
 fn client_for(tls: Option<Arc<ClientConfig>>) -> HttpPool {
-    let key = tls.as_ref().map(|c| Arc::as_ptr(c) as usize).unwrap_or(0);
+    let key = (
+        tokio::runtime::Handle::current().id(),
+        tls.as_ref().map(|c| Arc::as_ptr(c) as usize).unwrap_or(0),
+    );
     if let Some(c) = CLIENTS.with(|m| m.borrow().get(&key).cloned()) {
         return c;
     }

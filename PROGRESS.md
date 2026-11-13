@@ -386,3 +386,55 @@
 - 按用户要求，提交 time 声明式注册、真实 Unix 毫秒/微秒时间戳、共用 Duration 转换及配套示例和文档，不 push。
 - 提交前差异检查通过；沿用已完成的构建、严格 Clippy、18 项测试、examples 回归及宿主系统时间核对结果。
 - 后续时间接口继续明确时间戳单位与时钟语义。
+
+## 2026-11-13 删除外部扩展示例
+
+- 按用户要求，移除 cosmos-ext-demo 的 Cargo 路径依赖、锁文件条目、宿主注册和 examples/ext.lua。
+  已删除工作区旁的 ../cosmos-ext-demo 源码目录及其构建目录，并清理本项目中该包的编译缓存。
+- 删除 HANDOFF.md 中过期的外部路径依赖说明与示例运行命令；此前进度条目作为历史记录保留。
+  当前代码、依赖、示例和交接说明中均无该演示 crate 或其 Accumulator/slow_add 接口的引用。
+- cargo build、cargo test --workspace --locked（18 项）及严格 Clippy 通过；Cargo metadata 确认已无外部演示依赖。
+- 实际验证 userdata/spawn/sleep/sync/http/websocket 用例全部通过；运行时确认演示类型的 require 入口和 slow_add 已移除。
+- 本轮未 commit / push；后续示例与回归继续使用工作区内的运行时和网络模块。
+
+## 2026-11-13 封装 Machine 并支持插件与 Runtime Handle 注入
+
+### 核心逻辑
+
+- 新建 cosmos::Machine 与 Module trait，根库直接重导出 Machine/Module/Network，外部可以通过 cosmos_rs 调用。
+  Machine 独占 Lua VM 和 LocalSet，只保存宿主注入的 Tokio Handle，不创建或关闭 Runtime。
+- Machine::new 初始化标准库和 builtin；add_module 在注入的 Runtime/LocalSet 上下文同步注册插件，
+  支持 register::<T>、load 定义和 spawn 本地任务，不要求插件 Send/Sync，也不暴露 Lua 裸指针。
+- 网络库实现 Network 插件，类型注册及内嵌 Lua 源码加载由插件负责，删除原裸指针注册入口和 LUA_SOURCES。
+- exec、exec_with_args、exec_file 为 async，宿主在注入的 Runtime 上驱动，代码/参数使用长度感知的 Lua API。
+  脚本之间保留全局状态与后台任务；缺少 Tokio 上下文或 Runtime ID 不匹配时返回错误，不执行 Lua。
+- CLI 改为 Machine 的调用方，保留文件读取失败退出 2、Lua 失败退出 1、脚本参数和 TCP/TLS 测试服务。
+  加载失败与脚本结束均通过 Machine 回收资源；Drop 固定先取消 LocalSet 任务，再 cleanup/lua_close。
+
+### 线程与生命周期处理
+
+- Handle 注入支持 current_thread/multi_thread Runtime；Lua 协程、userdata 和 HTTP 回调始终由 LocalSet 在宿主线程推进，
+  Machine 与执行 Future 保持 !Send。宿主管理 Runtime 的存活，不在 Machine 内嵌套 Handle::block_on。
+- 同步 load 在临时协程中轮询定义，遇到异步等待会返回错误并回收，避免 lua_pcall 主状态 yield 后遗留 TLS Future。
+- 原全局 VM_ALIVE 不能支持多个 Machine。新增共用 RegistryRef，按每次 VM 生命周期持有独立 Rc<Cell<bool>>，
+  LuaValue、LuaFunction、StrAnchor、LuaCoroutine 共同使用，关闭一个 VM 不会影响另一个 VM。
+  引用统一通过主状态 unref；旧回调在 VM 关闭后返回错误，即使新 VM 复用地址也不会误访问。
+- LuaCoroutine 按字段顺序先释放挂起 Future 的借用守卫，再解除协程锚定；取消执行后 userdata 可再次正常调用。
+- HTTP 客户端池缓存键增加 Runtime ID，避免在同一宿主线程上切换 Runtime 后复用已暂停的旧连接驱动。
+  Tokio 的稳定 Runtime ID 需要 >=1.49，更新核心依赖下限，锁文件仍使用原有 1.54.1。
+
+### 验证与下一步
+
+- 新增 examples/machine.rs 和 machine.lua，实际运行多线程 Runtime + Network + 自定义插件、跨脚本状态与文件参数。
+- 新增 6 项嵌入回归，覆盖两种 Runtime 的线程亲和、插件上下文、本地后台任务、VM 隔离、引用释放、
+  Runtime 身份检查、编译/运行/模块加载错误恢复、执行取消、VM 关闭顺序、旧回调及 HTTP 池隔离。
+- cargo test --workspace --locked 的 24 项测试及 Machine !Send 编译失败用例通过；all-targets 构建和严格 Clippy 通过。
+- 实际运行 userdata/spawn/sleep/sync/http/websocket、TCP/TLS 单进程及双进程、CLI machine.lua 和 Rust 嵌入示例全部通过；
+  error.lua 按预期退出 1。更新 AGENTS.md 与 HANDOFF.md 的嵌入 API、线程模型和资源回收说明。
+- 保留上一轮外部演示删除改动；本轮未 commit / push。后续插件统一通过 Module 注入，由宿主提供 Runtime Handle。
+
+## 2026-11-13 提交 Machine 与插件注入
+
+- 按用户要求，提交 Machine、Module、Handle 注入、隔离与生命周期修复、嵌入示例及配套文档，包含此前外部演示清理。
+- 提交前差异检查通过，沿用已完成的 24 项测试、Machine !Send 检查、严格 Clippy 及 examples 回归结果，不 push。
+- 下一步评估 HTTP 连接池由 client 实例持有的接口与生命周期。

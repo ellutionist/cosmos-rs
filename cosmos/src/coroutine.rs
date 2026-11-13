@@ -9,7 +9,7 @@ use libc::c_int;
 
 use crate::ffi::*;
 use crate::stack;
-use crate::userdata::PushLua;
+use crate::userdata::{PushLua, RegistryRef};
 
 /// 擦除异步操作的具体类型，在完成的当次轮询中直接压栈。
 /// 输出仍是原生 Rust 值，只要求实现 PushLua，无需单独装箱返回值。
@@ -89,7 +89,8 @@ enum Phase {
 pub struct LuaCoroutine {
     thread: *mut lua_State,
     phase: Phase,
-    registry_ref: i32,
+    // 字段按声明顺序释放：先回收 phase 中的借用守卫，再解除协程锚定。
+    _anchor: RegistryRef,
     // lua_State 线程亲和 + TLS 通道要求 future 留在 yield 发生的那条线程上：
     // Rc 使本类型 !Send，多线程 runtime 下会在编译期被 spawn 拒绝，
     // 而不是运行期取错槽
@@ -109,19 +110,8 @@ impl LuaCoroutine {
         Self {
             thread,
             phase: Phase::Fresh,
-            registry_ref: luaL_ref(g, LUA_REGISTRYINDEX),
+            _anchor: RegistryRef::new(g),
             _not_send: PhantomData,
-        }
-    }
-}
-
-impl Drop for LuaCoroutine {
-    fn drop(&mut self) {
-        // LuaJIT 的 lua_close 只接受主线程，协程线程靠 GC 回收——摘掉锚点即可。
-        // 被取消（future 被 drop）时协程正挂起，同样适用。
-        // VM 已关闭则跳过：任务可能在 lua_close 之后才被 runtime 回收
-        if crate::userdata::vm_alive() {
-            unsafe { luaL_unref(self.thread, LUA_REGISTRYINDEX, self.registry_ref) };
         }
     }
 }

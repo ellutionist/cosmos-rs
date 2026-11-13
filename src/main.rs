@@ -1,8 +1,4 @@
-use std::ffi::CString;
-
-use cosmos::coroutine::LuaCoroutine;
-use cosmos::ffi::*;
-use cosmos::{builtin, libs, stack, userdata};
+use cosmos_rs::{Machine, Network};
 
 mod demo;
 
@@ -15,37 +11,35 @@ fn main() {
         std::process::exit(2);
     });
 
-    let rt = tokio::runtime::Builder::new_current_thread()
-        .enable_time()
-        .enable_io()
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
         .build()
         .unwrap();
+    let mut machine = Machine::new(runtime.handle().clone()).unwrap_or_else(|error| {
+        eprintln!("machine error: {error}");
+        std::process::exit(1);
+    });
+    if let Err(error) = machine.add_module(Network) {
+        drop(machine);
+        eprintln!("network module error: {error}");
+        std::process::exit(1);
+    }
+    machine.register::<demo::Counter>();
 
-    // 测试用：设置 COSMOS_ECHO_PORT / COSMOS_TLS_ECHO_PORT 时起 echo server
+    // 测试用：echo 任务与 Lua 协程由同一个 Machine 的 LocalSet 驱动。
     if let Ok(port) = std::env::var("COSMOS_ECHO_PORT") {
         let port: u16 = port.parse().expect("invalid COSMOS_ECHO_PORT");
-        rt.spawn(echo_server(port));
+        machine.spawn(echo_server(port));
     }
     if let Ok(port) = std::env::var("COSMOS_TLS_ECHO_PORT") {
         let port: u16 = port.parse().expect("invalid COSMOS_TLS_ECHO_PORT");
-        rt.spawn(tls_echo_server(port));
+        machine.spawn(tls_echo_server(port));
     }
 
-    // LocalSet：cosmos.thread.spawn 产生的 LuaCoroutine 是 !Send，只能跑在本地任务集上
-    let local = tokio::task::LocalSet::new();
-    let (lua_state, result) = local.block_on(&rt, run(&code, &script_args));
-    // 脚本结束后 LocalSet 里仍可能挂着未完成的本地任务（协程里阻塞在网络读、
-    // 服务端 ws handler 卡在 receive 等），它们持有 Lua userdata 的 RefCell 守卫。
-    // 必须先回收这些任务再 lua_close：否则守卫 Drop 时读写的是已释放的 VM 内存
-    drop(local);
-    if !lua_state.is_null() {
-        unsafe {
-            userdata::cleanup(lua_state);
-            lua_close(lua_state);
-        }
-    }
-    if let Err(msg) = result {
-        eprintln!("lua error: {msg}");
+    let result = runtime.block_on(machine.exec_with_args(&format!("@{path}"), &code, &script_args));
+    drop(machine);
+    if let Err(error) = result {
+        eprintln!("lua error: {error}");
         std::process::exit(1);
     }
 }
@@ -124,53 +118,5 @@ async fn tls_echo_server(port: u16) {
                 }
             }
         });
-    }
-}
-
-/// 建 VM 并执行脚本；返回状态指针与结果——VM 的关闭交给 main，
-/// 以便在 lua_close 之前先回收 LocalSet 里挂起的本地任务
-async fn run(code: &str, args: &[String]) -> (*mut lua_State, Result<(), String>) {
-    unsafe {
-        let lua_state = luaL_newstate();
-        if lua_state.is_null() {
-            return (
-                std::ptr::null_mut(),
-                Err("failed to create lua state".to_string()),
-            );
-        }
-        luaL_openlibs(lua_state);
-        userdata::init(lua_state);
-        builtin::open(lua_state);
-        userdata::register::<demo::Counter>(lua_state);
-        cosmos_ext_demo::register(lua_state);
-        cosmos_network::register(lua_state);
-
-        // 各扩展 crate 的 Lua 部分（include_str! 编进二进制）：
-        // 必须在 userdata 注册之后执行，require("cosmos.X") 才拿得到 metatable
-        for (name, src) in cosmos_network::LUA_SOURCES {
-            if let Err(e) = libs::run_lua_source(lua_state, name, src) {
-                return (lua_state, Err(e));
-            }
-        }
-
-        // 脚本跑在独立协程上（主栈只承载全局状态），这样 sleep 才能 yield
-        let thread = lua_newthread(lua_state);
-
-        let ccode = CString::new(code).unwrap();
-        if luaL_loadstring(thread, ccode.as_ptr()) != 0 {
-            let msg = stack::err_message(thread);
-            return (lua_state, Err(msg));
-        }
-
-        // 初始参数：压在 chunk 函数之上，首次 resume 按 gettop - 1 传给脚本的 `...`
-        for arg in args {
-            lua_pushlstring(
-                thread,
-                arg.as_ptr() as *const cosmos::ffi::c_char,
-                arg.len(),
-            );
-        }
-
-        (lua_state, LuaCoroutine::new(lua_state, thread).await)
     }
 }

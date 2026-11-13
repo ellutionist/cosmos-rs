@@ -9,21 +9,25 @@
 - 已按用户要求将统一返回值桥接、分层修复和冗余清理纳入本次本地提交；最新验证与踩坑见 `PROGRESS.md`。
 - 异步边界采用 `PendingOp::poll_push`，只保留 `PushLua` 转换协议；不采用返回值闭包装箱方案（见 §5）。
 - HTTP/WebSocket 回调已改用 `LuaFunction::call<A, R>`；userdata 借用失败只返回 Err，最外层 trampoline 统一抛 Lua 错误。
+- 外部嵌入使用 `Machine::new(tokio_handle)`，插件实现 `Module` 并通过 add_module 注入；网络插件为 `Network`。
 - 交流、注释、文档一律**中文**；**不要自动 commit / push**。
 
 ## 1. 环境与结构
 
 ```
 cosmos-rs/
-  cosmos/            # 运行时 + 桥接层：ffi / userdata / coroutine / stack / libs / builtin
+  cosmos/            # 运行时 + 桥接层：machine / ffi / userdata / coroutine / stack / libs / builtin
   cosmos-macros/     # #[userdata]、#[derive(FromLua/PushLua)]，生成全部 trampoline
   cosmos-network/    # 功能模块：tcp/{stream,tls} / http / websocket + bridge.rs（叶子转换）
-  src/main.rs        # 宿主：建 VM、跑脚本、关 VM；demo.rs 是 userdata 示例
+  src/lib.rs         # 对外导出 Machine、Module、Network 与 cosmos 桥接能力
+  src/main.rs        # CLI：注入 Runtime Handle/Network、传递参数；demo.rs 是 userdata 示例
+  examples/machine.rs # Rust 嵌入示例，examples/machine.lua 验证脚本参数与模块入口
   examples/*.lua     # 全部端到端用例
   cosmos-network/lua/ # 内嵌 Lua 源码（include_str! 随二进制编译）
 ```
 
-- LuaJIT 2.1（Lua 5.1 C API），单线程：tokio `current_thread` + `LocalSet`，Lua 协程 `!Send`。
+- LuaJIT 2.1（Lua 5.1 C API），Tokio >= 1.49；宿主可注入单线程或多线程 Runtime 的 Handle，
+  Machine 的 LocalSet 始终在宿主线程驱动 Lua 协程，Machine 与 Lua 协程均为 `!Send`。
 - 依赖：hyper 1 + hyper-util（client/server，h2 走 ALPN）、rustls+ring、fastwebsockets（upgrade feature）。
 - 重构前基线：`e004c8e feat: 新增 WebSocket 支持并重构 Lua 桥接分层`；最新提交号通过 `git log -1` 查询。
 
@@ -32,7 +36,7 @@ cosmos-rs/
 1. **功能模块零 FFI**：tcp / tls / http / websocket 里不出现 `cosmos::ffi`、不直接调 `lua_*`、不做裸栈操作。
 2. **桥接 = 组合**：基层类型各实现 `PushLua` / `FromLua`，结构体靠 derive，枚举靠 derive，
    多返回值靠元组/枚举字段顺序。**禁止**把命令式栈操作换个文件存放（用户明确说过那是"马甲"，没有意义）。
-3. 允许裸 FFI：cosmos 运行时/桥接层、`cosmos-network/src/bridge.rs` 的叶子转换与 C trampoline、`src/main.rs`（宿主）。
+3. 允许裸 FFI：cosmos 运行时/桥接层（含 machine）、`cosmos-network/src/bridge.rs` 的叶子转换与 C trampoline。
 4. 不做死抽象；公共层要有明确复用点。
 5. 任何行为改动必须实际跑 `examples/` 对应用例（含回归），不能只看编译通过。
 6. 只有用户明确要求才 commit / push。
@@ -49,13 +53,14 @@ cosmos-rs/
   Rust 引用同步更新，Lua require 路径保持原样；目录整理已提交为 `6c0067a`。
 
 - 本次命名整理提交：`Thread` → `LightThread`，`thread.rs` → `light_thread.rs`；当前 Rust 模块为 `cosmos::builtin::light_thread`，Lua 类型表为 `cosmos.LightThread`。
-- Lua 状态指针（含宏生成代码和外部扩展）已从 `L` 改为 `lua_state`，未使用参数为 `_lua_state`。
+- Lua 状态指针（含宏生成代码）已从 `L` 改为 `lua_state`，未使用参数为 `_lua_state`。
 - 其余 Clippy 诊断已修复，公开裸指针桥接 API 已明确 unsafe 契约；严格 Clippy、构建、15 项测试和 examples 通过。
 
 - 已提交基线：WebSocket、桥接分层重构、VM 生命周期修复与项目约定。
 - 本次提交范围：统一 `PushLua`、类型化 Lua 回调、枚举 `FromLua`、userdata fallible 借用、统一错误边界、冗余清理与回归记录。
-- 主程序还依赖工作区外的 `../cosmos-ext-demo`；其 `src/lib.rs` 已经用户授权同步修改两行：
-  移除旧输出类型的导入，`slow_add` 的 Future 直接返回 `a + b`。后续保存/迁移工程时须一起保留。
+- 外部演示 crate 已移除，主程序构建不再依赖工作区外的源码目录。
+- Machine 管理 VM/LocalSet，Runtime 只注入 Handle；网络作为 Module 插件加载，CLI 已迁移。
+  外部演示删除改动已一并整理。
 
 ## 4. 最近完成的工作
 
@@ -100,17 +105,43 @@ cosmos-rs/
 WebSocket 用例暴露了退出段错误：脚本结束后 LocalSet 里仍挂着 ws handler 协程（持有 Lua userdata 的
 `RefMut` 守卫），而 `lua_close` 先于任务回收执行 → 守卫 Drop 时读写已释放内存。
 
-`src/main.rs` 现在：
+关闭顺序现由 `cosmos/src/machine.rs` 的 Drop 统一管理：
 
 ```rust
-let (lua_state, result) = local.block_on(&rt, run(&code, &script_args));
-drop(local);                 // 先回收本地任务（VM 仍存活）
-userdata::cleanup(lua_state);
-lua_close(lua_state);
+drop(self.local.take());       // 先回收本地任务（VM 仍存活）
+userdata::cleanup(self.lua_state.as_ptr());
+lua_close(self.lua_state.as_ptr());
 ```
 
-`run()` 返回 `(*mut lua_State, Result<(), String>)`，内部不再 `lua_close`。所有错误路径也把 lua_state 交回 main。
-**不要改回"run 内部关 VM"**。
+执行结束或报错不会关闭 VM，全局状态和后台任务保留到后续执行；Machine 销毁时才关闭。
+RegistryRef 为每次 VM 生命周期保留独立存活标记，供 LuaValue、LuaFunction、字符串锚点与 LuaCoroutine 共用，
+关闭一个 VM 不影响另一个 VM，即使主状态地址被复用也不会误操作新 VM。
+LuaCoroutine 先释放挂起 Future 中的借用守卫，再解除协程锚定，统一使用所属主状态 unref。
+
+### 4.4 Machine 嵌入与插件
+
+```rust
+use cosmos_rs::{Machine, Network};
+
+let runtime = tokio::runtime::Builder::new_multi_thread()
+    .worker_threads(2).enable_all().build().unwrap();
+let mut machine = Machine::new(runtime.handle().clone()).unwrap();
+machine.add_module(Network).unwrap();
+runtime.block_on(machine.exec("cosmos.time.sleep(10)")).unwrap();
+```
+
+- 核心类型在 cosmos crate，根 crate 直接重导出，避免核心反向依赖网络库。
+  Machine 只持有 Handle，不创建或关闭 Runtime；宿主负责 Runtime 存活并驱动执行。
+- `Module::register(&self, &mut Machine) -> Result<(), String>` 同步注册插件，进入注入的 Runtime 与本地任务上下文，
+  不要求插件 Send/Sync。Network 注册全部网络类型并加载编译内嵌的 Lua 定义，替代旧裸指针注册与 LUA_SOURCES。
+- `register::<T>()` 注册 userdata；`load(name, source)` 同步加载定义；`spawn(future)` 创建本地后台任务。
+  load 使用受保护的临时协程；遇到异步等待会回收协程并返回错误，不在 TLS 通道遗留未取出的 Future。
+- `exec(source)`、`exec_with_args(name, source, args)`、`exec_file(path, args)` 均为 async，必须由注入的 Runtime 驱动。
+  Runtime 身份不匹配或缺少 Tokio 上下文时返回错误，不执行 Lua；不在 Machine 内嵌套 block_on。
+- 多线程 Runtime 的普通 Rust 任务可以在工作线程运行；Lua 与 HTTP handler 通过 LocalSet 留在固定宿主线程，
+  不能直接将 Machine 或其执行 Future 交给要求 Send 的 tokio::spawn。
+- HTTP 连接池缓存键包含 Runtime ID 与 TLS 配置，避免第二个宿主 Runtime 复用第一个暂停驱动的连接。
+- 完整 Rust 插件示例见 examples/machine.rs，外部调用不需要 Lua 裸指针。
 
 ## 5. 本轮完成：统一 `PushLua`
 
@@ -150,7 +181,8 @@ lua_close(lua_state);
 
 - Rust 布局：`builtin/mod.rs` 负责启动，`builtin/time.rs` 负责时间函数，
   `builtin/light_thread.rs` 负责轻线程，`builtin/sync/` 负责同步原语；底层 `LuaCoroutine` 留在 `coroutine.rs`。
-- 宿主顺序：`luaL_openlibs` → `userdata::init` → `builtin::open` → 注册外部扩展和网络类型。
+- Machine 初始化顺序：`luaL_newstate` → `userdata::init` → `luaL_openlibs` → `builtin::open`。
+  宿主随后 add_module(Network) 并按需注册 Counter 等自定义类型。
   `builtin::open` 自行注册 LightThread，宿主不再单独调用线程注册函数。
 - Lua 时间入口为 `cosmos.time.sleep/now_ms/now_us`，轻线程入口为 `cosmos.thread.spawn/wait`，类型表为 `cosmos.LightThread`。
 - `libs.rs` 仅保留 `run_lua_source`，不再承担内建模块实现或注册。
@@ -224,6 +256,7 @@ assert(err == nil, err)
 | 文件 | 职责 |
 |---|---|
 | `cosmos/src/ffi.rs` | LuaJIT C API 声明（唯一 FFI 声明处） |
+| `cosmos/src/machine.rs` | Machine/Module、安全嵌入 API、Handle 注入、LocalSet 与 VM 生命周期 |
 | `cosmos/src/userdata.rs` | 桥接核心：`UserData`/`PushLua`/`FromLua`、userdata 存放与 GC、类型化 `LuaFunction::call`、fallible userdata 借用、`Nil`/`LuaStrMap`/`LuaValue`、derive 单元测试 |
 | `cosmos/src/coroutine.rs` | `LuaCoroutine`（Future）、`PendingOp`/`PendingFuture`、TLS yield 通道、`yield_with` |
 | `cosmos/src/builtin/mod.rs` | time/thread 内建功能统一初始化与 LightThread 类型注册 |
@@ -242,7 +275,9 @@ assert(err == nil, err)
 | `cosmos-network/src/http/server.rs` | hyper auto server、请求 DTO、handler 协程、WebSocket 升级入口 |
 | `cosmos-network/src/websocket/mod.rs` | ws/wss 客户端入口与连接选项 |
 | `cosmos-network/src/websocket/conn.rs` | `WsConn`、帧收发、关闭与服务端升级后的回调执行 |
-| `src/main.rs` | 宿主：VM 生命周期、脚本参数、LocalSet 回收顺序 |
+| `src/lib.rs` | 对外重导出核心 Machine/Module 与网络插件 Network |
+| `src/main.rs` | CLI 参数、宿主 Runtime 驱动与测试 echo 服务 |
+| `tests/machine.rs` | 嵌入、插件、线程亲和、VM/Runtime 隔离、错误与关闭顺序回归 |
 
 ## 7. 验证清单
 
@@ -254,9 +289,10 @@ cargo build
 ./target/debug/cosmos-rs examples/http.lua        # 期望 http ok（32 项）
 ./target/debug/cosmos-rs examples/userdata.lua    # OK
 ./target/debug/cosmos-rs examples/spawn.lua       # OK
-./target/debug/cosmos-rs examples/ext.lua         # OK
 ./target/debug/cosmos-rs examples/sleep.lua       # OK
 ./target/debug/cosmos-rs examples/sync.lua        # all sync checks passed
+./target/debug/cosmos-rs examples/machine.lua host 参数
+cargo run --example machine                    # 多线程 Runtime 下的 Rust 嵌入/插件示例
 # examples/error.lua 期望 exit=1（故意调用 sleep(-1)）
 
 # 双进程
@@ -265,7 +301,7 @@ cargo build
 (./target/debug/cosmos-rs examples/tls_server.lua 19443 &) ; sleep 1
 ./target/debug/cosmos-rs examples/tls_client.lua 19443     # OK
 
-cargo test --workspace  # 18 passed（derive、回调、栈恢复、借用/取消、LuaValue、拥有型接收者、模块注册顺序与身份）
+cargo test --workspace  # 24 项测试及 Machine !Send 编译失败用例通过
 ```
 
 ## 8. 坑与注意事项

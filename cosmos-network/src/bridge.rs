@@ -137,27 +137,24 @@ impl FromLua for ServerCfg {
 // ---------------------------------------------------------------------------
 
 /// 注册全部网络 userdata 类型。
-///
-/// # Safety
-/// lua_state 必须属于已初始化、已打开标准库的存活 VM，并由当前线程独占操作。
-pub unsafe fn register(lua_state: *mut lua_State) {
-    cosmos::userdata::register::<Tcp>(lua_state);
-    cosmos::userdata::register::<TcpConn>(lua_state);
-    cosmos::userdata::register::<TcpReader>(lua_state);
-    cosmos::userdata::register::<TcpWriter>(lua_state);
-    cosmos::userdata::register::<TcpUntil>(lua_state);
-    cosmos::userdata::register::<TcpListener>(lua_state);
+pub(crate) fn register(machine: &mut cosmos::Machine) {
+    machine.register::<Tcp>();
+    machine.register::<TcpConn>();
+    machine.register::<TcpReader>();
+    machine.register::<TcpWriter>();
+    machine.register::<TcpUntil>();
+    machine.register::<TcpListener>();
 
-    cosmos::userdata::register::<Tls>(lua_state);
-    cosmos::userdata::register::<TlsContext>(lua_state);
-    cosmos::userdata::register::<TlsConn>(lua_state);
-    cosmos::userdata::register::<TlsListener>(lua_state);
+    machine.register::<Tls>();
+    machine.register::<TlsContext>();
+    machine.register::<TlsConn>();
+    machine.register::<TlsListener>();
 
-    cosmos::userdata::register::<HttpClient>(lua_state);
-    cosmos::userdata::register::<HttpServer>(lua_state);
-    cosmos::userdata::register::<HttpServerHandle>(lua_state);
-    cosmos::userdata::register::<HttpRequest>(lua_state);
+    machine.register::<HttpClient>();
+    machine.register::<HttpServer>();
+    machine.register::<HttpServerHandle>();
+    machine.register::<HttpRequest>();
 
-    cosmos::userdata::register::<Ws>(lua_state);
-    cosmos::userdata::register::<WsConn>(lua_state);
+    machine.register::<Ws>();
+    machine.register::<WsConn>();
 }

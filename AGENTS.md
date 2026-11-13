@@ -24,11 +24,12 @@
 
 允许出现裸 FFI 的位置仅限：
 
-- cosmos 的运行时/桥接层（`ffi` / `userdata` / `coroutine` / `stack` / `libs` / `builtin`
+- cosmos 的运行时/桥接层（`ffi` / `userdata` / `coroutine` / `stack` / `libs` / `builtin` / `machine`
   以及 `#[cosmos::userdata]` 生成的 trampoline）；
 - `cosmos-network/src/bridge.rs`：只放无法下沉到 cosmos 的叶子转换
   （如 `Bytes` ↔ Lua 字符串）、C 闭包 trampoline 与类型注册；
-- 宿主引导 `src/main.rs`（建 VM / 跑脚本 / 关 VM）。
+
+宿主通过 `Machine` 创建/执行/销毁 VM，`src/main.rs` 只处理命令行和测试服务，不再手动管理 Lua 栈。
 
 新增返回形态时，优先补 cosmos 的基层 trait 实现或宏能力，再组合到功能模块里；
 不要为一个场景在 bridge 里新写一段栈操作。
@@ -40,6 +41,9 @@
   不能只凭"编译通过"或"看起来对"；`cargo test` 覆盖 derive 单元测试。
 - 优先 Rust 原生依赖，不引入 C 库；整体是单线程 LocalSet 模型
   （Lua 协程 `!Send`，网络任务与协程在同一线程交错推进）。
+- `Machine` 注入 Tokio `Handle`，不接管 Runtime 所有权；宿主须在注入的 Runtime 上 await 执行 API。
+  Runtime 可为多线程，Lua 及持有 Lua 引用的任务仍由 Machine 的 LocalSet 固定在宿主线程。
+- 插件实现 `Module` 并通过 `Machine::add_module` 注入；注册在该 Machine 的 Runtime/LocalSet 上下文同步执行。
 - 不做死抽象：公共层只在有明确复用点（至少两个使用方）时抽取，
   避免无意义的包装函数。
 - Lua 状态指针统一命名为 `lua_state`，未使用时为 `_lua_state`；宏生成代码同样遵守。
