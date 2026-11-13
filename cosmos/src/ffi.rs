@@ -13,7 +13,8 @@ pub const LUA_ERRSYNTAX: c_int = 3;
 pub const LUA_ERRMEM: c_int = 4;
 pub const LUA_ERRERR: c_int = 5;
 
-// lua_type 返回值（5.1 语义）
+// lua_type 返回值（5.1 语义；LUA_TNONE 表示栈上无此位置 = 调用方未传该实参）
+pub const LUA_TNONE: c_int = -1;
 pub const LUA_TNIL: c_int = 0;
 pub const LUA_TBOOLEAN: c_int = 1;
 pub const LUA_TNUMBER: c_int = 3;

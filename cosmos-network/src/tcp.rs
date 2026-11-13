@@ -1,15 +1,18 @@
 //! TCP 模块：连接状态枚举 + 读写流分离。
 //!
-//! 连接生命周期建模为 State 枚举（Connecting/Connected/Closed）。
+//! 连接生命周期建模为 State 枚举（Connected/Closed）。connect 是阻塞式异步调用，
+//! 返回时必然已连通或失败，因此没有可观察的 Connecting 中间态。
 //! split() 把 TcpStream 拆成 reader/writer 两个独立 userdata（各占一个 RefCell），
 //! 因此两个协程可以同时一个读一个写——共享的只有 Rc<Cell<State>> 连接状态。
 //!
 //! receive 语义对齐 OpenResty tcpsock:receive：
+//!   receive()      等价 "*l"（缺省按行读）
 //!   receive("*a")  读到 EOF（EOF 是正常终止，返回全部数据）
 //!   receive("*l")  读一行（去 \n、忽略 \r），干净 EOF 返回 nil，提前关闭返回 nil,"closed",partial
 //!   receive(n)     读精确 n 字节，提前关闭返回 nil,"closed",partial
 //! 三值协议：data, err, partial，err 取 "closed" / "timeout"。
 //! settimeout(ms) 对齐 OpenResty；ms <= 0 清除超时，超时不关闭连接。
+//! connect(host, port, timeout_ms?) 的第三参可选，缺省无上限。
 //! write 用 write_all 保证整块写完（不会因部分写而返回短长度）。
 //! 关闭后的 reader/writer 再调用不 panic：receive 返回 nil,"closed"，write 返回 nil,"closed"。
 
@@ -50,25 +53,27 @@ fn timeout_from_ms(ms: i64) -> Option<Duration> {
 /// 连接状态（Lua 侧 state() 返回对应的整数）
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum State {
-    Connecting = 0,
-    Connected = 1,
-    Closed = 2,
+    Connected = 0,
+    Closed = 1,
 }
 
-/// 连接入口：静态方法 Tcp.connect(host, port)
+/// 连接入口：静态方法 Tcp.connect(host, port, timeout_ms?)
 pub struct Tcp;
 
 #[cosmos::userdata]
 impl Tcp {
-    /// 连接失败返回 nil + 错误串（标准 Lua 形态：local conn, err = Tcp.connect(...)）
-    async fn connect(host: String, port: i64) -> Result<TcpConn, String> {
-        match TcpStream::connect((host.as_str(), port as u16)).await {
-            Ok(stream) => Ok(TcpConn {
+    /// 连接失败或超时返回 nil + 错误串（local conn, err = Tcp.connect(...)）；
+    /// timeout_ms 可选：<= 0 或缺省表示不设连接超时
+    async fn connect(host: String, port: i64, timeout_ms: Option<i64>) -> Result<TcpConn, String> {
+        let deadline = timeout_ms.and_then(timeout_from_ms).map(|d| Instant::now() + d);
+        match with_deadline(deadline, TcpStream::connect((host.as_str(), port as u16))).await {
+            Ok(Ok(stream)) => Ok(TcpConn {
                 stream: Some(stream),
                 state: Rc::new(Cell::new(State::Connected)),
                 timeout: None,
             }),
-            Err(e) => Err(e.to_string()),
+            Ok(Err(e)) => Err(e.to_string()),
+            Err(()) => Err("timeout".to_string()),
         }
     }
 }
@@ -205,15 +210,16 @@ impl TcpReader {
         self.timeout = timeout_from_ms(ms);
     }
 
-    /// 对齐 OpenResty tcpsock:receive：local data, err, partial = reader:receive(pattern)
-    async fn receive(&mut self, pattern: ReceivePattern) -> ReceiveOutcome {
+    /// 对齐 OpenResty tcpsock:receive：local data, err, partial = reader:receive(pattern?)
+    /// pattern 缺省（或 nil）等价 "*l"
+    async fn receive(&mut self, pattern: Option<ReceivePattern>) -> ReceiveOutcome {
         // 已关闭：不再 panic，按 closed 协议返回
         let Some(inner) = self.inner.as_mut() else {
             return ReceiveOutcome::Closed(Vec::new());
         };
         // 每次 receive 一个 deadline（绝对时刻），Size 模式多次 read 共用同一 deadline
         let deadline = self.timeout.map(|d| Instant::now() + d);
-        match pattern {
+        match pattern.unwrap_or(ReceivePattern::Line) {
             ReceivePattern::All => {
                 self.buf.clear();
                 match with_deadline(deadline, inner.read_to_end(&mut self.buf)).await {

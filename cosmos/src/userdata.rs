@@ -402,6 +402,17 @@ impl FromLua for LuaStr {
     }
 }
 
+/// 可选参数：实参缺省（栈上无此槽位）或显式 nil 时取 None。
+/// 宏不需要特判——Lua 调用少传参数时 lua_type 天然返回 LUA_TNONE。
+impl<T: FromLua> FromLua for Option<T> {
+    unsafe fn from_lua(L: *mut lua_State, idx: c_int) -> Result<Self, String> {
+        match lua_type(L, idx) {
+            LUA_TNONE | LUA_TNIL => Ok(None),
+            _ => Ok(Some(T::from_lua(L, idx)?)),
+        }
+    }
+}
+
 /// 统一的压栈协议：把 Rust 值压上 Lua 栈，返回压入个数。
 ///
 /// 两条路径共用这一个协议：

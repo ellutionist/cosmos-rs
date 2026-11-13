@@ -11,7 +11,14 @@ print("connect error ok:", bad_err)
 
 local conn, err = Tcp.connect("127.0.0.1", port)
 assert(conn, "connect failed: " .. tostring(err))
+assert(conn:state() == 0, "connected state should be 0, got " .. tostring(conn:state()))
 print("connected, state:", conn:state())
+
+-- 连接超时：第三参可选（黑洞地址 192.0.2.1/80 不会响应握手）
+local bc, bcerr = Tcp.connect("192.0.2.1", 80, 150)
+assert(bc == nil and bcerr == "timeout",
+    string.format("connect timeout: c=%s err=%s", tostring(bc), tostring(bcerr)))
+print("connect timeout ok")
 
 local reader, writer = conn:split()
 assert(reader and writer, "split failed")
@@ -37,9 +44,16 @@ assert(l1 == "first line", "line1: " .. tostring(l1))
 assert(l2 == "second line", "line2: " .. tostring(l2))
 print("receive(*l):", l1, "|", l2)
 
+-- receive()：缺省等价 "*l"
+writer:write("third line\n")
+local l3 = reader:receive()
+assert(l3 == "third line", "default receive: " .. tostring(l3))
+print("receive() default ok:", l3)
+
 -- receive("*a")：读到 EOF
 writer:write("all the data")
 writer:close() -- 客户端关写半 → 服务端收到 EOF 断开
+assert(writer:state() == 1, "writer state should be 1 after close")
 local rest = reader:receive("*a")
 assert(rest == "all the data", "receive(*a): " .. tostring(rest))
 print("receive(*a):", rest)
