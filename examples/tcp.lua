@@ -115,6 +115,17 @@ w4:write("a\rb\r\n")
 assert(r4:receive("*l") == "a\rb", "*l only trims the trailing CR/LF")
 print("*L ok")
 
+-- 混合编程：Reader:lines() 定义在 cosmos-network/lua/tcp.lua，编译期嵌入二进制
+w4:write("l1\nl2\nl3\n")
+w4:close() -- 关写半，lines() 在 EOF 处结束迭代
+local seen = {}
+for line in r4:lines() do
+    seen[#seen + 1] = line
+end
+assert(#seen == 3 and seen[1] == "l1" and seen[2] == "l2" and seen[3] == "l3",
+    "lua-defined lines(): " .. table.concat(seen, ","))
+print("lua mixed method ok")
+
 -- receiveuntil：返回迭代器闭包，每次调用读到分隔符（分隔符被消费）
 local conn5 = assert(Tcp.connect("127.0.0.1", port))
 local r5, w5 = conn5:split()

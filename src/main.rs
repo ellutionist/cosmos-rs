@@ -73,6 +73,15 @@ async fn run(code: &str, args: &[String]) -> Result<(), String> {
         cosmos_ext_demo::register(L);
         cosmos_network::register(L);
 
+        // 各扩展 crate 的 Lua 部分（include_str! 编进二进制）：
+        // 必须在 userdata 注册之后执行，require("cosmos.X") 才拿得到 metatable
+        for (name, src) in cosmos_network::LUA_SOURCES {
+            if let Err(e) = libs::run_lua_source(L, name, src) {
+                lua_close(L);
+                return Err(e);
+            }
+        }
+
         // 脚本跑在独立协程上（主栈只承载全局状态），这样 sleep 才能 yield
         let thread = lua_newthread(L);
 

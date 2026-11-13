@@ -30,6 +30,13 @@ extern "C" {
     pub fn luaL_newstate() -> *mut lua_State;
     pub fn luaL_openlibs(L: *mut lua_State);
     pub fn luaL_loadstring(L: *mut lua_State, s: *const c_char) -> c_int;
+    pub fn luaL_loadbuffer(
+        L: *mut lua_State,
+        buff: *const c_char,
+        sz: size_t,
+        name: *const c_char,
+    ) -> c_int;
+    pub fn lua_pcall(L: *mut lua_State, nargs: c_int, nresults: c_int, errfunc: c_int) -> c_int;
     pub fn lua_close(L: *mut lua_State);
 
     pub fn lua_newthread(L: *mut lua_State) -> *mut lua_State;

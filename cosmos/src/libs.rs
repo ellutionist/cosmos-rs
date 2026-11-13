@@ -48,3 +48,22 @@ pub unsafe fn open_cosmos(L: *mut lua_State) {
     lua_setfield(L, -2, c"now_ms".as_ptr());
     lua_setfield(L, LUA_GLOBALSINDEX, c"cosmos".as_ptr());
 }
+
+/// 执行一段内嵌 Lua 源码（扩展的 Lua 部分经 include_str! 随二进制编译进来）。
+/// 必须在 userdata 注册之后、用户脚本之前调用；源码只做定义，不得 yield
+/// （主状态上用 lua_pcall，没有协程调度）。
+pub unsafe fn run_lua_source(L: *mut lua_State, name: &str, src: &str) -> Result<(), String> {
+    let cname = std::ffi::CString::new(name).map_err(|_| "source name contains NUL")?;
+
+    if luaL_loadbuffer(L, src.as_ptr() as *const c_char, src.len(), cname.as_ptr()) != 0 {
+        let msg = crate::stack::err_message(L);
+        lua_settop(L, -2); // 弹出错误对象
+        return Err(format!("{name}: {msg}"));
+    }
+    if lua_pcall(L, 0, 0, 0) != 0 {
+        let msg = crate::stack::err_message(L);
+        lua_settop(L, -2);
+        return Err(format!("{name}: {msg}"));
+    }
+    Ok(())
+}
