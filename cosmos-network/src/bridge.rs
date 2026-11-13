@@ -15,11 +15,12 @@ use cosmos::userdata::{push_closure, trampoline, try_check, FromLua, LuaStrMap, 
 use crate::http::client::HttpClient;
 use crate::http::server::{HttpRequest, HttpServer, HttpServerHandle};
 use crate::http::{Headers, LuaBytes};
-use crate::tcp::{
+use crate::tcp::stream::{
     ReceivePattern, Tcp, TcpConn, TcpListener, TcpReader, TcpUntil, TcpWriter, UntilIter,
 };
-use crate::tls::{ClientCfg, ServerCfg, Tls, TlsConn, TlsContext, TlsListener};
-use crate::websocket::{Ws, WsConn};
+use crate::tcp::tls::{ClientCfg, ServerCfg, Tls, TlsConn, TlsContext, TlsListener};
+use crate::websocket::conn::WsConn;
+use crate::websocket::Ws;
 
 // ---------------------------------------------------------------------------
 // HTTP：Headers / LuaBytes

@@ -1,4 +1,4 @@
-//! TCP 模块：连接状态枚举 + 读写流分离。
+//! TCP stream 模块：连接状态枚举 + 读写流分离。
 //!
 //! Lua: local Tcp = require("cosmos.network.tcp.stream")（C++ 的 cosmos.network.tcp）
 //!      命名空间入口：local net = require("cosmos.network.tcp")  -- { stream, tls }
@@ -41,7 +41,7 @@ use tokio::time::Instant;
 use cosmos::userdata::{LuaStr, Nil};
 
 use crate::error::classify_io;
-use crate::tls::TlsIo;
+use super::tls::TlsIo;
 
 /// 可选 deadline 包裹一个 future：Some 时到点返回 Err(())（调用方转成 "timeout"），
 /// None 时无限等待。用于 settimeout 生效后的各读写点。

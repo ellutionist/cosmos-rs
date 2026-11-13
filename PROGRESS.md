@@ -321,3 +321,32 @@
 - 按用户要求，先将 cosmos.sync、按声明自动组装模块表、配套测试和文档提交到本地 Git，不 push。
 - 提交前差异检查通过；沿用上一轮构建、严格 Clippy、18 项单元测试及 examples 回归结果。
 - 下一步将网络 TCP/TLS 文件按 cosmos.network.tcp 的模块层级整理，原 tcp.rs 改为 stream.rs。
+
+## 2026-11-13 按 TCP 模块层级整理网络文件
+
+- 已先提交同步原语与自动模块注册，提交号为 `9a093b4`，未 push。
+- 将 `cosmos-network/src/tcp.rs` 移为 `tcp/stream.rs`，将原 `tls.rs` 移为 `tcp/tls.rs`，
+  新建 `tcp/mod.rs` 声明 stream 与 tls，移除根层的 tls 模块声明。
+- 桥接、HTTP、WebSocket 的引用改为 crate::tcp::stream / crate::tcp::tls，TCP 子模块间使用 super 路径。
+  没有新增转发导出、兼容别名或包装层；Lua 的 cosmos.network.tcp.stream / tls 路径和协议行为保持原样。
+- 逐文件核对迁移内容，仅调整模块说明和引用路径；没有残留旧 Rust 模块路径。同步更新 HANDOFF.md 代码地图。
+- `cargo build`、严格 Clippy、18 项单元测试通过；websocket/http/userdata/spawn/ext/sleep、
+  TCP/TLS 单进程及双进程 examples 回归通过，error.lua 按预期退出 1。
+- 目录整理改动尚未 commit / push；下一步按实际模块扩展继续维护对应目录层级。
+
+## 2026-11-13 按 WebSocket 模块层级拆分文件
+
+- 将原 websocket.rs 拆为 websocket/mod.rs 与 websocket/conn.rs，对应 network.websocket 和其 conn 子模块。
+  mod.rs 保留 Ws.connect、连接选项及 ws/wss 握手，conn.rs 保存 WsConn、帧收发、关闭和升级后的回调执行。
+- 桥接层直接按类型所在模块导入；HTTP 升级完成后调用 websocket::conn::run_conn，并更新相关注释和 HANDOFF.md。
+- 客户端和服务端共用 WsConn::new 初始化自动 pong/close、消息上限和共享帧流；字段保持私有，
+  移除只有构造函数调用的 new_stream 包装。Lua 模块路径、收发行为、超时和资源所有权保持原样。
+- `cargo build`、严格 Clippy、18 项单元测试通过；实际运行 examples/websocket.lua 与 examples/http.lua，
+  ws/wss、升级、文本/二进制、关闭/超时、HTTP/HTTPS 和 h2 回归全部通过。
+- 本轮未 commit / push，保留上一轮尚未提交的 TCP 目录整理。下一步按实际模块扩展继续维护目录与声明路径的一致性。
+
+## 2026-11-13 提交网络模块目录整理
+
+- 按用户要求，将 TCP stream/TLS 与 WebSocket 的目录整理、Rust 引用更新及配套文档一并提交到本地 Git，不 push。
+- 提交前差异检查通过；沿用已完成的构建、严格 Clippy、18 项单元测试以及 TCP/TLS、HTTP、WebSocket 等 examples 验证结果。
+- 下一步按实际模块扩展继续维护文件层级与 Lua 声明路径的一致性。

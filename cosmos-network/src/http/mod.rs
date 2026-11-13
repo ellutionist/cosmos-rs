@@ -13,7 +13,7 @@ use hyper_util::client::legacy::connect::{Connected, Connection};
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::net::TcpStream;
 
-use crate::tls::TlsIo;
+use crate::tcp::tls::TlsIo;
 
 /// HTTP 客户端的底层连接：明文或 TLS，统一实现 AsyncRead/AsyncWrite，
 /// 让 hyper 的连接池对两种传输只有一种类型

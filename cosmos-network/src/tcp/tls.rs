@@ -31,7 +31,7 @@ use tokio_rustls::server::TlsStream as ServerTlsStream;
 use tokio_rustls::{TlsAcceptor, TlsConnector};
 
 use crate::error::classify_io;
-use crate::tcp::{
+use super::stream::{
     size_limit, timeout_from_ms, with_deadline, ReadSide, State, TcpReader, TcpWriter, WriteSide,
 };
 

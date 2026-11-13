@@ -18,7 +18,7 @@
 //!
 //! WebSocket 不单独监听：handler 对选定的 path 返回
 //! `{ websocket = function(conn, req) ... end }`，本层把保留的请求 Parts
-//! 交给 fastwebsockets 完成 101 升级，之后连接脱离 HTTP（见 websocket.rs）。
+//! 交给 fastwebsockets 完成 101 升级，之后连接脱离 HTTP（见 websocket/conn.rs）。
 
 use std::convert::Infallible;
 use std::future::Future;
@@ -42,7 +42,7 @@ use cosmos::userdata::{LuaFunction, Nil};
 
 use super::{Headers, LuaBytes};
 use crate::error::classify_io;
-use crate::tls::{ServerCfg, TlsIo};
+use crate::tcp::tls::{ServerCfg, TlsIo};
 
 const DEFAULT_MAX_BODY: usize = 64 * 1024 * 1024;
 const DEFAULT_WS_MAX_MESSAGE: usize = 64 * 1024 * 1024;
@@ -284,7 +284,7 @@ async fn handle(
 }
 
 /// 把保留的请求 Parts 交给 fastwebsockets 完成 101 升级，返回握手响应；
-/// 升级完成后的帧循环在独立任务里跑 Lua 协程（见 websocket::run_conn）
+/// 升级完成后的帧循环在独立任务里跑 Lua 协程（见 websocket::conn::run_conn）
 fn upgrade_websocket(
     parts: hyper::http::request::Parts,
     handler: LuaFunction,
@@ -311,7 +311,7 @@ fn upgrade_websocket(
     };
     tokio::task::spawn_local(async move {
         match fut.await {
-            Ok(ws) => crate::websocket::run_conn(ws, handler, request, ws_max_message).await,
+            Ok(ws) => crate::websocket::conn::run_conn(ws, handler, request, ws_max_message).await,
             Err(err) => eprintln!("websocket upgrade error: {err}"),
         }
     });

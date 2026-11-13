@@ -17,7 +17,7 @@
 cosmos-rs/
   cosmos/            # 运行时 + 桥接层：ffi / userdata / coroutine / stack / libs / builtin
   cosmos-macros/     # #[userdata]、#[derive(FromLua/PushLua)]，生成全部 trampoline
-  cosmos-network/    # 功能模块：tcp / tls / http / websocket + bridge.rs（叶子转换）
+  cosmos-network/    # 功能模块：tcp/{stream,tls} / http / websocket + bridge.rs（叶子转换）
   src/main.rs        # 宿主：建 VM、跑脚本、关 VM；demo.rs 是 userdata 示例
   examples/*.lua     # 全部端到端用例
   cosmos-network/lua/ # 内嵌 Lua 源码（include_str! 随二进制编译）
@@ -42,6 +42,9 @@ cosmos-rs/
 - time/thread 内建功能已集中到 `cosmos/src/builtin`，由 `builtin::open` 统一初始化；Lua 调用入口保持原样。
 - `cosmos.sync` 已实现：有界 channel、通知、信号量和 mutex，见下文接口与回收语义。
 - 模块注册已按 userdata 声明路径自动组装父表；手写 Sync 与 TCP 聚合表已删除，sync 构造改为各类型的 `.new(...)`。
+- 上述 sync 与模块注册改动已提交为 `9a093b4`，未 push。网络文件已按模块层级整理为
+  `tcp/mod.rs`、`tcp/stream.rs`、`tcp/tls.rs` 及 `websocket/mod.rs`、`websocket/conn.rs`，
+  Rust 引用同步更新，Lua require 路径保持原样。
 
 - 本次命名整理提交：`Thread` → `LightThread`，`thread.rs` → `light_thread.rs`；当前 Rust 模块为 `cosmos::builtin::light_thread`，Lua 类型表为 `cosmos.LightThread`。
 - Lua 状态指针（含宏生成代码和外部扩展）已从 `L` 改为 `lua_state`，未使用参数为 `_lua_state`。
@@ -62,7 +65,7 @@ cosmos-rs/
   - `upgrade_websocket()`（约 264 行）用保留的请求 `Parts` 调 `fastwebsockets::upgrade::upgrade`，
     返回 101；非 upgrade 请求返回 400；HTTP/2 无 Upgrade 机制，同样走 400。
   - 连接驱动改为 `serve_connection_with_upgrades`；`handle()` 里给 ws 分支重建一份请求 userdata。
-- `cosmos-network/src/websocket.rs`：
+- `cosmos-network/src/websocket/mod.rs` 负责客户端入口和连接选项，`websocket/conn.rs` 负责连接对象和服务端帧循环：
   - `Ws.connect(url, opts)`：`ws://` 明文、`wss://` 走 TlsContext（缺省公有根，强制 ALPN `http/1.1`）；
     opts = `{ headers, timeout, ctx, max_message }`，超时覆盖 DNS+TCP+TLS+握手并作为连接初始读写超时。
   - `WsConn`（`cosmos.network.websocket.conn`）：`send`（校验 UTF-8）/`send_binary`/`ping`/`receive`/
@@ -218,12 +221,14 @@ assert(err == nil, err)
 | `cosmos/src/stack.rs` | 栈辅助：`err_message`、`abs_index` |
 | `cosmos-macros/src/lib.rs` | `#[userdata]`、`FromLua`/`PushLua` derive |
 | `cosmos-network/src/bridge.rs` | 本 crate 的叶子转换、`until` trampoline、注册入口 |
-| `cosmos-network/src/tcp.rs` | TCP 状态机、`ReceivePattern`/`ReceiveOutcome`、`receiveuntil` |
-| `cosmos-network/src/tls.rs` | rustls 客户端/服务端、`TlsContext`（证书/信任根/ALPN/mTLS） |
+| `cosmos-network/src/tcp/mod.rs` | TCP 协议族模块声明：stream 与 tls |
+| `cosmos-network/src/tcp/stream.rs` | TCP 状态机、`ReceivePattern`/`ReceiveOutcome`、`receiveuntil` |
+| `cosmos-network/src/tcp/tls.rs` | rustls 客户端/服务端、`TlsContext`（证书/信任根/ALPN/mTLS） |
 | `cosmos-network/src/http/mod.rs` | `Conn`（明文/TLS 统一流）、`Headers`、`LuaBytes` |
 | `cosmos-network/src/http/client.rs` | hyper legacy client、连接池、重定向、整体超时 |
 | `cosmos-network/src/http/server.rs` | hyper auto server、请求 DTO、handler 协程、WebSocket 升级入口 |
-| `cosmos-network/src/websocket.rs` | ws/wss 客户端、`WsConn`、服务端帧循环 |
+| `cosmos-network/src/websocket/mod.rs` | ws/wss 客户端入口与连接选项 |
+| `cosmos-network/src/websocket/conn.rs` | `WsConn`、帧收发、关闭与服务端升级后的回调执行 |
 | `src/main.rs` | 宿主：VM 生命周期、脚本参数、LocalSet 回收顺序 |
 
 ## 7. 验证清单

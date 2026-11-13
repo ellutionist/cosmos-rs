@@ -7,7 +7,6 @@ mod bridge;
 mod error;
 mod http;
 mod tcp;
-mod tls;
 mod websocket;
 
 /// 本 crate 的 Lua 部分：编译期嵌入二进制，启动时由宿主执行（见 cosmos::libs::run_lua_source）。
