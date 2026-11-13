@@ -2,17 +2,46 @@ use std::future::Future;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 
+use libc::{c_char, c_int};
+
 use crate::ffi::*;
 use crate::stack;
 
-/// 异步操作完成后把结果压入 Lua 栈，返回压入值的个数（为多返回值预留）
-pub trait IntoLua: Send {
-    fn into_lua(self: Box<Self>, L: *mut lua_State) -> i32;
+/// 异步操作的输出：完成后压入 Lua 栈的值。
+/// 用值枚举替代 Box<dyn IntoLua>：输出收敛到 Lua 值域这个闭集，
+/// 完成时从 future 里 move 出来，零分配；
+/// 多返回值将来加 Multi 变体（SmallVec，≤4 个仍零分配）
+#[allow(dead_code)] // 变体随 op 库逐步启用，目前只有 Nil 被构造
+pub enum Output {
+    Nil,
+    Boolean(bool),
+    Number(f64),
+    Integer(i64),
+    String(String),
 }
 
-impl IntoLua for () {
-    fn into_lua(self: Box<Self>, _L: *mut lua_State) -> i32 {
-        0
+impl Output {
+    /// 把值压入 Lua 栈，返回压入个数
+    pub fn into_lua(self, L: *mut lua_State) -> i32 {
+        match self {
+            Output::Nil => 0,
+            Output::Boolean(b) => {
+                unsafe { lua_pushboolean(L, b as c_int) };
+                1
+            }
+            Output::Number(n) => {
+                unsafe { lua_pushnumber(L, n) };
+                1
+            }
+            Output::Integer(i) => {
+                unsafe { lua_pushinteger(L, i as lua_Integer) };
+                1
+            }
+            Output::String(s) => {
+                unsafe { lua_pushlstring(L, s.as_ptr() as *const c_char, s.len()) };
+                1
+            }
+        }
     }
 }
 
@@ -29,11 +58,11 @@ impl IntoLua for () {
 /// - thread-local 槽：C 函数把 Op 塞进 TLS、poll 侧取回，省掉指针通道，
 ///   但重新引入 TLS 依赖且绑定单线程 runtime（多线程下协程迁移会取错槽）
 pub struct Op {
-    fut: Pin<Box<dyn Future<Output = Box<dyn IntoLua>> + Send>>,
+    fut: Pin<Box<dyn Future<Output = Output> + Send>>,
 }
 
 impl Op {
-    pub fn new(fut: Pin<Box<dyn Future<Output = Box<dyn IntoLua>> + Send>>) -> Self {
+    pub fn new(fut: Pin<Box<dyn Future<Output = Output> + Send>>) -> Self {
         Self { fut }
     }
 }
