@@ -5,51 +5,45 @@ use std::pin::Pin;
 use std::rc::Rc;
 use std::task::{Context, Poll};
 
-use libc::{c_char, c_int};
+use libc::c_int;
 
 use crate::ffi::*;
 use crate::stack;
+use crate::userdata::PushLua;
 
-/// 异步操作的输出：完成后压入 Lua 栈的值。
-/// 用值枚举替代 Box<dyn IntoLua>：输出收敛到 Lua 值域这个闭集，
-/// 完成时从 future 里 move 出来，零分配；
-/// 多返回值将来加 Multi 变体（SmallVec，≤4 个仍零分配）
+/// 异步 op 的输出：跨 yield 边界的 concrete 类型（Future<Output = AsyncOutput> 的类型系统要求）。
+/// 标量变体零分配；开放值域（userdata/table）走 Custom 闭包（闭包兼做值的存放与压栈）。
+/// AsyncOutput 本身实现 PushLua，各变体委托给标量 impl——压栈逻辑全代码库只有一份
 #[allow(dead_code)] // 变体随 op 库逐步启用，目前只有 Nil 被构造
-pub enum Output {
+pub enum AsyncOutput {
     Nil,
     Boolean(bool),
     Number(f64),
     Integer(i64),
     String(String),
+    /// 逃生舱：任意 Rust 值 → 闭包负责压栈（userdata/table/序列化），
+    /// 闭包内不得触发 lua_error（此处不在 lua_resume 的保护帧内）。
+    /// 仅异步 op 输出使用；同步方法返回走 PushLua 的 userdata blanket impl 直接压栈
+    Custom(Box<dyn FnOnce(*mut lua_State) -> i32>),
 }
 
-impl Output {
-    /// 把值压入 Lua 栈，返回压入个数
-    pub fn into_lua(self, L: *mut lua_State) -> i32 {
+impl PushLua for AsyncOutput {
+    fn push_lua(self, L: *mut lua_State) -> i32 {
         match self {
-            Output::Nil => 0,
-            Output::Boolean(b) => {
-                unsafe { lua_pushboolean(L, b as c_int) };
-                1
-            }
-            Output::Number(n) => {
-                unsafe { lua_pushnumber(L, n) };
-                1
-            }
-            Output::Integer(i) => {
-                unsafe { lua_pushinteger(L, i as lua_Integer) };
-                1
-            }
-            Output::String(s) => {
-                unsafe { lua_pushlstring(L, s.as_ptr() as *const c_char, s.len()) };
-                1
-            }
+            AsyncOutput::Nil => 0,
+            AsyncOutput::Boolean(b) => b.push_lua(L),
+            AsyncOutput::Number(n) => n.push_lua(L),
+            AsyncOutput::Integer(i) => i.push_lua(L),
+            AsyncOutput::String(s) => s.push_lua(L),
+            AsyncOutput::Custom(push) => push(L),
         }
     }
 }
 
-/// 协程挂起期间等待的异步操作
-pub type PendingFuture = Pin<Box<dyn Future<Output = Output> + Send>>;
+/// 协程挂起期间等待的异步操作。
+/// 无 Send 约束：LuaCoroutine 本身 !Send（线程亲和），整个链路不会跨线程，
+/// 放宽后 op 可以捕获 !Send 的数据（如带 Rc 的用户对象）
+pub type PendingFuture = Pin<Box<dyn Future<Output = AsyncOutput>>>;
 
 // yield 通道：C 函数把 PendingFuture 塞进 TLS 槽再 lua_yield(L, 0)，
 // 同一线程上的 poll 侧从槽里取回（见 yield_with / LuaCoroutine::poll）。
@@ -136,7 +130,7 @@ impl Future for LuaCoroutine {
                 // Pending 时 future 留在枚举里原地保存（堆上，pinning 不变）
                 Phase::Awaiting(fut) => match fut.as_mut().poll(cx) {
                     Poll::Pending => return Poll::Pending,
-                    Poll::Ready(out) => out.into_lua(this.thread),
+                    Poll::Ready(out) => out.push_lua(this.thread),
                 },
             };
             match unsafe { lua_resume(this.thread, nargs) } {

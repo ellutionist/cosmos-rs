@@ -1,7 +1,7 @@
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
-use crate::coroutine::{yield_with, Output};
+use crate::coroutine::{yield_with, AsyncOutput};
 use crate::ffi::*;
 use libc::{c_char, c_int};
 
@@ -25,7 +25,7 @@ unsafe extern "C" fn sleep_impl(L: *mut lua_State) -> c_int {
     // 优化：改为每协程复用一个 tokio::time::Sleep（reset 到期时间），省掉 wheel entry 分配
     let fut = Box::pin(async move {
         tokio::time::sleep(Duration::from_secs_f64(ms / 1000.0)).await;
-        Output::Nil
+        AsyncOutput::Nil
     });
     // 5.1 语义：lua_yield 返回 -1（= LUA_YIELD），必须作为 C 函数的返回值交给 VM，
     // VM 据此让 lua_resume 返回 LUA_YIELD（常规 yield 路径不长跳转）

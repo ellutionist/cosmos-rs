@@ -1,12 +1,10 @@
-mod coroutine;
-mod ffi;
-mod libs;
-mod stack;
-
 use std::ffi::CString;
 
-use ffi::*;
-use libc::c_char;
+use cosmos::coroutine::LuaCoroutine;
+use cosmos::ffi::*;
+use cosmos::{libs, stack, userdata};
+
+mod demo;
 
 fn main() {
     let mut cli = std::env::args();
@@ -39,6 +37,8 @@ async fn run(code: &str, args: &[String]) -> Result<(), String> {
         }
         luaL_openlibs(L);
         libs::open_cosmos(L);
+        userdata::init(L);
+        demo::register(L);
 
         // 脚本跑在独立协程上（主栈只承载全局状态），这样 sleep 才能 yield
         let thread = lua_newthread(L);
@@ -52,10 +52,11 @@ async fn run(code: &str, args: &[String]) -> Result<(), String> {
 
         // 初始参数：压在 chunk 函数之上，首次 resume 按 gettop - 1 传给脚本的 `...`
         for arg in args {
-            lua_pushlstring(thread, arg.as_ptr() as *const c_char, arg.len());
+            lua_pushlstring(thread, arg.as_ptr() as *const cosmos::ffi::c_char, arg.len());
         }
 
-        let result = coroutine::LuaCoroutine::new(L, thread).await;
+        let result = LuaCoroutine::new(L, thread).await;
+        userdata::cleanup(L);
         lua_close(L);
         result
     }

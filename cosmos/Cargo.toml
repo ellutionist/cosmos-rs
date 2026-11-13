@@ -1,0 +1,13 @@
+[package]
+name = "cosmos"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+tokio = { version = "1", features = ["rt", "time"] }
+libc = "0.2"
+cosmos-macros = { path = "../cosmos-macros" }
+
+[build-dependencies]
+luajit-src = "210.5"
+cc = "1"
