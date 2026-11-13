@@ -40,6 +40,8 @@ cosmos-rs/
 ## 3. 工作区现状
 
 - time/thread 内建功能已集中到 `cosmos/src/builtin`，由 `builtin::open` 统一初始化；Lua 调用入口保持原样。
+- `cosmos.sync` 已实现：有界 channel、通知、信号量和 mutex，见下文接口与回收语义。
+- 模块注册已按 userdata 声明路径自动组装父表；手写 Sync 与 TCP 聚合表已删除，sync 构造改为各类型的 `.new(...)`。
 
 - 本次命名整理提交：`Thread` → `LightThread`，`thread.rs` → `light_thread.rs`；当前 Rust 模块为 `cosmos::builtin::light_thread`，Lua 类型表为 `cosmos.LightThread`。
 - Lua 状态指针（含宏生成代码和外部扩展）已从 `L` 改为 `lua_state`，未使用参数为 `_lua_state`。
@@ -127,7 +129,7 @@ lua_close(lua_state);
 - 同步/异步宏、TCP until、sleep、thread.spawn/wait 共用 `userdata::trampoline`；
   参数解析和守卫获取失败先释放 Rust 局部值，再压错误串，释放该串后才调用 `lua_error`。
 - `FromLua` 及其 derive 在成功、失败时恢复入口栈高度；相对索引先通过 `stack::abs_index` 固定。
-- 首次注册 userdata 的 metatable 已修正为弹出 mt/package/preload 三项，确保 `push` 只增加一个值。
+- userdata 注册恢复入口栈高度，`push` 只增加一个值；类型表与模块路径对应的表复用。
 - 移除了无调用方的 `with_alpn_server`、`LuaFunction::registry_ref/main/push_to`、`UserData::type_name`，
   旧 throwing check、重复 raise、状态别名与示例注册包装；Counter 注册直接放在宿主入口。
 
@@ -142,11 +144,58 @@ lua_close(lua_state);
 ### 内建模块初始化
 
 - Rust 布局：`builtin/mod.rs` 负责启动，`builtin/time.rs` 负责时间函数，
-  `builtin/light_thread.rs` 负责轻线程；底层 `LuaCoroutine` 留在 `coroutine.rs`。
+  `builtin/light_thread.rs` 负责轻线程，`builtin/sync/` 负责同步原语；底层 `LuaCoroutine` 留在 `coroutine.rs`。
 - 宿主顺序：`luaL_openlibs` → `userdata::init` → `builtin::open` → 注册外部扩展和网络类型。
   `builtin::open` 自行注册 LightThread，宿主不再单独调用线程注册函数。
 - Lua 入口仍为 `cosmos.sleep/now_ms/now_us`、`cosmos.thread.spawn/wait`，类型表为 `cosmos.LightThread`。
 - `libs.rs` 仅保留 `run_lua_source`，不再承担内建模块实现或注册。
+
+### 模块表按声明路径自动组装
+
+- `#[cosmos::userdata(name = "sync.channel")]` 经 register/push 注册时，自动创建并连接
+  `cosmos` → `sync` → `channel`，各级都安装 require 工厂，父表字段与 require 返回值身份一致。
+- 先注册子类型时，后续父类型注册会补全已有父表，保留子模块、Lua 增补字段和 package.loaded 已缓存的引用；
+  父类型先注册时，后续子类型同样直接挂到原表。构造和实例方法仍由 #[userdata] 自动生成。
+- builtin::open 复用 cosmos 根表，不重新创建覆盖；sync/mod.rs 只保留类型注册与共用参数转换，
+  删除手写 Sync 类型。网络 TCP 父表也自动生成，已删除 lua/modules.lua 与对应内嵌源码条目。
+- 同步类型自己的 new 方法放在各自 #[userdata] impl 中，调用为 `sync.channel.new(...)` 等。
+  同步宏直接对返回值使用 PushLua 的类型推导，支持常规 Rust `fn new() -> Self` 写法。
+
+### 协程同步：cosmos.sync
+
+`local sync = require("cosmos.sync")` 与 `cosmos.sync` 是同一张表，初始化由 builtin 负责，不新增依赖。
+所有等待方法的末参均为可选毫秒超时：缺省/nil 无限等待，0 只 poll 一次立即尝试；
+负值、非有限值和超过 1e12 的超时报 Lua 参数错误。操作失败返回 `nil, "timeout"/"closed"`。
+
+| 构造 | 方法与语义 |
+|---|---|
+| `sync.channel.new(capacity)` | 正整数容量的有界多生产者、多消费者队列；`send(value[, timeout])` 成功返回 true，`recv([timeout])` 成功返回一个原始 Lua 值；`len()` 返回缓冲消息数；`close()` 唤醒所有等待者，拒绝后续发送，允许读完缓冲区 |
+| `sync.notify.new()` | `wait([timeout])` 成功返回 true；`notify_one()` 唤醒一个等待者，没有等待者时最多存一个信号；`notify_all()` 唤醒当前全部等待者，不为后续等待者存信号；`close()` 令当前及后续等待返回 closed |
+| `sync.semaphore.new(permits)` | 正整数并发配额；`acquire([timeout])` 公平排队，返回持有一个配额的 permit；`available()` 查询当前可用数量；`close()` 唤醒等待者并拒绝后续获取 |
+| `sync.mutex.new()` | 非重入互斥锁；`lock([timeout])` 返回锁守卫；`with_lock(fn[, timeout])` 在锁内执行可 yield 的回调，返回其第一个值，无返回值时为 nil；回调报错返回 nil, err |
+
+- channel 通过基层 `LuaValue: FromLua + PushLua` 的 registry 锚点保活值，保持 table、函数、
+  userdata 的原始身份，二进制字符串不做编码转换；消息可以为 nil（成功仅返回一个 nil），
+  调用方通过第二个错误返回值判断关闭/超时。发送缺省实参会报错。
+- semaphore permit 和 mutex 锁守卫共用 `cosmos.sync.permit` 类型，`permit:release()` 幂等；
+  GC 也会归还配额。需要及时释放时应显式 release。
+- `with_lock` 的超时只覆盖获取锁；Rust 守卫跨回调 Future 持有，正常完成、报错或任务取消均立即归还锁。
+  手动 `lock` 模式的守卫由 Lua 持有，持锁协程被取消后需由显式释放或后续 GC 回收，不能依赖即时释放。
+- `#[userdata]` 新增拥有型 `self`/`mut self` 接收者，经 `FromLua` 转换；可克隆 userdata 的
+  blanket impl 短暂借用后 clone。sync 等待方法使用 Rc/Arc 共享句柄，等待期间不占用原 userdata 借用，
+  且原 userdata 被 GC 后仍安全。既有 `&self`/`&mut self` 方法继续保留原借用语义。
+- channel 检查队列前先 enable 通知等待者，避免多生产者/消费者漏唤醒；超时/取消不提交消息，
+  已分派给被取消等待者的 notify_one 会由 Tokio 转交。
+
+```lua
+local sync = require("cosmos.sync")
+local mutex = sync.mutex.new()
+local value, err = mutex:with_lock(function()
+    cosmos.sleep(1)
+    return "完成"
+end, 100)
+assert(err == nil, err)
+```
 
 ### 尚未排期
 
@@ -159,11 +208,12 @@ lua_close(lua_state);
 | 文件 | 职责 |
 |---|---|
 | `cosmos/src/ffi.rs` | LuaJIT C API 声明（唯一 FFI 声明处） |
-| `cosmos/src/userdata.rs` | 桥接核心：`UserData`/`PushLua`/`FromLua`、userdata 存放与 GC、类型化 `LuaFunction::call`、fallible userdata 借用、`Nil`/`LuaStrMap`、derive 单元测试 |
+| `cosmos/src/userdata.rs` | 桥接核心：`UserData`/`PushLua`/`FromLua`、userdata 存放与 GC、类型化 `LuaFunction::call`、fallible userdata 借用、`Nil`/`LuaStrMap`/`LuaValue`、derive 单元测试 |
 | `cosmos/src/coroutine.rs` | `LuaCoroutine`（Future）、`PendingOp`/`PendingFuture`、TLS yield 通道、`yield_with` |
 | `cosmos/src/builtin/mod.rs` | time/thread 内建功能统一初始化与 LightThread 类型注册 |
 | `cosmos/src/builtin/time.rs` | sleep、now_ms、now_us 时间功能 |
 | `cosmos/src/builtin/light_thread.rs` | `LightThread` 句柄、spawn/wait/join/kill |
+| `cosmos/src/builtin/sync/` | channel、notify、semaphore、mutex 及统一超时转换；mod.rs 只注册类型，模块表由声明路径自动生成 |
 | `cosmos/src/libs.rs` | 内嵌 Lua 源码加载工具 |
 | `cosmos/src/stack.rs` | 栈辅助：`err_message`、`abs_index` |
 | `cosmos-macros/src/lib.rs` | `#[userdata]`、`FromLua`/`PushLua` derive |
@@ -188,6 +238,7 @@ cargo build
 ./target/debug/cosmos-rs examples/spawn.lua       # OK
 ./target/debug/cosmos-rs examples/ext.lua         # OK
 ./target/debug/cosmos-rs examples/sleep.lua       # OK
+./target/debug/cosmos-rs examples/sync.lua        # all sync checks passed
 # examples/error.lua 期望 exit=1（故意调用 sleep(-1)）
 
 # 双进程
@@ -196,14 +247,15 @@ cargo build
 (./target/debug/cosmos-rs examples/tls_server.lua 19443 &) ; sleep 1
 ./target/debug/cosmos-rs examples/tls_client.lua 19443     # OK
 
-cargo test --workspace  # 15 passed（derive、类型化回调、错误栈恢复、userdata 借用与取消）
+cargo test --workspace  # 18 passed（derive、回调、栈恢复、借用/取消、LuaValue、拥有型接收者、模块注册顺序与身份）
 ```
 
 ## 8. 坑与注意事项
 
 - **VM 关闭顺序**：先 `drop(local)` 再 `lua_close`（§4.3）。改了会 UAF。
 - **async 方法的 self 守卫**：`#[userdata]` 生成的 async 方法会把 `RefMut/Ref` move 进 future，
-  跨 await 一直占着借用；同一 userdata 的另一次调用会 `lua_error`。这是有意设计。
+  跨 await 一直占着借用；同一 userdata 的另一次调用会 `lua_error`。需要并发等待的共享句柄使用拥有型 self，
+  经 FromLua clone 后跨 await 持有独立句柄，不持有原实例的借用。
 - **FromLua 只返回 Err，不抛 Lua 错误**；借用守卫必须先释放，再由外层 trampoline 调用 lua_error。
 - **FromLua 嵌套取值要用绝对索引**：`lua_next` 遍历后再用 `-1` 会错位（`value_idx = lua_gettop(lua_state)`）。
 - **hyper upgrade**：必须 `serve_connection_with_upgrades` 且保留 `http::request::Parts`

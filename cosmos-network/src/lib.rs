@@ -12,10 +12,7 @@ mod websocket;
 
 /// 本 crate 的 Lua 部分：编译期嵌入二进制，启动时由宿主执行（见 cosmos::libs::run_lua_source）。
 /// (名称用于报错定位, 源码)
-pub const LUA_SOURCES: &[(&str, &str)] = &[
-    ("cosmos.network.tcp", include_str!("../lua/tcp.lua")),
-    ("cosmos.network.modules", include_str!("../lua/modules.lua")),
-];
+pub const LUA_SOURCES: &[(&str, &str)] = &[("cosmos.network.tcp", include_str!("../lua/tcp.lua"))];
 
 /// 注册本 crate 的全部 userdata 类型（桥接层入口）
 pub use bridge::register;

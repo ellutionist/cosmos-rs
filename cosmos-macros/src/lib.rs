@@ -24,7 +24,7 @@ use proc_macro2::Literal;
 use quote::{format_ident, quote};
 use syn::{
     parse_macro_input, spanned::Spanned, Data, DataStruct, DeriveInput, Field, Fields, FnArg,
-    ImplItem, ItemImpl, LitByteStr, LitStr, PatType, ReturnType, Type,
+    ImplItem, ItemImpl, LitByteStr, LitStr, PatType, Type,
 };
 
 #[proc_macro_attribute]
@@ -174,7 +174,10 @@ fn gen_method(
                 (Some(_), Some(_)) => {
                     quote!(let mut this = cosmos::userdata::try_check::<#ty>(lua_state, 1)?;)
                 }
-                _ => return err(r, "only &self and &mut self receivers are supported"),
+                (None, _) => {
+                    // 拥有型接收者经 FromLua 取得独立句柄，异步等待不占用 userdata 借用。
+                    quote!(let this = <#ty as cosmos::userdata::FromLua>::from_lua(lua_state, 1)?;)
+                }
             };
             (false, binding)
         }
@@ -247,16 +250,6 @@ fn gen_method(
     } else {
         // 同步方法：走 PushLua 直接压栈（trampoline 在 lua_resume 保护帧内）。
         // Result<T, E> 由 PushLua 的 blanket impl 统一处理（Ok 压值 / Err 压 nil+err）
-        let ret_conv = match &sig.output {
-            ReturnType::Default => quote! {
-                let ret = #call;
-                Ok(<() as cosmos::userdata::PushLua>::push_lua(ret, lua_state))
-            },
-            ReturnType::Type(_, ret_ty) => quote! {
-                let ret = #call;
-                Ok(<#ret_ty as cosmos::userdata::PushLua>::push_lua(ret, lua_state))
-            },
-        };
         quote! {
             #[allow(non_snake_case)]
             unsafe extern "C" fn #tramp_ident(
@@ -265,7 +258,8 @@ fn gen_method(
                 cosmos::userdata::trampoline(lua_state, |lua_state| unsafe {
                     #self_binding
                     #(#arg_conversions)*
-                    #ret_conv
+                    let ret = #call;
+                    Ok(cosmos::userdata::PushLua::push_lua(ret, lua_state))
                 })
             }
         }

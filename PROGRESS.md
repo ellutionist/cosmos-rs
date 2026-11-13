@@ -260,3 +260,64 @@
 - 提交前差异检查通过，沿用上一轮严格 Clippy、构建、15 项测试及 examples 的完整验证结果。
 - 外部目录 `../cosmos-ext-demo` 的配套修改不在本次仓库提交范围内。
 - 后续 builtin 优先考虑与协程调度直接相关的同步原语；本轮只评估方向，不新增模块。
+
+## 2026-11-13 新增 cosmos.sync 内建模块
+
+### 核心逻辑
+
+- 新建 `cosmos/src/builtin/sync/`，实现有界多生产者、多消费者 channel、通知、信号量和非重入 mutex。
+  由 builtin 统一安装，`cosmos.sync` 与 `require("cosmos.sync")` 共用类型表，没有增加依赖。
+- channel 使用 VecDeque 保存 FIFO 消息，满时等待可写通知；close 唤醒全部等待者，拒绝发送，保留缓冲消息供读取。
+  notify_one 最多暂存一次信号，notify_all 仅广播给现有等待者，通知对象也支持 close。
+- semaphore 使用 Tokio 公平信号量，mutex 复用单配额信号量；二者共用 permit userdata，release 幂等，GC 归还配额。
+- mutex 增加 with_lock：获取锁后通过 LuaFunction::call 执行可 yield 的回调，Rust 守卫跨 Future 持有，
+  完成、错误、取消均及时释放锁；返回回调的第一个值，无返回值为 nil。超时只覆盖获取锁。
+  手动 lock 的守卫属于 Lua，需显式 release 或 GC；取消持锁协程不承诺即时释放该模式的锁。
+- 所有等待接口统一可选毫秒超时；缺省/nil 无限等待，0 只 poll 一次；操作错误返回 nil, timeout/closed。
+  容量与配额严格校验为正整数，拒绝截断小数；超时校验拒绝负值、非有限值和过大值。
+
+### 桥接与踩坑
+
+- 新增基层 LuaValue 的 FromLua/PushLua，以 registry 锚点保活任意 Lua 值，保留 table、函数和 userdata 身份，
+  消费、发送失败或取消时释放锚点。nil 的 LUA_REFNIL 单独处理，避免误读 registry 的负下标。
+- #[userdata] 支持拥有型 self 接收者；可克隆 userdata 的 FromLua 仅在转换时借用并 clone。
+  sync 的 Rc/Arc 共享句柄可并发等待，且不依赖原 Lua userdata 在挂起期间存活；既有借用接收者语义不变。
+- 新增 push_type 组合 userdata 类型表，register 复用该入口，模块不手写方法 trampoline 或返回值压栈。
+- channel 必须在检查队列前 enable 通知 Future，防止多个发送者/接收者漏唤醒；用例覆盖已通知等待者被取消后的转交。
+- Tokio 的零时长 timeout 仍可能让出一次调度机会，因此零超时改为只 poll 一次，保证即时尝试语义。
+
+### 验证与下一步
+
+- 新增 `examples/sync.lua`，215 项检查通过：并发等待、背压、关闭、超时、取消、Lua 值/守卫 GC、
+  mutex 错误与取消释放、零超时及参数校验，并覆盖 VM 退出时仍有等待任务的回收。
+- `cargo test --workspace` 共 17 项通过，新增 LuaValue 身份/nil/栈高度和拥有型接收者跨 yield 不占借用的回归。
+- 构建、严格 Clippy 通过；websocket/http/userdata/spawn/ext/sleep、TCP/TLS 单进程及双进程回归通过，
+  error.lua 按预期退出 1。更新 AGENTS.md 与 HANDOFF.md 的模块入口、接口和回收语义。
+- 本轮未 commit / push；下一步按实际使用需求扩展同步接口。
+
+## 2026-11-13 按 userdata 声明自动组装模块表
+
+### 核心逻辑
+
+- userdata 注册按声明的点分路径自动创建父模块，类型表同时挂到父表字段和 require 入口。
+  例如 sync.channel 自动生成 cosmos.sync 表及其 channel 字段，不再重复手写模块层级。
+- 删除 Rust Sync 聚合类型，构造函数移回各类型的 #[userdata] impl，接口统一为
+  sync.channel.new、sync.notify.new、sync.semaphore.new、sync.mutex.new；Lua sync 表继续存在。
+- builtin::open 复用自动创建的 cosmos 根表；删除被通用注册替代的 push_type 包装。
+- 自动组装也覆盖网络父模块，删除 cosmos-network/lua/modules.lua 的 TCP 聚合表与对应内嵌源码条目。
+
+### 踩坑与验证
+
+- 子模块可能先于父类型注册；父类型必须补全原有表，不能替换已被 require 缓存的表或丢失子模块。
+  push_module 逐级复用表并恢复临时栈，新增回归覆盖父/子两种注册顺序、重复注册、Lua 增补字段与类型表身份。
+- new 返回 Self 时，旧同步 trampoline 在 impl 外显式引用 Self 导致编译失败；改为直接推导返回值的 PushLua，
+  同时消除有无返回值的重复分支，构造函数可使用常规 Rust 写法。
+- 构建、严格 Clippy 和 18 项单元测试通过；sync.lua 的 215 项检查及新增模块身份断言通过。
+- websocket/http/userdata/spawn/ext/sleep、TCP/TLS 单进程和双进程回归通过，error.lua 按预期退出 1。
+- 本轮未 commit / push。下一步继续沿用声明路径注册模块，新增类型只维护自身构造/方法与类型注册清单。
+
+## 2026-11-13 提交同步原语与模块自动注册
+
+- 按用户要求，先将 cosmos.sync、按声明自动组装模块表、配套测试和文档提交到本地 Git，不 push。
+- 提交前差异检查通过；沿用上一轮构建、严格 Clippy、18 项单元测试及 examples 回归结果。
+- 下一步将网络 TCP/TLS 文件按 cosmos.network.tcp 的模块层级整理，原 tcp.rs 改为 stream.rs。

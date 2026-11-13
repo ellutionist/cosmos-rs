@@ -10,6 +10,7 @@
 //! - metatable 兼任类型表：__index = 自身（静态构造 + 实例方法共用一张表）、
 //!   __gc = drop_in_place 统一生成，经 package.preload 用 require 引入
 //!   （local Counter = require("cosmos.Counter")）
+//! - 声明路径按点分段，自动创建父模块；类型表同时是父模块字段和 require 返回值
 //! - 类型校验比较 userdata 的 metatable，类型或借用失败只返回 Err
 //! - 方法借 &mut/& 走 RefCell::try_borrow：Lua 边界上编译期独占性降级为
 //!   运行期检查，借用冲突（重入/跨协程交错）转成 lua_error 而非 aliasing UB
@@ -138,8 +139,11 @@ unsafe fn ensure_metatable<T: UserData>(main: *mut lua_State, lua_state: *mut lu
         return;
     }
     unsafe {
-        let name = type_cstring::<T>();
-        luaL_newmetatable(lua_state, name.as_ptr()); // registry[type_name] = mt，同时压栈
+        let top = lua_gettop(lua_state);
+        // 命名空间先于类型注册时，直接将已有表补成 metatable，保留子模块和 require 的身份。
+        push_module(lua_state, &format!("cosmos.{}", T::lua_name()));
+        lua_pushvalue(lua_state, -1);
+        lua_setfield(lua_state, LUA_REGISTRYINDEX, type_cstring::<T>().as_ptr());
 
         // 静态构造和实例方法共用这一张表：__index 指向自己，
         // obj:method() → mt.method，Counter.new() → 命名空间字段直接索引 mt
@@ -158,21 +162,7 @@ unsafe fn ensure_metatable<T: UserData>(main: *mut lua_State, lua_state: *mut lu
         lua_pushcclosure(lua_state, gc_trampoline::<T>, 0);
         lua_setfield(lua_state, -2, c"__gc".as_ptr());
 
-        // 类型表经 require 引入：package.preload["cosmos.Counter"] = 工厂函数。
-        // require 约定 preload 条目必须是函数（返回非函数值会被静默丢弃，
-        // 见 LuaJIT lib_package.c lj_cf_package_require），工厂返回 mt 自身
-        let preload_key = format!("cosmos.{}", T::lua_name());
-        lua_getfield(lua_state, LUA_GLOBALSINDEX, c"package".as_ptr()); // [mt, package]
-        lua_getfield(lua_state, -1, c"preload".as_ptr()); // [mt, package, preload]
-        lua_pushlstring(
-            lua_state,
-            preload_key.as_ptr() as *const c_char,
-            preload_key.len(),
-        );
-        lua_pushvalue(lua_state, -4); // [mt, package, preload, key, mt]
-        lua_pushcclosure(lua_state, preload_factory, 1); // mt 副本收为 upvalue → [.., key, factory]
-        lua_settable(lua_state, -3); // preload[key] = factory
-        lua_settop(lua_state, -4); // 弹出 mt、package、preload，恢复入口栈高度
+        lua_settop(lua_state, top);
 
         REGISTERED.with(|m| {
             m.borrow_mut()
@@ -190,9 +180,50 @@ unsafe fn ensure_metatable<T: UserData>(main: *mut lua_State, lua_state: *mut lu
 /// # Safety
 /// lua_state 必须属于已初始化、已打开标准库的存活 VM，并由当前线程独占操作。
 pub unsafe fn register<T: UserData>(lua_state: *mut lua_State) {
-    unsafe {
-        let main = main_state(lua_state);
-        ensure_metatable::<T>(main, lua_state);
+    let main = main_state(lua_state);
+    ensure_metatable::<T>(main, lua_state);
+}
+
+/// 按点分路径创建/复用模块表，各级表同时挂到父表和 require 入口，栈顶增加叶子表。
+/// 后续注册同一路径的 userdata 时直接补全该表，不替换已有模块或子模块。
+///
+/// # Safety
+/// lua_state 满足 register 的契约，栈可容纳模块表及注册临时值。
+/// path 必须由非空、无 NUL 的字段组成；已有路径节点必须是模块表。
+pub unsafe fn push_module(lua_state: *mut lua_State, path: &str) {
+    let top = lua_gettop(lua_state);
+    lua_pushvalue(lua_state, LUA_GLOBALSINDEX);
+    let mut prefix = String::new();
+    for part in path.split('.') {
+        assert!(!part.is_empty(), "模块路径不能为空: {path}");
+        let key = CString::new(part).expect("模块路径不能包含 NUL");
+        lua_getfield(lua_state, -1, key.as_ptr());
+        if lua_type(lua_state, -1) == LUA_TNIL {
+            lua_settop(lua_state, -2);
+            lua_createtable(lua_state, 0, 0);
+            lua_pushvalue(lua_state, -1);
+            lua_setfield(lua_state, -3, key.as_ptr());
+        }
+        assert_eq!(
+            lua_type(lua_state, -1),
+            LUA_TTABLE,
+            "模块路径不是表: {path}"
+        );
+        if !prefix.is_empty() {
+            prefix.push('.');
+        }
+        prefix.push_str(part);
+
+        let module = lua_gettop(lua_state);
+        lua_getfield(lua_state, LUA_GLOBALSINDEX, c"package".as_ptr());
+        lua_getfield(lua_state, -1, c"preload".as_ptr());
+        lua_pushlstring(lua_state, prefix.as_ptr() as *const c_char, prefix.len());
+        lua_pushvalue(lua_state, module);
+        lua_pushcclosure(lua_state, preload_factory, 1);
+        lua_settable(lua_state, -3);
+        lua_settop(lua_state, module);
+        // 只保留当前节点，栈占用不随路径深度增加。
+        lua_replace(lua_state, top + 1);
     }
 }
 
@@ -301,7 +332,7 @@ unsafe extern "C" fn gc_trampoline<T: UserData>(lua_state: *mut lua_State) -> c_
     0
 }
 
-/// require 的 preload 工厂：upvalue 1 就是 metatable，直接返回。
+/// require 的 preload 工厂：upvalue 1 是模块/类型表，直接返回。
 /// require 会用返回值填充 package.loaded[name]
 unsafe extern "C" fn preload_factory(lua_state: *mut lua_State) -> c_int {
     lua_pushvalue(lua_state, LUA_GLOBALSINDEX - 1); // lua_upvalueindex(1)
@@ -360,6 +391,14 @@ pub trait FromLua: Sized {
     /// 转换失败必须返回 Err，不得调用 lua_error；成功或失败都应恢复入口栈高度。
     /// 返回值需自行保活所依赖的 Lua 引用，不能返回仅靠当前调用栈保护的借用。
     unsafe fn from_lua(lua_state: *mut lua_State, idx: c_int) -> Result<Self, String>;
+}
+
+/// 可克隆的 userdata 作为拥有型参数/接收者：只在转换时短暂借用原实例。
+/// 类型自身决定克隆语义；共享句柄可由 Rc/Arc 保活，允许多个协程同时等待。
+impl<T: UserData + Clone> FromLua for T {
+    unsafe fn from_lua(lua_state: *mut lua_State, idx: c_int) -> Result<Self, String> {
+        Ok(try_check_shared::<T>(lua_state, idx)?.clone())
+    }
 }
 
 impl FromLua for f64 {
@@ -564,6 +603,46 @@ impl<T: FromLua> FromLua for Option<T> {
         match lua_type(lua_state, idx) {
             LUA_TNONE | LUA_TNIL => Ok(None),
             _ => Ok(Some(T::from_lua(lua_state, idx)?)),
+        }
+    }
+}
+
+/// 任意 Lua 值的拥有型引用，保留 table、函数及 userdata 的原始身份。
+/// registry 锚点允许值跨 yield、跨协程传递；不复制 Lua 对象。
+/// LuaValue 必须在所属 VM 的同一线程使用，宿主须先回收任务再关闭 VM。
+pub struct LuaValue {
+    main: *mut lua_State,
+    registry_ref: c_int,
+}
+
+impl FromLua for LuaValue {
+    unsafe fn from_lua(lua_state: *mut lua_State, idx: c_int) -> Result<Self, String> {
+        if lua_type(lua_state, idx) == LUA_TNONE {
+            return Err(format!("argument {idx}: expected a value"));
+        }
+        let main = main_state(lua_state);
+        lua_pushvalue(lua_state, idx);
+        let registry_ref = luaL_ref(lua_state, LUA_REGISTRYINDEX);
+        Ok(Self { main, registry_ref })
+    }
+}
+
+impl PushLua for LuaValue {
+    unsafe fn push_lua(self, lua_state: *mut lua_State) -> i32 {
+        // luaL_ref(nil) 返回 LUA_REFNIL，不能将负引用当作普通 registry 下标读取。
+        if self.registry_ref == LUA_REFNIL {
+            lua_pushnil(lua_state);
+        } else {
+            lua_rawgeti(lua_state, LUA_REGISTRYINDEX, self.registry_ref);
+        }
+        1
+    }
+}
+
+impl Drop for LuaValue {
+    fn drop(&mut self) {
+        if vm_alive() {
+            unsafe { luaL_unref(self.main, LUA_REGISTRYINDEX, self.registry_ref) };
         }
     }
 }
@@ -1038,6 +1117,167 @@ mod derive_tests {
             assert!(try_check::<Value>(lua_state, -1).is_err());
             assert!(try_check_shared::<Value>(lua_state, -1).is_err());
             assert_eq!(lua_gettop(lua_state), 2);
+        });
+    }
+
+    #[test]
+    fn module_paths_preserve_identity_in_both_registration_orders() {
+        struct Parent;
+        #[cosmos::userdata(name = "module_test.parent")]
+        impl Parent {
+            fn new() -> Self {
+                Self
+            }
+
+            fn value(&self) -> i64 {
+                7
+            }
+        }
+
+        struct Child;
+        #[cosmos::userdata(name = "module_test.parent.child")]
+        impl Child {
+            fn new() -> Self {
+                Self
+            }
+        }
+
+        for child_first in [true, false] {
+            with_state(|lua_state| unsafe {
+                // 注册与重复注册都必须保留调用方已有的栈值。
+                42i64.push_lua(lua_state);
+                if child_first {
+                    register::<Child>(lua_state);
+                } else {
+                    register::<Parent>(lua_state);
+                }
+                assert_eq!(lua_gettop(lua_state), 1);
+                assert_eq!(lua_tointeger(lua_state, 1), 42);
+                crate::libs::run_lua_source(
+                    lua_state,
+                    "模块注册前半程",
+                    r#"
+                    cached_root = require("cosmos")
+                    cached_module = require("cosmos.module_test")
+                    cached_parent = require("cosmos.module_test.parent")
+                    assert(cached_root == cosmos)
+                    assert(cached_root.module_test == cached_module)
+                    assert(cached_module.parent == cached_parent)
+                    cached_parent.marker = "保留"
+                "#,
+                )
+                .unwrap();
+
+                register::<Parent>(lua_state);
+                register::<Child>(lua_state);
+                register::<Parent>(lua_state);
+                assert_eq!(lua_gettop(lua_state), 1);
+                crate::libs::run_lua_source(
+                    lua_state,
+                    "模块注册后半程",
+                    r#"
+                    local parent = require("cosmos.module_test.parent")
+                    local child = require("cosmos.module_test.parent.child")
+                    assert(require("cosmos") == cached_root)
+                    assert(require("cosmos.module_test") == cached_module)
+                    assert(parent == cached_parent and parent.marker == "保留")
+                    assert(parent.child == child)
+                    assert(parent.new():value() == 7)
+                    assert(getmetatable(parent.new()) == parent)
+                    assert(getmetatable(child.new()) == child)
+                    parent.lua_method = function() return 9 end
+                "#,
+                )
+                .unwrap();
+                // 懒 push 同样复用注册结果，不抹去 Lua 增补的方法。
+                push(lua_state, Parent);
+                assert_eq!(lua_gettop(lua_state), 2);
+                crate::libs::run_lua_source(
+                    lua_state,
+                    "模块懒注册",
+                    r#"
+                    assert(cached_parent.lua_method() == 9)
+                "#,
+                )
+                .unwrap();
+                assert_eq!(lua_gettop(lua_state), 2);
+            });
+        }
+    }
+
+    #[test]
+    fn lua_value_preserves_identity_nil_and_stack_height() {
+        with_state(|lua_state| unsafe {
+            lua_createtable(lua_state, 0, 0);
+            let value = LuaValue::from_lua(lua_state, 1).unwrap();
+            assert_eq!(lua_gettop(lua_state), 1);
+            let thread = lua_newthread(lua_state);
+            assert_eq!(value.push_lua(thread), 1);
+            lua_xmove(thread, lua_state, 1);
+            assert_ne!(lua_rawequal(lua_state, 1, -1), 0);
+            lua_settop(lua_state, 0);
+
+            // registry 的负键也可被 Lua 写入，nil 引用不能误读该槽位。
+            lua_pushinteger(lua_state, LUA_REFNIL as lua_Integer);
+            "非 nil".push_lua(lua_state);
+            lua_settable(lua_state, LUA_REGISTRYINDEX);
+            lua_pushnil(lua_state);
+            let nil = LuaValue::from_lua(lua_state, 1).unwrap();
+            lua_settop(lua_state, 0);
+            assert_eq!(nil.push_lua(lua_state), 1);
+            assert_eq!(lua_type(lua_state, 1), LUA_TNIL);
+            assert!(LuaValue::from_lua(lua_state, 2).is_err());
+            assert_eq!(lua_gettop(lua_state), 1);
+        });
+    }
+
+    #[test]
+    fn owned_userdata_receiver_does_not_hold_borrow_across_yield() {
+        use std::cell::Cell;
+        use std::future::Future;
+        use std::pin::Pin;
+        use std::rc::Rc;
+        use std::task::{Context, Poll, Waker};
+
+        #[derive(Clone)]
+        struct Shared(Rc<Cell<i64>>);
+
+        #[cosmos::userdata(name = "OwnedReceiverTest")]
+        impl Shared {
+            async fn tick(self) -> i64 {
+                let mut first = true;
+                std::future::poll_fn(|cx| {
+                    if first {
+                        first = false;
+                        cx.waker().wake_by_ref();
+                        Poll::Pending
+                    } else {
+                        Poll::Ready(())
+                    }
+                })
+                .await;
+                self.0.set(self.0.get() + 1);
+                self.0.get()
+            }
+        }
+
+        with_state(|lua_state| unsafe {
+            let thread = lua_newthread(lua_state);
+            assert_eq!(
+                luaL_loadstring(thread, c"local s = ...; return s:tick()".as_ptr()),
+                0
+            );
+            push(thread, Shared(Rc::new(Cell::new(0))));
+            let mut coroutine = crate::coroutine::LuaCoroutine::new(lua_state, thread);
+            lua_pushvalue(thread, 2);
+            lua_xmove(thread, lua_state, 1);
+            let mut cx = Context::from_waker(Waker::noop());
+            assert!(Pin::new(&mut coroutine).poll(&mut cx).is_pending());
+            // 原 userdata 在挂起期间仍可独占借用，且句柄操作相同的共享状态。
+            try_check::<Shared>(lua_state, 1).unwrap().0.set(10);
+            assert_eq!(Pin::new(&mut coroutine).poll(&mut cx), Poll::Ready(Ok(())));
+            assert_eq!(i64::from_lua(thread, 1).unwrap(), 11);
+            drop(coroutine);
         });
     }
 

@@ -25,6 +25,7 @@ pub const LUA_TUSERDATA: c_int = 7;
 
 pub const LUA_GLOBALSINDEX: c_int = -10002;
 pub const LUA_REGISTRYINDEX: c_int = -10000;
+pub const LUA_REFNIL: c_int = -1;
 
 extern "C" {
     pub fn luaL_newstate() -> *mut lua_State;
@@ -71,6 +72,7 @@ extern "C" {
     pub fn lua_setfield(lua_state: *mut lua_State, idx: c_int, k: *const c_char);
     pub fn lua_settable(lua_state: *mut lua_State, idx: c_int);
     pub fn lua_settop(lua_state: *mut lua_State, idx: c_int);
+    pub fn lua_replace(lua_state: *mut lua_State, idx: c_int);
 
     pub fn lua_newuserdata(lua_state: *mut lua_State, size: size_t) -> *mut c_void;
     pub fn lua_touserdata(lua_state: *mut lua_State, idx: c_int) -> *mut c_void;
