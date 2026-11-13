@@ -11,7 +11,8 @@
 //!   receive("*l")  读一行（去行尾 \n 与 \r），干净 EOF 返回 nil，提前关闭返回 nil,"closed",partial
 //!   receive("*L")  读一行，保留行尾 \n（含可能的前置 \r）
 //!   receive(n)     读精确 n 字节，提前关闭返回 nil,"closed",partial
-//! receiveuntil(delim) 读到分隔符（不含），分隔符被消费；可跨 BufReader 分块边界匹配。
+//! receiveuntil(delim) 返回迭代器闭包：每次调用读到分隔符（不含，已消费），
+//!   可跨 BufReader 分块边界匹配；迭代器独占读取流，原 reader 不可再用。
 //! 三值协议：data, err, partial，err 取 "closed" / "timeout" / "buffer overflow"。
 //! settimeout(ms) 对齐 OpenResty；ms <= 0 清除超时，超时不关闭连接。
 //! setbufsize(n) 限制 *a / *l / *L / receiveuntil 的累积字节数；n <= 0 解除，
@@ -35,7 +36,7 @@ use cosmos::ffi::{
     c_char, c_int, lua_pushlstring, lua_pushnil, lua_State, lua_tointeger, lua_type,
     LUA_TNUMBER, LUA_TSTRING,
 };
-use cosmos::userdata::{FromLua, IntoOutput, LuaStr};
+use cosmos::userdata::{FromLua, IntoOutput, LuaStr, PushLua};
 
 /// 可选 deadline 包裹一个 future：Some 时到点返回 Err(())（调用方转成 "timeout"），
 /// None 时无限等待。用于 settimeout 生效后的各读写点。
@@ -374,17 +375,85 @@ impl TcpReader {
         }
     }
 
-    /// receiveuntil(delim)：读到分隔符为止，返回分隔符之前的数据（分隔符被消费）。
-    /// 分隔符可跨 BufReader 分块边界；EOF/超时/超限返回 nil + err + partial。
-    async fn receiveuntil(&mut self, delim: String) -> ReceiveOutcome {
+    /// receiveuntil(delim)：返回迭代器闭包，每次调用读到分隔符为止，
+    /// 返回分隔符之前的数据（分隔符被消费）。读取状态随迭代器独占：
+    /// 本 reader 之后不可再 receive；timeout/setbufsize 在此刻快照。
+    fn receiveuntil(&mut self, delim: String) -> Result<UntilIter, String> {
+        if delim.is_empty() {
+            return Err("empty delimiter".to_string());
+        }
+        let Some(inner) = self.inner.take() else {
+            return Err("closed".to_string());
+        };
+        Ok(UntilIter(TcpUntil {
+            inner: Some(inner),
+            state: self.state.clone(),
+            delim: delim.into_bytes(),
+            buf: Vec::new(),
+            timeout: self.timeout,
+            max_buf: self.max_buf,
+        }))
+    }
+
+    fn close(&mut self) {
+        self.inner.take(); // drop → shutdown 读半
+        self.state.set(State::Closed);
+    }
+}
+
+/// receiveuntil 迭代器的状态：独占 reader 的流，每次 next() 读一段
+pub struct TcpUntil {
+    inner: Option<BufReader<OwnedReadHalf>>,
+    state: Rc<Cell<State>>,
+    delim: Vec<u8>,
+    /// 单次调用内的累积缓冲（分隔符可能跨 BufReader 分块边界）
+    buf: Vec<u8>,
+    timeout: Option<Duration>,
+    max_buf: Option<usize>,
+}
+
+// 空 impl：只为拿到 UserData（metatable + __gc）与 require 入口，
+// 读取逻辑在下面的普通 impl 里（Lua 侧通过闭包调用，不暴露方法）
+#[cosmos::userdata]
+impl TcpUntil {}
+
+/// 迭代器返回值：压栈时构造 TcpUntil userdata，再包成 Lua 闭包（upvalue = userdata）。
+/// Lua 用法：local iter = reader:receiveuntil("--"); local data, err, partial = iter()
+pub struct UntilIter(TcpUntil);
+
+impl PushLua for UntilIter {
+    fn push_lua(self, L: *mut lua_State) -> i32 {
+        unsafe {
+            cosmos::userdata::push::<TcpUntil>(L, self.0);
+            cosmos::ffi::lua_pushcclosure(L, until_call, 1);
+        }
+        1
+    }
+}
+
+/// lua_upvalueindex(1)：5.1 宏展开为 LUA_GLOBALSINDEX - 1
+const UPVALUE_1: c_int = cosmos::ffi::LUA_GLOBALSINDEX - 1;
+
+/// 闭包本体：从 upvalue 取 TcpUntil（RefMut 移进 future 持有），
+/// 像异步方法一样 yield 出去等读取结果
+unsafe extern "C" fn until_call(L: *mut lua_State) -> c_int {
+    unsafe {
+        let mut this = cosmos::userdata::check::<TcpUntil>(L, UPVALUE_1);
+        cosmos::coroutine::yield_with(
+            L,
+            Box::pin(async move { this.next().await.into_output() }),
+        )
+    }
+}
+
+impl TcpUntil {
+    /// 读到分隔符或出错为止；分隔符可跨分块边界。
+    /// EOF/超时/超限返回 nil + err + partial（partial 为已读到的数据）。
+    async fn next(&mut self) -> ReceiveOutcome {
         let Some(inner) = self.inner.as_mut() else {
             return ReceiveOutcome::Closed(Vec::new());
         };
-        if delim.is_empty() {
-            return ReceiveOutcome::Error("empty delimiter".to_string(), Vec::new());
-        }
-        let delim = delim.into_bytes();
-        let d = delim.len();
+        let d = self.delim.len();
         let deadline = self.timeout.map(|t| Instant::now() + t);
         let cap = self.max_buf;
         self.buf.clear();
@@ -413,8 +482,8 @@ impl TcpReader {
                     let have = self.buf.len() - start;
                     let need = d - have;
                     if avail.len() >= need
-                        && self.buf[start..] == delim[..have]
-                        && avail[..need] == delim[have..]
+                        && self.buf[start..] == self.delim[..have]
+                        && avail[..need] == self.delim[have..]
                     {
                         found = Some((start, need));
                         break;
@@ -423,12 +492,12 @@ impl TcpReader {
                 if let Some((start, need)) = found {
                     self.buf.extend_from_slice(&avail[..need]);
                     (need, Some(start))
-                } else if let Some(p) = find_subslice(avail, &delim) {
+                } else if let Some(p) = find_subslice(avail, &self.delim) {
                     // 2) 分隔符完整落在 avail 内
                     self.buf.extend_from_slice(&avail[..p]);
                     (p + d, Some(self.buf.len()))
                 } else {
-                    // 3) 还没有分隔符：受上限约束地收下
+                    // 3) 还没有分隔符：受上限约束地收下（上限按次生效）
                     let take = cap
                         .map_or(avail.len(), |c| avail.len().min(c.saturating_sub(self.buf.len())));
                     self.buf.extend_from_slice(&avail[..take]);
@@ -444,11 +513,6 @@ impl TcpReader {
                 return ReceiveOutcome::Overflow(std::mem::take(&mut self.buf));
             }
         }
-    }
-
-    fn close(&mut self) {
-        self.inner.take(); // drop → shutdown 读半
-        self.state.set(State::Closed);
     }
 }
 
@@ -539,4 +603,5 @@ pub unsafe fn register(L: *mut lua_State) {
     cosmos::userdata::register::<TcpConn>(L);
     cosmos::userdata::register::<TcpReader>(L);
     cosmos::userdata::register::<TcpWriter>(L);
+    cosmos::userdata::register::<TcpUntil>(L);
 }
