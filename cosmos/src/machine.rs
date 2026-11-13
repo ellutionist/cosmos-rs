@@ -3,14 +3,13 @@
 use std::ffi::CString;
 use std::future::Future;
 use std::path::Path;
-use std::pin::Pin;
 use std::ptr::NonNull;
 use std::task::{Context, Poll, Waker};
 use tokio::runtime::Handle;
 use tokio::task::{JoinHandle, LocalSet};
 
-use crate::coroutine::LuaCoroutine;
 use crate::ffi::*;
+use crate::light_thread::LightThread;
 use crate::userdata::{self, UserData};
 use crate::{builtin, stack};
 
@@ -67,11 +66,12 @@ impl Machine {
 
     /// 同步加载模块的 Lua 定义；需要异步等待时返回错误，用户脚本应通过 exec 执行。
     pub fn load(&mut self, name: &str, source: &str) -> Result<(), String> {
-        let mut coroutine = self.prepare(name, source, &[])?;
+        let thread = self.prepare(name, source, &[])?;
+        let mut run = std::pin::pin!(thread.run::<()>());
         let _entered = self.runtime.enter();
         let _local = self.local.as_ref().unwrap().enter();
         let mut context = Context::from_waker(Waker::noop());
-        match Pin::new(&mut coroutine).poll(&mut context) {
+        match run.as_mut().poll(&mut context) {
             Poll::Ready(result) => result,
             Poll::Pending => Err(format!("模块 {name} 的同步定义不能等待异步操作")),
         }
@@ -103,8 +103,12 @@ impl Machine {
         if current.id() != self.runtime.id() {
             return Err("必须在注入的 Tokio runtime 中执行 Lua".to_string());
         }
-        let coroutine = self.prepare(name, source, args)?;
-        self.local.as_ref().unwrap().run_until(coroutine).await
+        let thread = self.prepare(name, source, args)?;
+        self.local
+            .as_ref()
+            .unwrap()
+            .run_until(thread.run::<()>())
+            .await
     }
 
     /// 读取并执行文件，参数对应 Lua chunk 的 `...`。
@@ -125,7 +129,7 @@ impl Machine {
         name: &str,
         source: &str,
         args: &[String],
-    ) -> Result<LuaCoroutine, String> {
+    ) -> Result<LightThread, String> {
         let name = CString::new(name).map_err(|_| "chunk 名称不能包含 NUL".to_string())?;
         unsafe {
             let lua_state = self.lua_state.as_ptr();
@@ -139,7 +143,7 @@ impl Machine {
             for arg in args {
                 lua_pushlstring(thread, arg.as_ptr().cast(), arg.len());
             }
-            Ok(LuaCoroutine::new(lua_state, thread))
+            Ok(LightThread::new(lua_state, thread))
         }
     }
 }

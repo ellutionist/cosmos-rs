@@ -236,7 +236,7 @@ fn gen_method(
                 cosmos::userdata::trampoline(lua_state, |lua_state| unsafe {
                     #self_binding
                     #(#arg_conversions)*
-                    Ok(cosmos::coroutine::yield_with(
+                    Ok(cosmos::light_thread::yield_with(
                         lua_state,
                         Box::pin(async move { #call.await }),
                     ))

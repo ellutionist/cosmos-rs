@@ -527,3 +527,43 @@
 - 提交前差异检查通过，沿用已完成的 all-targets 构建、29 项测试、Machine !Send 检查、严格 Clippy 和 examples 回归结果。
 - Machine 执行语义保持不变：主协程结束后 exec 返回；宿主保留 Machine 可继续执行，CLI 则销毁 Machine 并退出。
 - 不 push。后续以独立 CLI 为执行入口，测试辅助逻辑不进入正式工具。
+
+## 2026-11-13 统一 LightThread 并细分内部职责
+
+### 核心逻辑
+
+- 删除独立的 LuaCoroutine 与 coroutine.rs，主脚本、同步定义、类型化 LuaFunction 回调及 Lua 后台任务
+  统一使用 cosmos::LightThread；Lua cosmos.thread 与 cosmos.LightThread 路径保持不变。
+- 新建 light_thread/：mod.rs 组织唯一执行权、直接/后台调度及执行守卫；execution.rs 的私有 Execution
+  仅持有 Lua 状态、挂起操作和 registry 锚点，不实现 Future；control.rs 仅管理取消、最终结果和等待者通知。
+- run 构造 Future 时立即取走 Execution，执行期间独占状态机，不跨 lua_resume 或 await 借用共享 RefCell。
+  Machine 与回调直接 await 同一执行入口，不增加 Tokio 任务；spawn 才交给 LocalSet。
+- 回调结果在锚点有效时通过 FromLua 读取；结束/取消时先释放挂起操作中的借用，再解除锚定并通知等待者。
+  尚未首次轮询的执行 Future 被 drop 也会通过同一守卫发布取消并释放执行资源。
+- 删除 Lua 任务的 JoinHandle + oneshot 双份完成结果，Control 保存唯一结果并按需登记 waker，
+  等待者取消时注销通知。join 使用拥有型克隆句柄，支持多个协程同时等待及等待期间 kill。
+- join/wait 均可重复观察已完成任务的成功、错误或取消；wait 不再拿走其他任务的接收端，
+  未选中的任务、重复参数和参数转换失败后的有效任务都可继续等待。
+- builtin/light_thread.rs 只保留 Lua 参数/结果适配与注册；宏及 network bridge 的 yield 路径同步更新。
+  AGENTS.md、HANDOFF.md 更新统一模型、分层、生命周期与验证说明。
+
+### 踩坑与验证
+
+- 取消检查必须位于每次 lua_resume 之间：Execution 每步最多恢复一次，由执行守卫检查取消并控制
+  每轮最多 256 次恢复，防止自我取消后继续执行，也避免立即就绪的操作链饿死其他任务。
+- 新增 3 项 Rust 生命周期/通知回归，覆盖唯一执行权、未 poll 即取消时锚点与参数 GC、
+  挂起借用先于完成通知释放、多个等待者唤醒及取消等待不偷通知；保留原 PendingOp 与类型化回调测试。
+- 扩充 examples/spawn.lua，实际验证并发 join + kill、重复 wait/join、取消等待者、非法参数、
+  重复句柄、自我取消、丢弃句柄后的后台执行，以及立即就绪操作的调度公平性。
+- all-targets 构建、cargo test --workspace --locked（32 项测试及 Machine/LightThread 的 2 项 !Send
+  编译失败用例）、严格 Clippy、差异检查通过；http/websocket/spawn/sleep/sync/machine、
+  TCP/TLS 双进程与 Rust Machine 嵌入示例均实际运行通过。
+- HTTP 压测脚本在 4 worker 的短窗口完成 2874 次请求、0 错误；此结果只验证调用链与并发可用性，
+  不作为性能对比。统一共享状态会增加一个 Rc 状态分配，后台任务去掉 oneshot，等待登记按需分配。
+- Machine/CLI 退出语义不变；本轮未 commit / push。后续协程执行统一通过 LightThread，内部组成部分不对外暴露为独立实体。
+
+## 2026-11-13 提交 LightThread 合并与内部分层
+
+- 按用户要求，将统一 LightThread、Execution/Control 分层、取消/等待语义、回归用例和配套文档提交到本地 Git。
+- 提交前差异检查通过，沿用已完成的构建、32 项测试、2 项 !Send 检查、严格 Clippy 与 examples 回归结果，不 push。
+- 下一步逐个检查 workspace crate 的可见性，重点收窄 cosmos 内部类型、函数与模块，同时保留宏展开和插件所需的跨 crate 桥接接口。

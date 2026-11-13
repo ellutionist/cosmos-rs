@@ -15,7 +15,7 @@
 //! - 方法借 &mut/& 走 RefCell::try_borrow：Lua 边界上编译期独占性降级为
 //!   运行期检查，借用冲突（重入/跨协程交错）转成 lua_error 而非 aliasing UB
 //!
-//! 线程模型：全部约束在单线程（同 coroutine.rs 的 TLS 通道）；
+//! 线程模型：全部约束在单线程（同 light_thread/execution.rs 的 TLS 通道）；
 //! 参数转换与借用失败只返回 Err，最外层 trampoline 在 Rust 局部值释放后才调用 lua_error。
 
 use std::any::TypeId;
@@ -707,19 +707,13 @@ impl LuaFunction {
         if !self.anchor.is_alive() {
             return Err("Lua VM 已关闭".to_string());
         }
-        let (thread, mut co) = unsafe {
-            let thread = lua_newthread(self.anchor.main);
-            self.anchor.push_to(thread);
-            args.push_lua(thread);
-            (
-                thread,
-                crate::coroutine::LuaCoroutine::new(self.anchor.main, thread),
-            )
+        let thread = unsafe {
+            let lua_state = lua_newthread(self.anchor.main);
+            self.anchor.push_to(lua_state);
+            args.push_lua(lua_state);
+            crate::light_thread::LightThread::new(self.anchor.main, lua_state)
         };
-        (&mut co).await?;
-        let result = unsafe { R::from_lua(thread, 1) };
-        drop(co);
-        result
+        thread.run::<R>().await
     }
 }
 
@@ -1274,7 +1268,6 @@ mod derive_tests {
     fn owned_userdata_receiver_does_not_hold_borrow_across_yield() {
         use std::cell::Cell;
         use std::future::Future;
-        use std::pin::Pin;
         use std::rc::Rc;
         use std::task::{Context, Poll, Waker};
 
@@ -1307,16 +1300,16 @@ mod derive_tests {
                 0
             );
             push(thread, Shared(Rc::new(Cell::new(0))));
-            let mut coroutine = crate::coroutine::LuaCoroutine::new(lua_state, thread);
+            let light_thread = crate::light_thread::LightThread::new(lua_state, thread);
+            let mut run = Box::pin(light_thread.run::<i64>());
             lua_pushvalue(thread, 2);
             lua_xmove(thread, lua_state, 1);
             let mut cx = Context::from_waker(Waker::noop());
-            assert!(Pin::new(&mut coroutine).poll(&mut cx).is_pending());
+            assert!(run.as_mut().poll(&mut cx).is_pending());
             // 原 userdata 在挂起期间仍可独占借用，且句柄操作相同的共享状态。
             try_check::<Shared>(lua_state, 1).unwrap().0.set(10);
-            assert_eq!(Pin::new(&mut coroutine).poll(&mut cx), Poll::Ready(Ok(())));
-            assert_eq!(i64::from_lua(thread, 1).unwrap(), 11);
-            drop(coroutine);
+            assert_eq!(run.as_mut().poll(&mut cx), Poll::Ready(Ok(11)));
+            drop(run);
         });
     }
 

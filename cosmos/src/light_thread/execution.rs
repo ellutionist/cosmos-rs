@@ -1,15 +1,13 @@
 use std::cell::RefCell;
 use std::future::Future;
-use std::marker::PhantomData;
 use std::pin::Pin;
-use std::rc::Rc;
 use std::task::{Context, Poll};
 
 use libc::c_int;
 
 use crate::ffi::*;
 use crate::stack;
-use crate::userdata::{PushLua, RegistryRef};
+use crate::userdata::{FromLua, PushLua, RegistryRef};
 
 /// 擦除异步操作的具体类型，在完成的当次轮询中直接压栈。
 /// 输出仍是原生 Rust 值，只要求实现 PushLua，无需单独装箱返回值。
@@ -41,17 +39,16 @@ where
 }
 
 /// 协程挂起期间等待的异步操作。
-/// 无 Send 约束：LuaCoroutine 本身 !Send（线程亲和），整个链路不会跨线程，
+/// 无 Send 约束：LightThread 本身 !Send（线程亲和），整个链路不会跨线程，
 /// 放宽后 op 可以捕获 !Send 的数据（如带 Rc 的用户对象）
 pub type PendingFuture = Pin<Box<dyn PendingOp>>;
 
 // yield 通道：C 函数把 PendingFuture 塞进 TLS 槽再 lua_yield(lua_state, 0)，
-// 同一线程上的 poll 侧从槽里取回（见 yield_with / LuaCoroutine::poll）。
+// 同一线程上的 poll 侧从槽里取回（见 yield_with / Execution::poll_step）。
 //
 // 相比 lightuserdata + Box::into_raw 的堆指针通道，每次 yield 少一次分配，
 // 代价是绑定单线程 runtime：写槽和取槽必须发生在同一条线程上。
-// lua_State 本身线程亲和，LuaCoroutine 的 !Send（PhantomData<Rc<()>>）
-// 在类型层面保证 future 不会跨线程迁移。
+// lua_State 本身线程亲和；LightThread 与 registry 锚点均为 !Send，执行不会跨线程迁移。
 thread_local! {
     static PENDING_OP: RefCell<Option<PendingFuture>> = const { RefCell::new(None) };
 }
@@ -71,10 +68,7 @@ pub unsafe fn yield_with(lua_state: *mut lua_State, fut: PendingFuture) -> c_int
     unsafe { lua_yield(lua_state, 0) }
 }
 
-/// 单次 poll 内最多恢复协程的次数，防止 Lua 侧连续 yield 饿死调度器
-const RESUME_BUDGET: u32 = 256;
-
-/// 协程 future 的两个阶段，决定本轮 resume 的 nargs 从哪来：
+/// 执行状态的两个阶段，决定本轮 resume 的 nargs 从哪来：
 /// - Fresh：协程从未启动，初始参数在栈上，nargs = gettop - 1
 /// - Awaiting(fut)：挂起的异步操作，完成后其结果压栈，nargs = 压栈个数
 enum Phase {
@@ -82,83 +76,70 @@ enum Phase {
     Awaiting(PendingFuture),
 }
 
-/// 每个 Lua 协程绑定一个 future：
-/// poll 按 Phase 推进——Fresh 直接 resume，Awaiting 先 poll 异步操作、
-/// 完成后把结果压栈再 lua_resume 续跑协程，直到协程结束返回 Ready。
-/// 调度完全交给 tokio。
-pub struct LuaCoroutine {
-    thread: *mut lua_State,
-    phase: Phase,
-    // 字段按声明顺序释放：先回收 phase 中的借用守卫，再解除协程锚定。
-    _anchor: RegistryRef,
-    // lua_State 线程亲和 + TLS 通道要求 future 留在 yield 发生的那条线程上：
-    // Rc 使本类型 !Send，多线程 runtime 下会在编译期被 spawn 拒绝，
-    // 而不是运行期取错槽
-    _not_send: PhantomData<Rc<()>>,
+pub(super) enum Step {
+    Yielded,
+    Finished,
 }
 
-impl LuaCoroutine {
+/// LightThread 私有的执行状态；不独立调度，也不实现 Future。
+/// 挂起操作先于 registry 锚点释放，确保借用守卫不访问已经回收的 userdata。
+pub(super) struct Execution {
+    lua_state: *mut lua_State,
+    phase: Phase,
+    _anchor: RegistryRef,
+}
+
+impl Execution {
     /// 把 lua_newthread 出来的协程锚定到 registry（luaL_ref 会从栈上取走它），
     /// 防止挂起期间被 GC 回收。
     /// 初始参数在 new 之前压到协程栈上（位于 chunk 函数之上），
     /// 首次 resume 会按 gettop - 1 自动传参（对应脚本里的 `...`）
     ///
     /// # Safety
-    /// g 与 thread 必须属于同一个存活 VM，g 栈顶是 thread 对象，thread 栈上已准备好函数和参数。
+    /// main 与 lua_state 必须属于同一个存活 VM，main 栈顶是协程对象，协程栈上已准备好函数和参数。
     /// 在本对象及其挂起操作释放前，宿主不得关闭 VM，且必须始终在当前线程轮询。
-    pub unsafe fn new(g: *mut lua_State, thread: *mut lua_State) -> Self {
+    pub(super) unsafe fn new(main: *mut lua_State, lua_state: *mut lua_State) -> Self {
         Self {
-            thread,
+            lua_state,
             phase: Phase::Fresh,
-            _anchor: RegistryRef::new(g),
-            _not_send: PhantomData,
+            _anchor: RegistryRef::new(main),
         }
     }
-}
 
-impl Future for LuaCoroutine {
-    type Output = Result<(), String>;
-
-    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        let this = self.get_mut();
-        let mut budget = RESUME_BUDGET;
-        loop {
-            let nargs: i32 = match &mut this.phase {
-                // 协程从未启动：栈上是 [chunk 函数, 初始参数...]，参数个数 = gettop - 1
-                Phase::Fresh => unsafe { lua_gettop(this.thread) - 1 },
-                // 关键接线：内层 future 拿到的是外层 cx 的 waker，
-                // 事件（timer/epoll）到来时唤醒的就是本 future 所在的 task。
-                // Pending 时 future 留在枚举里原地保存（堆上，pinning 不变）
-                Phase::Awaiting(fut) => match unsafe { fut.as_mut().poll_push(cx, this.thread) } {
+    /// 每步最多恢复一次 Lua，将继续推进的调度与取消检查留给 LightThread。
+    pub(super) fn poll_step(&mut self, cx: &mut Context<'_>) -> Poll<Result<Step, String>> {
+        let nargs = match &mut self.phase {
+            Phase::Fresh => unsafe { lua_gettop(self.lua_state) - 1 },
+            Phase::Awaiting(future) => {
+                match unsafe { future.as_mut().poll_push(cx, self.lua_state) } {
                     Poll::Pending => return Poll::Pending,
                     Poll::Ready(nargs) => nargs,
-                },
-            };
-            match unsafe { lua_resume(this.thread, nargs) } {
-                LUA_YIELD => {
-                    // C 函数已把 pending future 塞进 TLS 槽（yield_with），栈上无值可取
-                    let Some(fut) = PENDING_OP.with(|slot| slot.borrow_mut().take()) else {
-                        return Poll::Ready(Err(
-                            "coroutine yielded without a pending future".to_string()
-                        ));
-                    };
-                    this.phase = Phase::Awaiting(fut);
-                    if budget == 0 {
-                        cx.waker().wake_by_ref();
-                        return Poll::Pending;
-                    }
-                    budget -= 1;
-                    // loop 回顶部：同一轮 poll 里接上新的异步操作，sleep 链不经过调度器
-                }
-                0 => return Poll::Ready(Ok(())),
-                LUA_ERRRUN | LUA_ERRSYNTAX | LUA_ERRMEM | LUA_ERRERR => {
-                    return Poll::Ready(Err(unsafe { stack::err_message(this.thread) }));
-                }
-                status => {
-                    return Poll::Ready(Err(format!("lua_resume: unexpected status {status}")))
                 }
             }
+        };
+        // 已完成的异步操作先释放借用，再让 Lua 继续访问 userdata。
+        self.phase = Phase::Fresh;
+        match unsafe { lua_resume(self.lua_state, nargs) } {
+            LUA_YIELD => {
+                let Some(future) = PENDING_OP.with(|slot| slot.borrow_mut().take()) else {
+                    return Poll::Ready(Err(
+                        "coroutine yielded without a pending future".to_string()
+                    ));
+                };
+                self.phase = Phase::Awaiting(future);
+                Poll::Ready(Ok(Step::Yielded))
+            }
+            0 => Poll::Ready(Ok(Step::Finished)),
+            LUA_ERRRUN | LUA_ERRSYNTAX | LUA_ERRMEM | LUA_ERRERR => {
+                Poll::Ready(Err(unsafe { stack::err_message(self.lua_state) }))
+            }
+            status => Poll::Ready(Err(format!("lua_resume: unexpected status {status}"))),
         }
+    }
+
+    /// 锚点仍有效时转换返回值，调用方随后才可释放本执行状态。
+    pub(super) fn read_result<R: FromLua>(&self) -> Result<R, String> {
+        unsafe { R::from_lua(self.lua_state, 1) }
     }
 }
 
@@ -167,6 +148,7 @@ mod tests {
     use super::*;
     use crate::userdata::{FromLua, Nil};
     use std::cell::Cell;
+    use std::rc::Rc;
     use std::task::Waker;
 
     #[test]

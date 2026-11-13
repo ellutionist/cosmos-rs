@@ -16,7 +16,7 @@
 
 ```
 cosmos-rs/
-  cosmos/            # 运行时 + 桥接层：machine / ffi / userdata / coroutine / stack / libs / builtin
+  cosmos/            # 运行时 + 桥接层：machine / ffi / userdata / light_thread / stack / libs / builtin
   cosmos-macros/     # #[userdata]、#[derive(FromLua/PushLua)]，生成全部 trampoline
   cosmos-network/    # 功能模块：tcp/{stream,tls} / http / websocket + bridge.rs（叶子转换）
   Cargo.toml         # 虚拟 workspace，默认成员为 cosmos-cli
@@ -52,7 +52,7 @@ cosmos-rs/
   `tcp/mod.rs`、`tcp/stream.rs`、`tcp/tls.rs` 及 `websocket/mod.rs`、`websocket/conn.rs`，
   Rust 引用同步更新，Lua require 路径保持原样；目录整理已提交为 `6c0067a`。
 
-- 本次命名整理提交：`Thread` → `LightThread`，`thread.rs` → `light_thread.rs`；当前 Rust 模块为 `cosmos::builtin::light_thread`，Lua 类型表为 `cosmos.LightThread`。
+- 本次命名整理提交：`Thread` → `LightThread`，`thread.rs` → `light_thread.rs`；当前统一类型为 `cosmos::LightThread`（模块 `cosmos::light_thread`），Lua 类型表为 `cosmos.LightThread`。
 - Lua 状态指针（含宏生成代码）已从 `L` 改为 `lua_state`，未使用参数为 `_lua_state`。
 - 其余 Clippy 诊断已修复，公开裸指针桥接 API 已明确 unsafe 契约；严格 Clippy、构建、15 项测试和 examples 通过。
 
@@ -115,9 +115,9 @@ lua_close(self.lua_state.as_ptr());
 ```
 
 执行结束或报错不会关闭 VM，全局状态和后台任务保留到后续执行；Machine 销毁时才关闭。
-RegistryRef 为每次 VM 生命周期保留独立存活标记，供 LuaValue、LuaFunction、字符串锚点与 LuaCoroutine 共用，
+RegistryRef 为每次 VM 生命周期保留独立存活标记，供 LuaValue、LuaFunction、字符串锚点与轻线程执行状态共用，
 关闭一个 VM 不影响另一个 VM，即使主状态地址被复用也不会误操作新 VM。
-LuaCoroutine 先释放挂起 Future 中的借用守卫，再解除协程锚定，统一使用所属主状态 unref。
+LightThread 的执行守卫先释放挂起 Future 中的借用，再解除协程锚定并发布完成结果，统一使用所属主状态 unref。
 
 ### 4.4 Machine 嵌入与插件
 
@@ -166,6 +166,23 @@ local response, err = client:request("GET", url, {
 - 最后一个 client/请求句柄释放后，池及空闲连接随之回收；默认 TLS 配置仍可共享，但不保留连接池。
 - 连接池配置为空闲超时 30 秒、每 host 最多 32 条空闲连接，并显式安装 TokioTimer 使空闲超时生效。
 
+### 4.6 统一轻线程及内部职责
+
+- 主脚本、同步定义、LuaFunction 回调和后台 Lua 子任务统一使用 LightThread；删除独立的 LuaCoroutine。
+- 私有 Execution 持有 Lua 状态指针、挂起操作和 registry 锚点，每步最多恢复一次 Lua；
+  它不实现 Future，不独立调度。Control 只管理取消、唯一完成结果与等待者，不持有 Lua 指针。
+- run 构造 Future 时就取走 Execution，由执行守卫独占；多次 run 会返回错误，未首次 poll 就 drop 也会取消并释放锚点。
+  不跨 lua_resume 或 await 借用共享 RefCell，每次恢复前检查取消，每轮最多 256 次恢复后让出调度。
+- Machine 与类型化回调直接驱动 run，不额外创建 Tokio 任务；cosmos.thread.spawn 才提交后台 LocalSet 任务。
+  返回值在锚点有效时经 FromLua 读取，再释放执行资源、保存结果并唤醒等待者。
+- join 使用拥有型克隆句柄，支持同一任务的并发 join 与 kill；join/wait 不消耗结果，可重复观察成功、错误或取消。
+  wait 未选中的任务仍可继续 wait，取消等待者或参数解析失败均不影响其他观察者。
+- 不再用 JoinHandle + oneshot 重复保存 Lua 任务结果；Control 按需登记 waker，等待 Future 被取消时注销自己的通知。
+  kill 请求取消并唤醒执行者，完成后幂等；不会抢占正在运行的同步 Lua 代码，也不会因句柄 GC 而取消后台任务。
+- Machine/CLI 退出语义保持不变：主协程结束则 exec 返回，保留 Machine 可继续执行；Machine drop 先回收 LocalSet 再关闭 VM。
+- 分配变化：统一共享状态增加一个 Rc 状态分配，直接执行不增加 Tokio 任务；后台任务去掉 oneshot，等待登记按需分配。
+  异步操作仍只装箱 Future 本身，原生返回值继续共用 PushLua，不增加返回值闭包装箱。
+
 ## 5. 本轮完成：统一 `PushLua`
 
 - 删除 `IntoOutput` trait、derive、全部 impl，以及 `AsyncOutput` 枚举。
@@ -203,7 +220,8 @@ local response, err = client:request("GET", url, {
 ### 内建模块初始化
 
 - Rust 布局：`builtin/mod.rs` 负责启动，`builtin/time.rs` 负责时间函数，
-  `builtin/light_thread.rs` 负责轻线程，`builtin/sync/` 负责同步原语；底层 `LuaCoroutine` 留在 `coroutine.rs`。
+  `builtin/light_thread.rs` 只适配轻线程的 Lua 接口，`builtin/sync/` 负责同步原语；
+  统一执行类型位于 `light_thread/`，不再存在独立的 LuaCoroutine。
 - Machine 初始化顺序：`luaL_newstate` → `userdata::init` → `luaL_openlibs` → `builtin::open`。
   宿主随后 add_module(Network) 并按需注册自定义类型；CLI 不注册示例类型。
   `builtin::open` 自行注册 LightThread，宿主不再单独调用线程注册函数。
@@ -281,10 +299,12 @@ assert(err == nil, err)
 | `cosmos/src/ffi.rs` | LuaJIT C API 声明（唯一 FFI 声明处） |
 | `cosmos/src/machine.rs` | Machine/Module、安全嵌入 API、Handle 注入、LocalSet 与 VM 生命周期 |
 | `cosmos/src/userdata.rs` | 桥接核心：`UserData`/`PushLua`/`FromLua`、userdata 存放与 GC、类型化 `LuaFunction::call`、fallible userdata 借用、`Nil`/`LuaStrMap`/`LuaValue`、derive 单元测试 |
-| `cosmos/src/coroutine.rs` | `LuaCoroutine`（Future）、`PendingOp`/`PendingFuture`、TLS yield 通道、`yield_with` |
+| `cosmos/src/light_thread/mod.rs` | 统一 LightThread、唯一执行权、直接/后台调度与执行守卫 |
+| `cosmos/src/light_thread/execution.rs` | 私有 Lua 执行状态机、锚点、结果读取、PendingOp 与 TLS yield 协议；不实现 Future |
+| `cosmos/src/light_thread/control.rs` | 私有取消请求、最终结果与等待者通知，不接触 Lua 或 Tokio |
 | `cosmos/src/builtin/mod.rs` | time/thread 内建功能统一初始化与 LightThread 类型注册 |
 | `cosmos/src/builtin/time.rs` | 声明 cosmos.time 模块，sleep、now_ms、now_us 通过宏生成桥接 |
-| `cosmos/src/builtin/light_thread.rs` | `LightThread` 句柄、spawn/wait/join/kill |
+| `cosmos/src/builtin/light_thread.rs` | Lua spawn/wait/join/kill 参数与结果桥接、类型注册，不定义第二个线程实体 |
 | `cosmos/src/builtin/sync/` | channel、notify、semaphore、mutex 及统一超时转换；mod.rs 只注册类型，模块表由声明路径自动生成 |
 | `cosmos/src/libs.rs` | 内嵌 Lua 源码加载工具 |
 | `cosmos/src/stack.rs` | 栈辅助：`err_message`、`abs_index` |
@@ -325,7 +345,7 @@ cargo run -p cosmos-network --example machine                    # 多线程 Run
 (./target/debug/cosmos-cli examples/tls_server.lua 19443 &) ; sleep 1
 ./target/debug/cosmos-cli examples/tls_client.lua 19443     # OK
 
-cargo test --workspace  # 29 项测试及 Machine !Send 编译失败用例通过
+cargo test --workspace  # 32 项测试及 Machine/LightThread 的 2 项 !Send 编译失败用例通过
 ```
 
 ## 8. 坑与注意事项

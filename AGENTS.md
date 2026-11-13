@@ -24,7 +24,7 @@
 
 允许出现裸 FFI 的位置仅限：
 
-- cosmos 的运行时/桥接层（`ffi` / `userdata` / `coroutine` / `stack` / `libs` / `builtin` / `machine`
+- cosmos 的运行时/桥接层（`ffi` / `userdata` / `light_thread` / `stack` / `libs` / `builtin` / `machine`
   以及 `#[cosmos::userdata]` 生成的 trampoline）；
 - `cosmos-network/src/bridge.rs`：只放无法下沉到 cosmos 的叶子转换
   （如 `Bytes` ↔ Lua 字符串）、C 闭包 trampoline 与类型注册；
@@ -43,6 +43,8 @@
   （Lua 协程 `!Send`，网络任务与协程在同一线程交错推进）。
 - `Machine` 注入 Tokio `Handle`，不接管 Runtime 所有权；宿主须在注入的 Runtime 上 await 执行 API。
   Runtime 可为多线程，Lua 及持有 Lua 引用的任务仍由 Machine 的 LocalSet 固定在宿主线程。
+- Lua 执行统一使用 `LightThread`；私有 Execution 负责栈与挂起操作，Control 负责取消与完成通知，
+  builtin 只适配 Lua 接口。执行状态不实现独立 Future，不在 lua_resume 期间借用共享 RefCell。
 - 插件实现 `Module` 并通过 `Machine::add_module` 注入；注册在该 Machine 的 Runtime/LocalSet 上下文同步执行。
 - 不做死抽象：公共层只在有明确复用点（至少两个使用方）时抽取，
   避免无意义的包装函数。
