@@ -60,4 +60,34 @@ assert(d2 == nil and cerr == "closed" and cpartial == "hi",
         tostring(d2), tostring(cerr), tostring(cpartial)))
 print("premature close ok, partial:", cpartial)
 
+-- 已关闭后再调用：不 panic，reader/writer 各自返回 nil, "closed"
+r2:close()
+local cd, ce = r2:receive(1)
+assert(cd == nil and ce == "closed", "closed reader: " .. tostring(ce))
+local wd, we = w2:write("x")
+assert(wd == nil and we == "closed", "closed writer: " .. tostring(we))
+print("close-after-close ok")
+
+-- settimeout：无数据 → nil, "timeout"，且连接不关闭
+local conn3 = assert(Tcp.connect("127.0.0.1", port))
+conn3:settimeout(100) -- split 时传给 reader/writer
+local r3, w3 = conn3:split()
+local td, terr, tpartial = r3:receive(10)
+assert(td == nil and terr == "timeout" and tpartial == "",
+    string.format("receive timeout: d=%s err=%s partial=%s",
+        tostring(td), tostring(terr), tostring(tpartial)))
+
+-- *l 超时：已读到的残行作为 partial 交回
+w3:write("half")
+local ld, lerr, lpartial = r3:receive("*l")
+assert(ld == nil and lerr == "timeout" and lpartial == "half",
+    string.format("line timeout: d=%s err=%s partial=%s",
+        tostring(ld), tostring(lerr), tostring(lpartial)))
+
+-- 超时不清连接：之后读写照常
+w3:write("still alive\n")
+assert(r3:receive("*l") == "still alive", "conn unusable after timeout")
+r3:settimeout(0) -- 清除超时
+print("timeout ok")
+
 print("OK")

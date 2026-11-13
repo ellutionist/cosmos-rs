@@ -8,14 +8,20 @@
 //!   receive("*a")  读到 EOF（EOF 是正常终止，返回全部数据）
 //!   receive("*l")  读一行（去 \n、忽略 \r），干净 EOF 返回 nil，提前关闭返回 nil,"closed",partial
 //!   receive(n)     读精确 n 字节，提前关闭返回 nil,"closed",partial
-//! 统一三值协议：data, err, partial
+//! 三值协议：data, err, partial，err 取 "closed" / "timeout"。
+//! settimeout(ms) 对齐 OpenResty；ms <= 0 清除超时，超时不关闭连接。
+//! write 用 write_all 保证整块写完（不会因部分写而返回短长度）。
+//! 关闭后的 reader/writer 再调用不 panic：receive 返回 nil,"closed"，write 返回 nil,"closed"。
 
 use std::cell::Cell;
+use std::future::Future;
 use std::rc::Rc;
+use std::time::Duration;
 
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::TcpStream;
+use tokio::time::Instant;
 
 use cosmos::coroutine::AsyncOutput;
 use cosmos::ffi::{
@@ -23,6 +29,23 @@ use cosmos::ffi::{
     LUA_TNUMBER, LUA_TSTRING,
 };
 use cosmos::userdata::{FromLua, IntoOutput, LuaStr};
+
+/// 可选 deadline 包裹一个 future：Some 时到点返回 Err(())（调用方转成 "timeout"），
+/// None 时无限等待。用于 settimeout 生效后的各读写点。
+async fn with_deadline<F, T>(deadline: Option<Instant>, fut: F) -> Result<T, ()>
+where
+    F: Future<Output = T>,
+{
+    match deadline {
+        Some(d) => tokio::time::timeout_at(d, fut).await.map_err(|_| ()),
+        None => Ok(fut.await),
+    }
+}
+
+/// settimeout 的毫秒参数：<= 0 表示清除超时（None）
+fn timeout_from_ms(ms: i64) -> Option<Duration> {
+    (ms > 0).then(|| Duration::from_millis(ms as u64))
+}
 
 /// 连接状态（Lua 侧 state() 返回对应的整数）
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -43,6 +66,7 @@ impl Tcp {
             Ok(stream) => Ok(TcpConn {
                 stream: Some(stream),
                 state: Rc::new(Cell::new(State::Connected)),
+                timeout: None,
             }),
             Err(e) => Err(e.to_string()),
         }
@@ -52,12 +76,19 @@ impl Tcp {
 pub struct TcpConn {
     stream: Option<TcpStream>,
     state: Rc<Cell<State>>,
+    /// 读写超时；split 时传递给 reader/writer（对齐 OpenResty settimeout）
+    timeout: Option<Duration>,
 }
 
 #[cosmos::userdata]
 impl TcpConn {
     fn state(&self) -> i64 {
         self.state.get() as i64
+    }
+
+    /// 设置读写超时（毫秒）；ms <= 0 表示不超时
+    fn settimeout(&mut self, ms: i64) {
+        self.timeout = timeout_from_ms(ms);
     }
 
     /// 拆成 reader/writer 两个 userdata（共享连接状态），
@@ -70,10 +101,12 @@ impl TcpConn {
                 inner: Some(BufReader::new(r)),
                 state: self.state.clone(),
                 buf: Vec::new(),
+                timeout: self.timeout,
             },
             TcpWriter {
                 inner: Some(w),
                 state: self.state.clone(),
+                timeout: self.timeout,
             },
         )
     }
@@ -115,6 +148,7 @@ pub enum ReceiveOutcome {
     Data(Vec<u8>),           // 1 值：数据（原始字节）
     Eof,                     // 1 值：nil（干净关闭）
     Closed(Vec<u8>),         // 3 值：nil, "closed", partial
+    Timeout(Vec<u8>),        // 3 值：nil, "timeout", partial
     Error(String, Vec<u8>),  // 3 值：nil, err, partial
 }
 
@@ -136,6 +170,12 @@ impl IntoOutput for ReceiveOutcome {
                 lua_pushlstring(L, partial.as_ptr() as *const c_char, partial.len());
                 3
             })),
+            ReceiveOutcome::Timeout(partial) => AsyncOutput::Custom(Box::new(move |L| unsafe {
+                lua_pushnil(L);
+                lua_pushlstring(L, c"timeout".as_ptr(), 7);
+                lua_pushlstring(L, partial.as_ptr() as *const c_char, partial.len());
+                3
+            })),
             ReceiveOutcome::Error(msg, partial) => AsyncOutput::Custom(Box::new(move |L| unsafe {
                 lua_pushnil(L);
                 lua_pushlstring(L, msg.as_ptr() as *const c_char, msg.len());
@@ -151,6 +191,7 @@ pub struct TcpReader {
     state: Rc<Cell<State>>,
     /// 内置读缓冲：随数据增长，每次 receive 复用，读完 mem::take 零拷贝移出
     buf: Vec<u8>,
+    timeout: Option<Duration>,
 }
 
 #[cosmos::userdata]
@@ -159,33 +200,45 @@ impl TcpReader {
         self.state.get() as i64
     }
 
+    /// 设置读超时（毫秒）；ms <= 0 表示不超时
+    fn settimeout(&mut self, ms: i64) {
+        self.timeout = timeout_from_ms(ms);
+    }
+
     /// 对齐 OpenResty tcpsock:receive：local data, err, partial = reader:receive(pattern)
     async fn receive(&mut self, pattern: ReceivePattern) -> ReceiveOutcome {
-        let inner = self.inner.as_mut().expect("reader already closed");
+        // 已关闭：不再 panic，按 closed 协议返回
+        let Some(inner) = self.inner.as_mut() else {
+            return ReceiveOutcome::Closed(Vec::new());
+        };
+        // 每次 receive 一个 deadline（绝对时刻），Size 模式多次 read 共用同一 deadline
+        let deadline = self.timeout.map(|d| Instant::now() + d);
         match pattern {
             ReceivePattern::All => {
                 self.buf.clear();
-                match inner.read_to_end(&mut self.buf).await {
-                    Ok(_) => {
+                match with_deadline(deadline, inner.read_to_end(&mut self.buf)).await {
+                    Ok(Ok(_)) => {
                         // EOF 是 *a 的正常终止
                         self.state.set(State::Closed);
                         ReceiveOutcome::Data(std::mem::take(&mut self.buf))
                     }
-                    Err(e) => {
+                    Ok(Err(e)) => {
                         self.state.set(State::Closed);
                         ReceiveOutcome::Error(e.to_string(), std::mem::take(&mut self.buf))
                     }
+                    // 超时不断连接，已读部分作为 partial 交回
+                    Err(()) => ReceiveOutcome::Timeout(std::mem::take(&mut self.buf)),
                 }
             }
             ReceivePattern::Line => {
                 self.buf.clear();
-                match inner.read_until(b'\n', &mut self.buf).await {
-                    Ok(0) => {
+                match with_deadline(deadline, inner.read_until(b'\n', &mut self.buf)).await {
+                    Ok(Ok(0)) => {
                         // 干净 EOF：无数据可读
                         self.state.set(State::Closed);
                         ReceiveOutcome::Eof
                     }
-                    Ok(_) => {
+                    Ok(Ok(_)) => {
                         if self.buf.last() == Some(&b'\n') {
                             self.buf.pop();
                             self.buf.retain(|&b| b != b'\r'); // OpenResty：所有 CR 忽略
@@ -196,10 +249,11 @@ impl TcpReader {
                             ReceiveOutcome::Closed(std::mem::take(&mut self.buf))
                         }
                     }
-                    Err(e) => {
+                    Ok(Err(e)) => {
                         self.state.set(State::Closed);
                         ReceiveOutcome::Error(e.to_string(), std::mem::take(&mut self.buf))
                     }
+                    Err(()) => ReceiveOutcome::Timeout(std::mem::take(&mut self.buf)),
                 }
             }
             ReceivePattern::Size(n) => {
@@ -207,20 +261,24 @@ impl TcpReader {
                 self.buf.resize(n, 0); // 用时扩展
                 let mut filled = 0usize;
                 while filled < n {
-                    match inner.read(&mut self.buf[filled..]).await {
+                    match read_chunk(deadline, inner, &mut self.buf[filled..]).await {
                         Ok(0) => {
                             self.state.set(State::Closed);
                             self.buf.truncate(filled);
                             return ReceiveOutcome::Closed(std::mem::take(&mut self.buf));
                         }
                         Ok(nread) => filled += nread,
-                        Err(e) => {
+                        Err(ChunkError::Io(e)) => {
                             self.state.set(State::Closed);
                             self.buf.truncate(filled);
                             return ReceiveOutcome::Error(
                                 e.to_string(),
                                 std::mem::take(&mut self.buf),
                             );
+                        }
+                        Err(ChunkError::Timeout) => {
+                            self.buf.truncate(filled);
+                            return ReceiveOutcome::Timeout(std::mem::take(&mut self.buf));
                         }
                     }
                 }
@@ -235,9 +293,28 @@ impl TcpReader {
     }
 }
 
+enum ChunkError {
+    Io(std::io::Error),
+    Timeout,
+}
+
+/// 单次 read，带可选 deadline；Size 模式攒够 n 字节前反复调用（共用同一 deadline）
+async fn read_chunk(
+    deadline: Option<Instant>,
+    inner: &mut BufReader<OwnedReadHalf>,
+    buf: &mut [u8],
+) -> Result<usize, ChunkError> {
+    match with_deadline(deadline, inner.read(buf)).await {
+        Ok(Ok(n)) => Ok(n),
+        Ok(Err(e)) => Err(ChunkError::Io(e)),
+        Err(()) => Err(ChunkError::Timeout),
+    }
+}
+
 pub struct TcpWriter {
     inner: Option<OwnedWriteHalf>,
     state: Rc<Cell<State>>,
+    timeout: Option<Duration>,
 }
 
 #[cosmos::userdata]
@@ -246,16 +323,27 @@ impl TcpWriter {
         self.state.get() as i64
     }
 
-    /// 写一块数据，返回实际写入字节数；出错返回 nil + 错误串并置状态 Closed。
+    /// 设置写超时（毫秒）；ms <= 0 表示不超时
+    fn settimeout(&mut self, ms: i64) {
+        self.timeout = timeout_from_ms(ms);
+    }
+
+    /// 整块写完（write_all），返回写入字节数；出错/超时返回 nil + 错误串。
     /// data 用 LuaStr：短串拷贝、长串锚定（见 cosmos::userdata::LuaStr）
     async fn write(&mut self, data: LuaStr) -> Result<i64, String> {
-        let inner = self.inner.as_mut().expect("writer already closed");
-        match inner.write(data.as_bytes()).await {
-            Ok(n) => Ok(n as i64),
-            Err(e) => {
+        let Some(inner) = self.inner.as_mut() else {
+            return Err("closed".to_string());
+        };
+        let bytes = data.as_bytes();
+        let deadline = self.timeout.map(|d| Instant::now() + d);
+        match with_deadline(deadline, inner.write_all(bytes)).await {
+            Ok(Ok(())) => Ok(bytes.len() as i64),
+            Ok(Err(e)) => {
                 self.state.set(State::Closed);
                 Err(e.to_string())
             }
+            // 超时不断连接：write_all 未完成的部分可能已部分写出
+            Err(()) => Err("timeout".to_string()),
         }
     }
 
