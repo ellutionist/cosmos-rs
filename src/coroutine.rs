@@ -1,5 +1,8 @@
+use std::cell::RefCell;
 use std::future::Future;
+use std::marker::PhantomData;
 use std::pin::Pin;
+use std::rc::Rc;
 use std::task::{Context, Poll};
 
 use libc::{c_char, c_int};
@@ -45,40 +48,40 @@ impl Output {
     }
 }
 
-/// 挂起异步操作的瘦指针载体。
-/// Box<dyn Future> 是胖指针（数据地址+vtable），lightuserdata 只能携带一个机器字，
-/// 所以用 Sized 包装跨过 FFI 边界。
-///
-/// 外层 Box<Op>（PendingOp）的职责是所有权跨 yield 边界移交：C 函数的栈帧在
-/// yield 时被整个抛弃，Op 必须存活在堆上，所有权经 Box::into_raw 编码成裸指针、
-/// 由 lightuserdata 携带，poll 侧 Box::from_raw 取回（见 LuaCoroutine::poll）。
-///
-/// 后续压分配的候选方案：
-/// - 池化 Box<Op>：yield 时从 free-list 取盒、from_raw 取回时还盒，通道协议不变
-/// - thread-local 槽：C 函数把 Op 塞进 TLS、poll 侧取回，省掉指针通道，
-///   但重新引入 TLS 依赖且绑定单线程 runtime（多线程下协程迁移会取错槽）
-pub struct Op {
-    fut: Pin<Box<dyn Future<Output = Output> + Send>>,
-}
-
-impl Op {
-    pub fn new(fut: Pin<Box<dyn Future<Output = Output> + Send>>) -> Self {
-        Self { fut }
-    }
-}
-
 /// 协程挂起期间等待的异步操作
-pub type PendingOp = Box<Op>;
+pub type PendingFuture = Pin<Box<dyn Future<Output = Output> + Send>>;
+
+// yield 通道：C 函数把 PendingFuture 塞进 TLS 槽再 lua_yield(L, 0)，
+// 同一线程上的 poll 侧从槽里取回（见 yield_with / LuaCoroutine::poll）。
+//
+// 相比 lightuserdata + Box::into_raw 的堆指针通道，每次 yield 少一次分配，
+// 代价是绑定单线程 runtime：写槽和取槽必须发生在同一条线程上。
+// lua_State 本身线程亲和，LuaCoroutine 的 !Send（PhantomData<Rc<()>>）
+// 在类型层面保证 future 不会跨线程迁移。
+thread_local! {
+    static PENDING_OP: RefCell<Option<PendingFuture>> = const { RefCell::new(None) };
+}
+
+/// C 函数侧协议：op 进槽 + yield 0 个值（结果等 resume 时再由 poll 侧压栈）。
+/// lua_yield 的返回值必须作为 C 函数返回值交给 VM
+/// （5.1 语义：常规 yield 路径返回 -1 即 LUA_YIELD，不 longjmp）
+pub fn yield_with(L: *mut lua_State, fut: PendingFuture) -> c_int {
+    PENDING_OP.with(|slot| {
+        debug_assert!(slot.borrow().is_none(), "previous pending op was not taken");
+        *slot.borrow_mut() = Some(fut);
+    });
+    unsafe { lua_yield(L, 0) }
+}
 
 /// 单次 poll 内最多恢复协程的次数，防止 Lua 侧连续 yield 饿死调度器
 const RESUME_BUDGET: u32 = 256;
 
 /// 协程 future 的两个阶段，决定本轮 resume 的 nargs 从哪来：
 /// - Fresh：协程从未启动，初始参数在栈上，nargs = gettop - 1
-/// - Awaiting(op)：挂起的异步操作，完成后其结果压栈，nargs = 压栈个数
+/// - Awaiting(fut)：挂起的异步操作，完成后其结果压栈，nargs = 压栈个数
 enum Phase {
     Fresh,
-    Awaiting(PendingOp),
+    Awaiting(PendingFuture),
 }
 
 /// 每个 Lua 协程绑定一个 future：
@@ -89,6 +92,10 @@ pub struct LuaCoroutine {
     thread: *mut lua_State,
     phase: Phase,
     registry_ref: i32,
+    // lua_State 线程亲和 + TLS 通道要求 future 留在 yield 发生的那条线程上：
+    // Rc 使本类型 !Send，多线程 runtime 下会在编译期被 spawn 拒绝，
+    // 而不是运行期取错槽
+    _not_send: PhantomData<Rc<()>>,
 }
 
 impl LuaCoroutine {
@@ -101,6 +108,7 @@ impl LuaCoroutine {
             thread,
             phase: Phase::Fresh,
             registry_ref: luaL_ref(g, LUA_REGISTRYINDEX),
+            _not_send: PhantomData,
         }
     }
 }
@@ -125,23 +133,21 @@ impl Future for LuaCoroutine {
                 Phase::Fresh => unsafe { lua_gettop(this.thread) - 1 },
                 // 关键接线：内层 future 拿到的是外层 cx 的 waker，
                 // 事件（timer/epoll）到来时唤醒的就是本 future 所在的 task。
-                // Pending 时 op 留在枚举里原地保存（future 在堆上，pinning 不变）
-                Phase::Awaiting(op) => match op.fut.as_mut().poll(cx) {
+                // Pending 时 future 留在枚举里原地保存（堆上，pinning 不变）
+                Phase::Awaiting(fut) => match fut.as_mut().poll(cx) {
                     Poll::Pending => return Poll::Pending,
                     Poll::Ready(out) => out.into_lua(this.thread),
                 },
             };
             match unsafe { lua_resume(this.thread, nargs) } {
                 LUA_YIELD => {
-                    // C 函数把 Box<PendingOp> 指针作为 lightuserdata yield 出来，从栈上取回
-                    let p = unsafe { lua_touserdata(this.thread, -1) };
-                    unsafe { lua_settop(this.thread, -2) }; // lua_pop 在 LuaJIT 里是宏，用 settop 弹栈
-                    if p.is_null() {
+                    // C 函数已把 pending future 塞进 TLS 槽（yield_with），栈上无值可取
+                    let Some(fut) = PENDING_OP.with(|slot| slot.borrow_mut().take()) else {
                         return Poll::Ready(Err(
                             "coroutine yielded without a pending future".to_string()
                         ));
-                    }
-                    this.phase = Phase::Awaiting(unsafe { Box::from_raw(p as *mut Op) });
+                    };
+                    this.phase = Phase::Awaiting(fut);
                     if budget == 0 {
                         cx.waker().wake_by_ref();
                         return Poll::Pending;

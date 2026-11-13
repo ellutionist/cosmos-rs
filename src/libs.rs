@@ -1,9 +1,9 @@
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
-use crate::coroutine::{Op, Output};
+use crate::coroutine::{yield_with, Output};
 use crate::ffi::*;
-use libc::{c_char, c_int, c_void};
+use libc::{c_char, c_int};
 
 // lua_error 是 longjmp，返回值仅用于满足签名
 unsafe fn raise(L: *mut lua_State, msg: &str) -> c_int {
@@ -21,16 +21,15 @@ unsafe extern "C" fn sleep_impl(L: *mut lua_State) -> c_int {
         return raise(L, &format!("sleep: invalid duration {ms}"));
     }
 
-    // 异步操作装箱后把指针作为 lightuserdata yield 出去，
-    // 由绑定的 LuaCoroutine future 取出并 poll（见 coroutine.rs）
-    let op = Box::new(Op::new(Box::pin(async move {
+    // 异步操作塞进 TLS 槽后 yield，由绑定的 LuaCoroutine future 取出并 poll（见 coroutine.rs）
+    // 优化：改为每协程复用一个 tokio::time::Sleep（reset 到期时间），省掉 wheel entry 分配
+    let fut = Box::pin(async move {
         tokio::time::sleep(Duration::from_secs_f64(ms / 1000.0)).await;
         Output::Nil
-    })));
-    lua_pushlightuserdata(L, Box::into_raw(op) as *mut c_void);
+    });
     // 5.1 语义：lua_yield 返回 -1（= LUA_YIELD），必须作为 C 函数的返回值交给 VM，
     // VM 据此让 lua_resume 返回 LUA_YIELD（常规 yield 路径不长跳转）
-    lua_yield(L, 1)
+    yield_with(L, fut)
 }
 
 static START: OnceLock<Instant> = OnceLock::new();

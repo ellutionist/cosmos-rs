@@ -35,11 +35,8 @@ extern "C" {
     pub fn lua_pushboolean(L: *mut lua_State, b: c_int);
     pub fn lua_pushlstring(L: *mut lua_State, s: *const c_char, len: size_t);
     pub fn lua_pushcclosure(L: *mut lua_State, f: lua_CFunction, n: c_int);
-    pub fn lua_pushlightuserdata(L: *mut lua_State, p: *mut c_void);
     pub fn lua_createtable(L: *mut lua_State, narr: c_int, nrec: c_int);
     pub fn lua_setfield(L: *mut lua_State, idx: c_int, k: *const c_char);
-    pub fn lua_settop(L: *mut lua_State, idx: c_int);
-    pub fn lua_touserdata(L: *mut lua_State, idx: c_int) -> *mut c_void;
     pub fn luaL_ref(L: *mut lua_State, t: c_int) -> c_int;
     pub fn luaL_unref(L: *mut lua_State, t: c_int, ref_: c_int);
     pub fn lua_error(L: *mut lua_State) -> c_int;
