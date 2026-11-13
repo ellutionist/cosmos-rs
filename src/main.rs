@@ -33,12 +33,20 @@ fn main() {
 
     // LocalSet：cosmos.thread.spawn 产生的 LuaCoroutine 是 !Send，只能跑在本地任务集上
     let local = tokio::task::LocalSet::new();
-    match local.block_on(&rt, run(&code, &script_args)) {
-        Ok(()) => {}
-        Err(msg) => {
-            eprintln!("lua error: {msg}");
-            std::process::exit(1);
+    let (L, result) = local.block_on(&rt, run(&code, &script_args));
+    // 脚本结束后 LocalSet 里仍可能挂着未完成的本地任务（协程里阻塞在网络读、
+    // 服务端 ws handler 卡在 receive 等），它们持有 Lua userdata 的 RefCell 守卫。
+    // 必须先回收这些任务再 lua_close：否则守卫 Drop 时读写的是已释放的 VM 内存
+    drop(local);
+    if !L.is_null() {
+        unsafe {
+            userdata::cleanup(L);
+            lua_close(L);
         }
+    }
+    if let Err(msg) = result {
+        eprintln!("lua error: {msg}");
+        std::process::exit(1);
     }
 }
 
@@ -119,11 +127,16 @@ async fn tls_echo_server(port: u16) {
     }
 }
 
-async fn run(code: &str, args: &[String]) -> Result<(), String> {
+/// 建 VM 并执行脚本；返回状态指针与结果——VM 的关闭交给 main，
+/// 以便在 lua_close 之前先回收 LocalSet 里挂起的本地任务
+async fn run(code: &str, args: &[String]) -> (*mut lua_State, Result<(), String>) {
     unsafe {
         let L = luaL_newstate();
         if L.is_null() {
-            return Err("failed to create lua state".to_string());
+            return (
+                std::ptr::null_mut(),
+                Err("failed to create lua state".to_string()),
+            );
         }
         luaL_openlibs(L);
         libs::open_cosmos(L);
@@ -137,8 +150,7 @@ async fn run(code: &str, args: &[String]) -> Result<(), String> {
         // 必须在 userdata 注册之后执行，require("cosmos.X") 才拿得到 metatable
         for (name, src) in cosmos_network::LUA_SOURCES {
             if let Err(e) = libs::run_lua_source(L, name, src) {
-                lua_close(L);
-                return Err(e);
+                return (L, Err(e));
             }
         }
 
@@ -148,8 +160,7 @@ async fn run(code: &str, args: &[String]) -> Result<(), String> {
         let ccode = CString::new(code).unwrap();
         if luaL_loadstring(thread, ccode.as_ptr()) != 0 {
             let msg = stack::err_message(thread);
-            lua_close(L);
-            return Err(msg);
+            return (L, Err(msg));
         }
 
         // 初始参数：压在 chunk 函数之上，首次 resume 按 gettop - 1 传给脚本的 `...`
@@ -157,9 +168,6 @@ async fn run(code: &str, args: &[String]) -> Result<(), String> {
             lua_pushlstring(thread, arg.as_ptr() as *const cosmos::ffi::c_char, arg.len());
         }
 
-        let result = LuaCoroutine::new(L, thread).await;
-        userdata::cleanup(L);
-        lua_close(L);
-        result
+        (L, LuaCoroutine::new(L, thread).await)
     }
 }

@@ -30,9 +30,6 @@ use tokio_rustls::client::TlsStream as ClientTlsStream;
 use tokio_rustls::server::TlsStream as ServerTlsStream;
 use tokio_rustls::{TlsAcceptor, TlsConnector};
 
-use cosmos::ffi::lua_State;
-use cosmos::userdata::{check, FromLua};
-
 use crate::error::classify_io;
 use crate::tcp::{
     size_limit, timeout_from_ms, with_deadline, ReadSide, State, TcpReader, TcpWriter, WriteSide,
@@ -161,6 +158,26 @@ impl Tls {
             timeout: timeout_ms.and_then(timeout_from_ms),
         })
     }
+}
+
+/// 复制客户端配置并强制 ALPN（WebSocket 只跑 HTTP/1.1）
+pub(crate) fn with_alpn_client(config: Arc<ClientConfig>, alpn: &[&[u8]]) -> Arc<ClientConfig> {
+    if config.alpn_protocols.iter().map(|p| p.as_slice()).eq(alpn.iter().copied()) {
+        return config;
+    }
+    let mut cfg = (*config).clone();
+    cfg.alpn_protocols = alpn.iter().map(|p| p.to_vec()).collect();
+    Arc::new(cfg)
+}
+
+/// 复制服务端配置并强制 ALPN
+pub(crate) fn with_alpn_server(config: Arc<ServerConfig>, alpn: &[&[u8]]) -> Arc<ServerConfig> {
+    if config.alpn_protocols.iter().map(|p| p.as_slice()).eq(alpn.iter().copied()) {
+        return config;
+    }
+    let mut cfg = (*config).clone();
+    cfg.alpn_protocols = alpn.iter().map(|p| p.to_vec()).collect();
+    Arc::new(cfg)
 }
 
 /// 建立 TLS 客户端流（TCP + 握手共用一个 deadline）；Tls.connect 与 HTTP client 共用
@@ -353,7 +370,7 @@ impl TlsContext {
         Ok(())
     }
 
-    fn client_config(&mut self) -> Result<Arc<ClientConfig>, String> {
+    pub(crate) fn client_config(&mut self) -> Result<Arc<ClientConfig>, String> {
         if let Some(cfg) = &self.client_cfg {
             return Ok(cfg.clone());
         }
@@ -383,7 +400,7 @@ impl TlsContext {
         Ok(cfg)
     }
 
-    fn server_config(&mut self) -> Result<Arc<ServerConfig>, String> {
+    pub(crate) fn server_config(&mut self) -> Result<Arc<ServerConfig>, String> {
         if let Some(cfg) = &self.server_cfg {
             return Ok(cfg.clone());
         }
@@ -412,22 +429,8 @@ impl TlsContext {
 /// connect 的 ctx 参数：从 userdata 取（或懒构建）客户端配置快照
 pub(crate) struct ClientCfg(pub(crate) Arc<ClientConfig>);
 
-impl FromLua for ClientCfg {
-    unsafe fn from_lua(L: *mut lua_State, idx: i32) -> Result<Self, String> {
-        let mut ctx = check::<TlsContext>(L, idx);
-        ctx.client_config().map(ClientCfg)
-    }
-}
-
 /// listen 的 ctx 参数：同上，取服务端配置
 pub(crate) struct ServerCfg(pub(crate) Arc<ServerConfig>);
-
-impl FromLua for ServerCfg {
-    unsafe fn from_lua(L: *mut lua_State, idx: i32) -> Result<Self, String> {
-        let mut ctx = check::<TlsContext>(L, idx);
-        ctx.server_config().map(ServerCfg)
-    }
-}
 
 /// verify_none 用的空校验器：接受任意证书，但签名校验仍走 ring
 #[derive(Debug)]
@@ -623,11 +626,4 @@ fn to_pem(der: &[u8]) -> String {
     }
     out.push_str("-----END CERTIFICATE-----\n");
     out
-}
-
-pub unsafe fn register(L: *mut lua_State) {
-    cosmos::userdata::register::<Tls>(L);
-    cosmos::userdata::register::<TlsContext>(L);
-    cosmos::userdata::register::<TlsConn>(L);
-    cosmos::userdata::register::<TlsListener>(L);
 }

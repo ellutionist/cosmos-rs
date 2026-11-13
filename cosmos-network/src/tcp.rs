@@ -38,12 +38,7 @@ use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::TcpStream;
 use tokio::time::Instant;
 
-use cosmos::coroutine::AsyncOutput;
-use cosmos::ffi::{
-    c_char, c_int, lua_pushlstring, lua_pushnil, lua_State, lua_tointeger, lua_type,
-    LUA_TNUMBER, LUA_TSTRING,
-};
-use cosmos::userdata::{FromLua, IntoOutput, LuaStr, PushLua};
+use cosmos::userdata::{LuaStr, Nil};
 
 use crate::error::classify_io;
 use crate::tls::TlsIo;
@@ -255,75 +250,19 @@ pub enum ReceivePattern {
     Size(usize),  // 数字：精确 n 字节
 }
 
-impl FromLua for ReceivePattern {
-    unsafe fn from_lua(L: *mut lua_State, idx: c_int) -> Result<Self, String> {
-        match lua_type(L, idx) {
-            LUA_TNUMBER => Ok(ReceivePattern::Size(lua_tointeger(L, idx).max(0) as usize)),
-            LUA_TSTRING => {
-                let s = <String as FromLua>::from_lua(L, idx)?;
-                let pat = s.strip_prefix('*').unwrap_or(&s);
-                match pat {
-                    "a" => Ok(ReceivePattern::All),
-                    "l" => Ok(ReceivePattern::Line),
-                    "L" => Ok(ReceivePattern::LineKeep),
-                    _ => Err(format!(
-                        "unsupported receive pattern '{s}' (expected '*l', '*L', '*a' or a number)"
-                    )),
-                }
-            }
-            _ => Err(format!("argument {idx}: expected number or '*l'/'*L'/'*a'")),
-        }
-    }
-}
-
-/// receive 的结果：data, err, partial 三值协议（data/partial 为原始字节）
+/// receive 的结果：data, err, partial 三值协议（data/partial 为原始字节）。
+/// 每个变体的字段即 Lua 侧的返回值（按序压栈，由 derive 生成）：
+///   Data        → data
+///   Eof         → nil
+///   Closed/…    → nil, reason, partial
+#[derive(cosmos::IntoOutput)]
 pub enum ReceiveOutcome {
-    Data(Vec<u8>),           // 1 值：数据（原始字节）
-    Eof,                     // 1 值：nil（干净关闭）
-    Closed(Vec<u8>),         // 3 值：nil, "closed", partial
-    Timeout(Vec<u8>),        // 3 值：nil, "timeout", partial
-    Overflow(Vec<u8>),       // 3 值：nil, "buffer overflow", partial
-    Error(String, Vec<u8>),  // 3 值：nil, err, partial
-}
-
-impl IntoOutput for ReceiveOutcome {
-    fn into_output(self) -> AsyncOutput {
-        match self {
-            // 原始字节直接压栈（Lua 字符串是字节串，不做有损 UTF-8 转换）
-            ReceiveOutcome::Data(bytes) => AsyncOutput::Custom(Box::new(move |L| unsafe {
-                lua_pushlstring(L, bytes.as_ptr() as *const c_char, bytes.len());
-                1
-            })),
-            ReceiveOutcome::Eof => AsyncOutput::Custom(Box::new(move |L| unsafe {
-                lua_pushnil(L);
-                1
-            })),
-            ReceiveOutcome::Closed(partial) => AsyncOutput::Custom(Box::new(move |L| unsafe {
-                lua_pushnil(L);
-                lua_pushlstring(L, c"closed".as_ptr(), 6);
-                lua_pushlstring(L, partial.as_ptr() as *const c_char, partial.len());
-                3
-            })),
-            ReceiveOutcome::Timeout(partial) => AsyncOutput::Custom(Box::new(move |L| unsafe {
-                lua_pushnil(L);
-                lua_pushlstring(L, c"timeout".as_ptr(), 7);
-                lua_pushlstring(L, partial.as_ptr() as *const c_char, partial.len());
-                3
-            })),
-            ReceiveOutcome::Overflow(partial) => AsyncOutput::Custom(Box::new(move |L| unsafe {
-                lua_pushnil(L);
-                lua_pushlstring(L, c"buffer overflow".as_ptr(), 15);
-                lua_pushlstring(L, partial.as_ptr() as *const c_char, partial.len());
-                3
-            })),
-            ReceiveOutcome::Error(msg, partial) => AsyncOutput::Custom(Box::new(move |L| unsafe {
-                lua_pushnil(L);
-                lua_pushlstring(L, msg.as_ptr() as *const c_char, msg.len());
-                lua_pushlstring(L, partial.as_ptr() as *const c_char, partial.len());
-                3
-            })),
-        }
-    }
+    Data(Vec<u8>),
+    Eof(Nil),
+    Closed(Nil, &'static str, Vec<u8>),
+    Timeout(Nil, &'static str, Vec<u8>),
+    Overflow(Nil, &'static str, Vec<u8>),
+    Error(Nil, String, Vec<u8>),
 }
 
 pub struct TcpReader {
@@ -357,7 +296,7 @@ impl TcpReader {
     async fn receive(&mut self, pattern: Option<ReceivePattern>) -> ReceiveOutcome {
         // 已关闭：不再 panic，按 closed 协议返回
         let Some(inner) = self.inner.as_mut() else {
-            return ReceiveOutcome::Closed(Vec::new());
+            return ReceiveOutcome::Closed(Nil, "closed", Vec::new());
         };
         // 每次 receive 一个 deadline（绝对时刻），分块读取共用同一 deadline
         let deadline = self.timeout.map(|d| Instant::now() + d);
@@ -372,12 +311,13 @@ impl TcpReader {
                             Err(FillError::Io(e)) => {
                                 self.state.set(State::Closed);
                                 return ReceiveOutcome::Error(
+                                    Nil,
                                     classify_io(&e),
                                     std::mem::take(&mut self.buf),
                                 );
                             }
                             Err(FillError::Timeout) => {
-                                return ReceiveOutcome::Timeout(std::mem::take(&mut self.buf));
+                                return ReceiveOutcome::Timeout(Nil, "timeout", std::mem::take(&mut self.buf));
                             }
                         };
                         let got = avail.len();
@@ -393,7 +333,7 @@ impl TcpReader {
                     }
                     inner.consume(take);
                     if take < got {
-                        return ReceiveOutcome::Overflow(std::mem::take(&mut self.buf));
+                        return ReceiveOutcome::Overflow(Nil, "buffer overflow", std::mem::take(&mut self.buf));
                     }
                 }
             }
@@ -407,21 +347,22 @@ impl TcpReader {
                             Err(FillError::Io(e)) => {
                                 self.state.set(State::Closed);
                                 return ReceiveOutcome::Error(
+                                    Nil,
                                     classify_io(&e),
                                     std::mem::take(&mut self.buf),
                                 );
                             }
                             Err(FillError::Timeout) => {
-                                return ReceiveOutcome::Timeout(std::mem::take(&mut self.buf));
+                                return ReceiveOutcome::Timeout(Nil, "timeout", std::mem::take(&mut self.buf));
                             }
                         };
                         if avail.is_empty() {
                             // EOF：干净关闭返回 nil，残行按 closed 交回
                             self.state.set(State::Closed);
                             return if self.buf.is_empty() {
-                                ReceiveOutcome::Eof
+                                ReceiveOutcome::Eof(Nil)
                             } else {
-                                ReceiveOutcome::Closed(std::mem::take(&mut self.buf))
+                                ReceiveOutcome::Closed(Nil, "closed", std::mem::take(&mut self.buf))
                             };
                         }
                         let nl = avail.iter().position(|&b| b == b'\n');
@@ -446,7 +387,7 @@ impl TcpReader {
                         return ReceiveOutcome::Data(std::mem::take(&mut self.buf));
                     }
                     if allowed < need {
-                        return ReceiveOutcome::Overflow(std::mem::take(&mut self.buf));
+                        return ReceiveOutcome::Overflow(Nil, "buffer overflow", std::mem::take(&mut self.buf));
                     }
                 }
             }
@@ -459,20 +400,21 @@ impl TcpReader {
                         Ok(0) => {
                             self.state.set(State::Closed);
                             self.buf.truncate(filled);
-                            return ReceiveOutcome::Closed(std::mem::take(&mut self.buf));
+                            return ReceiveOutcome::Closed(Nil, "closed", std::mem::take(&mut self.buf));
                         }
                         Ok(nread) => filled += nread,
                         Err(ChunkError::Io(e)) => {
                             self.state.set(State::Closed);
                             self.buf.truncate(filled);
                             return ReceiveOutcome::Error(
+                                Nil,
                                 classify_io(&e),
                                 std::mem::take(&mut self.buf),
                             );
                         }
                         Err(ChunkError::Timeout) => {
                             self.buf.truncate(filled);
-                            return ReceiveOutcome::Timeout(std::mem::take(&mut self.buf));
+                            return ReceiveOutcome::Timeout(Nil, "timeout", std::mem::take(&mut self.buf));
                         }
                     }
                 }
@@ -525,39 +467,14 @@ impl TcpUntil {}
 
 /// 迭代器返回值：压栈时构造 TcpUntil userdata，再包成 Lua 闭包（upvalue = userdata）。
 /// Lua 用法：local iter = reader:receiveuntil("--"); local data, err, partial = iter()
-pub struct UntilIter(TcpUntil);
-
-impl PushLua for UntilIter {
-    fn push_lua(self, L: *mut lua_State) -> i32 {
-        unsafe {
-            cosmos::userdata::push::<TcpUntil>(L, self.0);
-            cosmos::ffi::lua_pushcclosure(L, until_call, 1);
-        }
-        1
-    }
-}
-
-/// lua_upvalueindex(1)：5.1 宏展开为 LUA_GLOBALSINDEX - 1
-const UPVALUE_1: c_int = cosmos::ffi::LUA_GLOBALSINDEX - 1;
-
-/// 闭包本体：从 upvalue 取 TcpUntil（RefMut 移进 future 持有），
-/// 像异步方法一样 yield 出去等读取结果
-unsafe extern "C" fn until_call(L: *mut lua_State) -> c_int {
-    unsafe {
-        let mut this = cosmos::userdata::check::<TcpUntil>(L, UPVALUE_1);
-        cosmos::coroutine::yield_with(
-            L,
-            Box::pin(async move { this.next().await.into_output() }),
-        )
-    }
-}
+pub struct UntilIter(pub(crate) TcpUntil);
 
 impl TcpUntil {
     /// 读到分隔符或出错为止；分隔符可跨分块边界。
     /// EOF/超时/超限返回 nil + err + partial（partial 为已读到的数据）。
-    async fn next(&mut self) -> ReceiveOutcome {
+    pub(crate) async fn next(&mut self) -> ReceiveOutcome {
         let Some(inner) = self.inner.as_mut() else {
-            return ReceiveOutcome::Closed(Vec::new());
+            return ReceiveOutcome::Closed(Nil, "closed", Vec::new());
         };
         let d = self.delim.len();
         let deadline = self.timeout.map(|t| Instant::now() + t);
@@ -570,16 +487,16 @@ impl TcpUntil {
                     Ok(b) => b,
                     Err(FillError::Io(e)) => {
                         self.state.set(State::Closed);
-                        return ReceiveOutcome::Error(classify_io(&e), std::mem::take(&mut self.buf));
+                        return ReceiveOutcome::Error(Nil, classify_io(&e), std::mem::take(&mut self.buf));
                     }
                     Err(FillError::Timeout) => {
-                        return ReceiveOutcome::Timeout(std::mem::take(&mut self.buf));
+                        return ReceiveOutcome::Timeout(Nil, "timeout", std::mem::take(&mut self.buf));
                     }
                 };
                 if avail.is_empty() {
                     // EOF 前没等到分隔符：提前关闭
                     self.state.set(State::Closed);
-                    return ReceiveOutcome::Closed(std::mem::take(&mut self.buf));
+                    return ReceiveOutcome::Closed(Nil, "closed", std::mem::take(&mut self.buf));
                 }
                 // 1) 跨边界匹配：分隔符起始于 buf 末尾 d-1 字节内，剩余部分在 avail
                 let lo = self.buf.len().saturating_sub(d - 1);
@@ -616,7 +533,7 @@ impl TcpUntil {
                 return ReceiveOutcome::Data(std::mem::take(&mut self.buf));
             }
             if cap.is_some_and(|c| self.buf.len() >= c) {
-                return ReceiveOutcome::Overflow(std::mem::take(&mut self.buf));
+                return ReceiveOutcome::Overflow(Nil, "buffer overflow", std::mem::take(&mut self.buf));
             }
         }
     }
@@ -706,13 +623,4 @@ impl TcpWriter {
         }
         self.state.set(State::Closed);
     }
-}
-
-pub unsafe fn register(L: *mut lua_State) {
-    cosmos::userdata::register::<Tcp>(L);
-    cosmos::userdata::register::<TcpConn>(L);
-    cosmos::userdata::register::<TcpReader>(L);
-    cosmos::userdata::register::<TcpWriter>(L);
-    cosmos::userdata::register::<TcpUntil>(L);
-    cosmos::userdata::register::<TcpListener>(L);
 }

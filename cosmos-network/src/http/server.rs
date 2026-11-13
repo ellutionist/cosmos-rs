@@ -6,13 +6,19 @@
 //!     -- req: method()/path()/target()/version()/headers()/header(name)/
 //!     --      body()/remote_addr()
 //!     return { status = 200, headers = {...}, body = "hello" }
-//!   end, { tls = server_ctx, max_body = 8 * 1024 * 1024 }))
+//!     -- 选定 path 升级 WebSocket：return { websocket = function(conn, req) ... end }
+//!   end, { tls = server_ctx, max_body = 8 * 1024 * 1024,
+//!          ws_max_message = 4 * 1024 * 1024 }))
 //!   srv:close()
 //!
 //! handler 在注册表里锚定（LuaFunction），每个请求新建 lua_State 协程执行；
 //! 协程之间、以及握手/读写任务之间都在同一个 LocalSet 上交错推进。
 //! 连接由 hyper auto builder 处理（h1 keep-alive、h2 多路复用），
 //! 请求体在 v1 全量读入内存（max_body 封顶）。
+//!
+//! WebSocket 不单独监听：handler 对选定的 path 返回
+//! `{ websocket = function(conn, req) ... end }`，本层把保留的请求 Parts
+//! 交给 fastwebsockets 完成 101 升级，之后连接脱离 HTTP（见 websocket.rs）。
 
 use std::convert::Infallible;
 use std::future::Future;
@@ -32,15 +38,15 @@ use tokio::net::TcpListener;
 use tokio::task::JoinHandle;
 use tokio_rustls::TlsAcceptor;
 
-use cosmos::coroutine::LuaCoroutine;
-use cosmos::ffi::*;
-use cosmos::userdata::{push, FromLua, LuaFunction};
+use cosmos::stack::{return_kind, ReturnKind};
+use cosmos::userdata::{FromLua, LuaFunction};
 
-use super::{take_bytes, take_string, Headers, LuaBytes};
+use super::{Headers, LuaBytes};
 use crate::error::classify_io;
 use crate::tls::{ServerCfg, TlsIo};
 
 const DEFAULT_MAX_BODY: usize = 64 * 1024 * 1024;
+const DEFAULT_WS_MAX_MESSAGE: usize = 64 * 1024 * 1024;
 
 /// h2 的每个 stream 由 hyper 交给 executor 跑。Lua 协程是 !Send，
 /// 因此这里固定 spawn_local：所有任务留在 LocalSet 的同一条线程上。
@@ -63,17 +69,18 @@ where
 pub(crate) struct ServerOptions {
     max_body: Option<i64>,
     tls: Option<ServerCfg>,
+    ws_max_message: Option<i64>,
 }
 
-/// 服务端共享状态：主状态 + 锚定的 handler；Rc 由 accept 循环与各连接共同持有
+/// 服务端共享状态：锚定的 handler；Rc 由 accept 循环与各连接共同持有
 struct ServerInner {
-    main: *mut lua_State,
     handler: LuaFunction,
     max_body: usize,
+    ws_max_message: usize,
 }
 
 /// 服务端请求（Lua userdata）
-pub struct HttpRequest {
+pub(crate) struct HttpRequest {
     method: String,
     target: String,
     path: String,
@@ -88,7 +95,6 @@ impl HttpRequest {
     fn method(&self) -> String {
         self.method.clone()
     }
-
     /// 原始 request-target（含 query）
     fn target(&self) -> String {
         self.target.clone()
@@ -120,14 +126,46 @@ impl HttpRequest {
     }
 }
 
-/// handler 的返回值：table { status, headers, body }，
-/// 缺省按 `RespSpec::default()`（200 + 空头 + 空 body）取值
+impl HttpRequest {
+    fn from_parts(parts: &hyper::http::request::Parts, body: Bytes, peer: &str) -> Self {
+        HttpRequest {
+            method: parts.method.as_str().to_string(),
+            target: parts
+                .uri
+                .path_and_query()
+                .map(|p| p.as_str())
+                .unwrap_or("/")
+                .to_string(),
+            path: parts.uri.path().to_string(),
+            version: super::version_num(parts.version),
+            headers: Headers(
+                parts
+                    .headers
+                    .iter()
+                    .map(|(k, v)| {
+                        (
+                            k.as_str().to_string(),
+                            String::from_utf8_lossy(v.as_bytes()).into_owned(),
+                        )
+                    })
+                    .collect(),
+            ),
+            body,
+            remote: peer.to_string(),
+        }
+    }
+}
+
+/// handler 的返回值：table { status, headers, body, websocket }，
+/// 缺省按 `RespSpec::default()`（200 + 空头 + 空 body）取值；
+/// 给了 websocket 函数则改走 101 升级（忽略 status/headers/body）
 #[derive(cosmos::FromLua)]
 #[lua(default)]
 pub(crate) struct RespSpec {
     status: u16,
     headers: Headers,
     body: LuaBytes,
+    websocket: Option<LuaFunction>,
 }
 
 impl Default for RespSpec {
@@ -136,6 +174,7 @@ impl Default for RespSpec {
             status: 200,
             headers: Headers::default(),
             body: LuaBytes::default(),
+            websocket: None,
         }
     }
 }
@@ -203,33 +242,16 @@ async fn handle(
             return plain_response(StatusCode::PAYLOAD_TOO_LARGE, "payload too large");
         }
     };
-    let request = HttpRequest {
-        method: parts.method.as_str().to_string(),
-        target: parts
-            .uri
-            .path_and_query()
-            .map(|p| p.as_str())
-            .unwrap_or("/")
-            .to_string(),
-        path: parts.uri.path().to_string(),
-        version: super::version_num(parts.version),
-        headers: Headers(
-            parts
-                .headers
-                .iter()
-                .map(|(k, v)| {
-                    (
-                        k.as_str().to_string(),
-                        String::from_utf8_lossy(v.as_bytes()).into_owned(),
-                    )
-                })
-                .collect(),
-        ),
-        body,
-        remote: peer.to_string(),
-    };
+    // Bytes 克隆只是引用计数：websocket 分支要重建一份请求 userdata 时零拷贝
+    let request = HttpRequest::from_parts(&parts, body.clone(), &peer);
     match run_handler(&inner, request).await {
-        Ok(spec) => spec.into_response(),
+        Ok(mut spec) => match spec.websocket.take() {
+            Some(handler) => {
+                let request = HttpRequest::from_parts(&parts, body, &peer);
+                upgrade_websocket(parts, handler, request, inner.ws_max_message)
+            }
+            None => spec.into_response(),
+        },
         Err(err) => {
             eprintln!("http handler error: {err}");
             plain_response(StatusCode::INTERNAL_SERVER_ERROR, "internal server error")
@@ -237,16 +259,45 @@ async fn handle(
     }
 }
 
-/// 新建 lua_State 协程执行 handler(req)；完成后从协程栈读返回值
-async fn run_handler(inner: &Rc<ServerInner>, request: HttpRequest) -> Result<RespSpec, String> {
-    let main = inner.main;
-    let mut co = unsafe {
-        let thread = lua_newthread(main); // 线程对象压到 main 栈上
-        lua_rawgeti(thread, LUA_REGISTRYINDEX, inner.handler.registry_ref());
-        push(thread, request);
-        // LuaCoroutine::new 里 luaL_ref(main) 会把线程对象从 main 栈上取走
-        LuaCoroutine::new(main, thread)
+/// 把保留的请求 Parts 交给 fastwebsockets 完成 101 升级，返回握手响应；
+/// 升级完成后的帧循环在独立任务里跑 Lua 协程（见 websocket::run_conn）
+fn upgrade_websocket(
+    parts: hyper::http::request::Parts,
+    handler: LuaFunction,
+    request: HttpRequest,
+    ws_max_message: usize,
+) -> Response<Full<Bytes>> {
+    use fastwebsockets::upgrade;
+
+    let mut req = HyperRequest::from_parts(parts, ());
+    if !upgrade::is_upgrade_request(&req) {
+        return plain_response(
+            StatusCode::BAD_REQUEST,
+            "expected a websocket upgrade request",
+        );
+    }
+    let (resp, fut) = match upgrade::upgrade(&mut req) {
+        Ok(v) => v,
+        Err(err) => {
+            return plain_response(
+                StatusCode::BAD_REQUEST,
+                &format!("websocket upgrade: {err}"),
+            )
+        }
     };
+    tokio::task::spawn_local(async move {
+        match fut.await {
+            Ok(ws) => crate::websocket::run_conn(ws, handler, request, ws_max_message).await,
+            Err(err) => eprintln!("websocket upgrade error: {err}"),
+        }
+    });
+    let (parts, _) = resp.into_parts();
+    Response::from_parts(parts, Full::new(Bytes::new()))
+}
+
+/// 新建 Lua 协程执行 handler(req)；完成后从协程栈读返回值
+async fn run_handler(inner: &Rc<ServerInner>, request: HttpRequest) -> Result<RespSpec, String> {
+    let mut co = unsafe { inner.handler.call_in_new_thread(request) };
     let result = (&mut co).await;
     let out = unsafe {
         match result {
@@ -258,29 +309,21 @@ async fn run_handler(inner: &Rc<ServerInner>, request: HttpRequest) -> Result<Re
     out
 }
 
-unsafe fn read_handler_return(L: *mut lua_State) -> Result<RespSpec, String> {
-    let top = lua_gettop(L);
-    if top == 0 {
-        return Ok(RespSpec::default());
-    }
-    match lua_type(L, 1) {
-        LUA_TTABLE => RespSpec::from_lua(L, 1),
+unsafe fn read_handler_return(L: *mut cosmos::userdata::lua_State) -> Result<RespSpec, String> {
+    match return_kind(L) {
+        ReturnKind::Nothing | ReturnKind::Nil(None) => Ok(RespSpec::default()),
+        ReturnKind::Table => RespSpec::from_lua(L, 1),
         // 直接返回字符串：200 + 原文
-        LUA_TSTRING => Ok(RespSpec {
+        ReturnKind::String => Ok(RespSpec {
             status: 200,
             headers: Headers::default(),
-            body: LuaBytes(Bytes::from(take_bytes(L, 1))),
+            body: LuaBytes::from_lua(L, 1)?,
+            websocket: None,
         }),
         // handler 里 assert 失败等会返回 nil, err
-        LUA_TNIL => {
-            if top >= 2 && lua_type(L, 2) == LUA_TSTRING {
-                Err(take_string(L, 2))
-            } else {
-                Ok(RespSpec::default())
-            }
-        }
-        other => Err(format!(
-            "handler must return a response table (got lua type {other})"
+        ReturnKind::Nil(Some(err)) => Err(err),
+        ReturnKind::Other(kind) => Err(format!(
+            "handler must return a response table (got lua type {kind})"
         )),
     }
 }
@@ -317,12 +360,13 @@ async fn accept_loop(
 
 async fn serve_conn<I>(io: I, inner: Rc<ServerInner>, peer: Arc<str>)
 where
-    I: hyper::rt::Read + hyper::rt::Write + Unpin + 'static,
+    I: hyper::rt::Read + hyper::rt::Write + Unpin + Send + 'static,
 {
     let service = LuaService { inner, peer };
     let builder = auto::Builder::new(LocalExec);
-    // 客户端断开/keep-alive 超时等连接级错误不必上报；handler 错误已单独记日志
-    let _ = builder.serve_connection(io, service).await;
+    // 客户端断开/keep-alive 超时等连接级错误不必上报；handler 错误已单独记日志。
+    // with_upgrades：HTTP 请求可被 handler 升级成 WebSocket（101 后连接脱管）
+    let _ = builder.serve_connection_with_upgrades(io, service).await;
 }
 
 /// 服务端句柄：close() 停止 accept（已有连接继续跑到结束）。
@@ -369,13 +413,17 @@ impl HttpServer {
             .map_err(|e| classify_io(&e))?
             .port();
         let inner = Rc::new(ServerInner {
-            main: handler.main(),
             handler,
             max_body: opts
                 .max_body
                 .filter(|n| *n > 0)
                 .map(|n| n as usize)
                 .unwrap_or(DEFAULT_MAX_BODY),
+            ws_max_message: opts
+                .ws_max_message
+                .filter(|n| *n > 0)
+                .map(|n| n as usize)
+                .unwrap_or(DEFAULT_WS_MAX_MESSAGE),
         });
         let acceptor = opts.tls.map(|c| TlsAcceptor::from(c.0));
         let task = tokio::task::spawn_local(accept_loop(inner, listener, acceptor));
@@ -384,10 +432,4 @@ impl HttpServer {
             port: local_port,
         })
     }
-}
-
-pub unsafe fn register(L: *mut lua_State) {
-    cosmos::userdata::register::<HttpServer>(L);
-    cosmos::userdata::register::<HttpServerHandle>(L);
-    cosmos::userdata::register::<HttpRequest>(L);
 }

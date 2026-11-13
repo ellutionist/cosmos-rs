@@ -30,6 +30,9 @@ use std::ptr;
 use crate::coroutine::AsyncOutput;
 use crate::ffi::*;
 
+/// 宿主/扩展注册入口需要的状态类型（避免功能模块直接依赖 crate::ffi）
+pub use crate::ffi::lua_State;
+
 /// #[cosmos::userdata] 宏为每个类型生成该 impl
 pub trait UserData: 'static {
     fn type_name() -> &'static str {
@@ -197,6 +200,13 @@ pub fn push<T: UserData>(L: *mut lua_State, value: T) {
     }
 }
 
+/// 把 C 函数包成带一个 userdata upvalue 的闭包（压栈 1 个值）。
+/// 用于"读端返回迭代器闭包"这类需要把 Rust 状态挂成 upvalue 的场景。
+pub unsafe fn push_closure<T: UserData>(L: *mut lua_State, func: lua_CFunction, upvalue: T) {
+    push::<T>(L, upvalue);
+    lua_pushcclosure(L, func, 1);
+}
+
 /// 方法 trampoline 里取 &mut T（经 RefCell::try_borrow_mut）。
 /// luaL_checkudata 校验 metatable，不符直接 lua_error；借用冲突同样 lua_error。
 ///
@@ -318,6 +328,56 @@ impl FromLua for bool {
             return Err(format!("argument {idx}: expected boolean"));
         }
         Ok(lua_toboolean(L, idx) != 0)
+    }
+}
+
+/// 原始字节（二进制安全）：Lua 字符串不做 UTF-8 校验
+impl FromLua for Vec<u8> {
+    unsafe fn from_lua(L: *mut lua_State, idx: c_int) -> Result<Self, String> {
+        if lua_type(L, idx) != LUA_TSTRING {
+            return Err(format!("argument {idx}: expected string"));
+        }
+        let mut len: size_t = 0;
+        let p = lua_tolstring(L, idx, &mut len);
+        Ok(std::slice::from_raw_parts(p as *const u8, len).to_vec())
+    }
+}
+
+/// Lua table（string → string）↔ Rust 有序键值表。
+/// 非 string 的键/值跳过；遍历只发生在桥接层。
+#[derive(Clone, Default)]
+pub struct LuaStrMap(pub Vec<(String, String)>);
+
+impl FromLua for LuaStrMap {
+    unsafe fn from_lua(L: *mut lua_State, idx: c_int) -> Result<Self, String> {
+        if lua_type(L, idx) != LUA_TTABLE {
+            return Err(format!("argument {idx}: expected table"));
+        }
+        let mut out = Vec::new();
+        lua_pushnil(L);
+        while lua_next(L, idx) != 0 {
+            if lua_type(L, -2) == LUA_TSTRING && lua_type(L, -1) == LUA_TSTRING {
+                let key = <String as FromLua>::from_lua(L, -2)?;
+                let value = <String as FromLua>::from_lua(L, -1)?;
+                out.push((key, value));
+            }
+            lua_settop(L, -2); // 弹掉 value，保留 key 供下一次 lua_next
+        }
+        Ok(LuaStrMap(out))
+    }
+}
+
+impl PushLua for LuaStrMap {
+    fn push_lua(self, L: *mut lua_State) -> i32 {
+        unsafe {
+            lua_createtable(L, 0, self.0.len() as c_int);
+            for (k, v) in self.0 {
+                k.push_lua(L);
+                v.push_lua(L);
+                lua_settable(L, -3);
+            }
+        }
+        1
     }
 }
 
@@ -452,6 +512,17 @@ impl LuaFunction {
         lua_rawgeti(target, LUA_REGISTRYINDEX, self.registry_ref);
     }
 
+    /// 在 main 上新建协程并调用 self(args)，返回可 await 的协程。
+    /// args 走 PushLua（元组即多参数）：栈布局 [函数, args...]，
+    /// 这是 handler 类回调的统一入口，功能模块不再自己碰 lua_newthread。
+    pub unsafe fn call_in_new_thread<A: PushLua>(&self, args: A) -> crate::coroutine::LuaCoroutine {
+        let thread = lua_newthread(self.main); // 线程对象压到 main 栈上
+        self.push_to(thread);
+        args.push_lua(thread);
+        // LuaCoroutine::new 里 luaL_ref(main) 会把线程对象从 main 栈上取走
+        crate::coroutine::LuaCoroutine::new(self.main, thread)
+    }
+
     pub fn registry_ref(&self) -> c_int {
         self.registry_ref
     }
@@ -531,6 +602,23 @@ impl PushLua for String {
         1
     }
 }
+/// 原始字节 → Lua 字符串（二进制安全，不做 UTF-8 校验）
+impl PushLua for Vec<u8> {
+    fn push_lua(self, L: *mut lua_State) -> i32 {
+        unsafe { lua_pushlstring(L, self.as_ptr() as *const c_char, self.len()) };
+        1
+    }
+}
+/// Lua nil 作为"一个值"的标记：多返回值里占位用
+/// （`()` 是 0 个返回值，二者语义不同）
+pub struct Nil;
+
+impl PushLua for Nil {
+    fn push_lua(self, L: *mut lua_State) -> i32 {
+        unsafe { lua_pushnil(L) };
+        1
+    }
+}
 impl<T: PushLua> PushLua for Option<T> {
     fn push_lua(self, L: *mut lua_State) -> i32 {
         match self {
@@ -557,6 +645,14 @@ impl<A: PushLua, B: PushLua> PushLua for (A, B) {
     fn push_lua(self, L: *mut lua_State) -> i32 {
         let (a, b) = self;
         a.push_lua(L) + b.push_lua(L)
+    }
+}
+
+/// 字符串切片：避免为 &'static str 常量额外分配 String
+impl PushLua for &str {
+    fn push_lua(self, L: *mut lua_State) -> i32 {
+        unsafe { lua_pushlstring(L, self.as_ptr() as *const c_char, self.len()) };
+        1
     }
 }
 
@@ -619,6 +715,18 @@ impl<T: IntoOutput> IntoOutput for Option<T> {
             Some(v) => v.into_output(),
             None => AsyncOutput::Nil,
         }
+    }
+}
+
+/// 元组的异步返回：语义与同步的 tuple PushLua 一致（按序压栈、值为返回值个数）。
+/// 异步方法的值要跨 yield 边界，只能先装箱进 AsyncOutput::Custom，
+/// 由 poll loop 统一压栈——桥接层承担这次装箱，功能层只组合 PushLua 原语
+impl<A: PushLua + 'static, B: PushLua + 'static> IntoOutput for (A, B) {
+    fn into_output(self) -> AsyncOutput {
+        AsyncOutput::Custom(Box::new(move |L| {
+            let (a, b) = self;
+            a.push_lua(L) + b.push_lua(L)
+        }))
     }
 }
 /// 返回 userdata 类型本身：装箱进 Custom 闭包（开放值域跨边界，闭包兼做存放+压栈）。

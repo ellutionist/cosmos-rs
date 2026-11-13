@@ -36,7 +36,6 @@ use tokio::net::TcpStream;
 use tokio::time::Instant;
 
 use cosmos::coroutine::AsyncOutput;
-use cosmos::ffi::lua_State;
 use cosmos::userdata::{IntoOutput, PushLua};
 
 use super::{version_num, Conn, Headers, LuaBytes};
@@ -54,7 +53,7 @@ fn default_alpn() -> Vec<Vec<u8>> {
 /// 默认 HTTP 客户端 TLS 配置：公有根 + h2/http1.1 ALPN（只构建一次）
 static DEFAULT_TLS: OnceLock<Arc<ClientConfig>> = OnceLock::new();
 
-fn default_tls_config() -> Arc<ClientConfig> {
+pub(crate) fn default_tls_config() -> Arc<ClientConfig> {
     DEFAULT_TLS
         .get_or_init(|| {
             let mut roots = RootCertStore::empty();
@@ -382,8 +381,4 @@ fn describe(err: &(dyn StdError + 'static)) -> String {
         src = s.source();
     }
     msg
-}
-
-pub unsafe fn register(L: *mut lua_State) {
-    cosmos::userdata::register::<HttpClient>(L);
 }

@@ -1,0 +1,156 @@
+//! cosmos-network 的 Lua 桥接层。
+//!
+//! 职责仅限本 crate 无法下沉到 cosmos 的叶子转换：
+//! - 本 crate 自有类型的 `FromLua` / `PushLua`（Headers、LuaBytes、ReceivePattern 等），
+//!   实现里只组合 cosmos 的基层原语，不写多值压栈逻辑；
+//! - TCP 迭代器闭包的 C trampoline（upvalue 挂 userdata）；
+//! - 全部 userdata 类型注册。
+//!
+//! 多返回值/表结构一律由 `#[derive(cosmos::IntoOutput)]` 与 `&str` / `Vec<u8>` /
+//! `Nil` / `LuaStrMap` 等 cosmos 基层类型组合而成，功能模块只构造值。
+
+pub(crate) use cosmos::ffi::lua_State;
+
+use cosmos::ffi::{
+    c_char, c_int, lua_pushlstring, lua_tointeger, lua_type, LUA_TNUMBER, LUA_TSTRING,
+};
+use cosmos::userdata::{check, push_closure, FromLua, IntoOutput, LuaStrMap, PushLua};
+
+use crate::http::client::HttpClient;
+use crate::http::server::{HttpRequest, HttpServer, HttpServerHandle};
+use crate::http::{Headers, LuaBytes};
+use crate::tcp::{
+    ReceivePattern, Tcp, TcpConn, TcpListener, TcpReader, TcpUntil, TcpWriter, UntilIter,
+};
+use crate::tls::{ClientCfg, ServerCfg, Tls, TlsConn, TlsContext, TlsListener};
+use crate::websocket::{Ws, WsConn};
+
+// ---------------------------------------------------------------------------
+// HTTP：Headers / LuaBytes
+// ---------------------------------------------------------------------------
+
+impl FromLua for Headers {
+    unsafe fn from_lua(L: *mut lua_State, idx: c_int) -> Result<Self, String> {
+        let map = LuaStrMap::from_lua(L, idx)?;
+        Ok(Headers(
+            map.0
+                .into_iter()
+                .map(|(k, v)| (k.to_ascii_lowercase(), v))
+                .collect(),
+        ))
+    }
+}
+
+impl PushLua for Headers {
+    fn push_lua(self, L: *mut lua_State) -> i32 {
+        LuaStrMap(self.0).push_lua(L)
+    }
+}
+
+/// Bytes ↔ Lua 字符串（持有 Bytes 零拷贝，push 时拷进 Lua）
+impl PushLua for LuaBytes {
+    fn push_lua(self, L: *mut lua_State) -> i32 {
+        unsafe { lua_pushlstring(L, self.0.as_ptr() as *const c_char, self.0.len()) };
+        1
+    }
+}
+
+impl FromLua for LuaBytes {
+    unsafe fn from_lua(L: *mut lua_State, idx: c_int) -> Result<Self, String> {
+        let bytes = <Vec<u8> as FromLua>::from_lua(L, idx)?;
+        Ok(LuaBytes(bytes.into()))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// TCP：receive 参数与迭代器闭包
+// ---------------------------------------------------------------------------
+
+impl FromLua for ReceivePattern {
+    unsafe fn from_lua(L: *mut lua_State, idx: c_int) -> Result<Self, String> {
+        match lua_type(L, idx) {
+            LUA_TNUMBER => Ok(ReceivePattern::Size(lua_tointeger(L, idx).max(0) as usize)),
+            LUA_TSTRING => {
+                let s = <String as FromLua>::from_lua(L, idx)?;
+                let pat = s.strip_prefix('*').unwrap_or(&s);
+                match pat {
+                    "a" => Ok(ReceivePattern::All),
+                    "l" => Ok(ReceivePattern::Line),
+                    "L" => Ok(ReceivePattern::LineKeep),
+                    _ => Err(format!(
+                        "unsupported receive pattern '{s}' (expected '*l', '*L', '*a' or a number)"
+                    )),
+                }
+            }
+            _ => Err(format!("argument {idx}: expected number or '*l'/'*L'/'*a'")),
+        }
+    }
+}
+
+/// receiveuntil 返回的迭代器：压栈时构造 TcpUntil userdata 并包成 Lua 闭包
+/// （upvalue = userdata）。Lua 用法：local iter = reader:receiveuntil("--"); iter()
+impl PushLua for UntilIter {
+    fn push_lua(self, L: *mut lua_State) -> i32 {
+        unsafe { push_closure::<TcpUntil>(L, until_call, self.0) };
+        1
+    }
+}
+
+/// lua_upvalueindex(1)：5.1 宏展开为 LUA_GLOBALSINDEX - 1
+const UPVALUE_1: c_int = cosmos::ffi::LUA_GLOBALSINDEX - 1;
+
+/// 闭包本体：从 upvalue 取 TcpUntil（RefMut 移进 future 持有），
+/// 像异步方法一样 yield 出去等读取结果
+unsafe extern "C" fn until_call(L: *mut lua_State) -> c_int {
+    unsafe {
+        let mut this = check::<TcpUntil>(L, UPVALUE_1);
+        cosmos::coroutine::yield_with(
+            L,
+            Box::pin(async move { this.next().await.into_output() }),
+        )
+    }
+}
+
+// ---------------------------------------------------------------------------
+// TLS：ctx 参数
+// ---------------------------------------------------------------------------
+
+impl FromLua for ClientCfg {
+    unsafe fn from_lua(L: *mut lua_State, idx: c_int) -> Result<Self, String> {
+        let mut ctx = check::<TlsContext>(L, idx);
+        ctx.client_config().map(ClientCfg)
+    }
+}
+
+impl FromLua for ServerCfg {
+    unsafe fn from_lua(L: *mut lua_State, idx: c_int) -> Result<Self, String> {
+        let mut ctx = check::<TlsContext>(L, idx);
+        ctx.server_config().map(ServerCfg)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 类型注册
+// ---------------------------------------------------------------------------
+
+pub unsafe fn register(L: *mut lua_State) {
+    cosmos::userdata::register::<Tcp>(L);
+    cosmos::userdata::register::<TcpConn>(L);
+    cosmos::userdata::register::<TcpReader>(L);
+    cosmos::userdata::register::<TcpWriter>(L);
+    cosmos::userdata::register::<TcpUntil>(L);
+    cosmos::userdata::register::<TcpListener>(L);
+
+    cosmos::userdata::register::<Tls>(L);
+    cosmos::userdata::register::<TlsContext>(L);
+    cosmos::userdata::register::<TlsConn>(L);
+    cosmos::userdata::register::<TlsListener>(L);
+
+    cosmos::userdata::register::<HttpClient>(L);
+    cosmos::userdata::register::<HttpServer>(L);
+    cosmos::userdata::register::<HttpServerHandle>(L);
+    cosmos::userdata::register::<HttpRequest>(L);
+
+    cosmos::userdata::register::<Ws>(L);
+    cosmos::userdata::register::<WsConn>(L);
+}

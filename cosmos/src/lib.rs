@@ -7,4 +7,4 @@ pub mod stack;
 pub mod thread;
 pub mod userdata;
 
-pub use cosmos_macros::{userdata, FromLua, PushLua};
+pub use cosmos_macros::{userdata, FromLua, IntoOutput, PushLua};

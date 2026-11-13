@@ -566,3 +566,76 @@ fn expand_push_lua(input: &DeriveInput) -> syn::Result<proc_macro2::TokenStream>
         }
     })
 }
+
+// ---------------------------------------------------------------------------
+// #[derive(IntoOutput)]：把一个 Rust 枚举派发成 Lua 的多返回值形态
+//
+// 每个分支按字段声明顺序压栈（字段需实现 PushLua），返回值个数 = 各字段
+// 压栈个数之和。适合"一个 Rust 枚举对应多种 Lua 返回值形态"的场景：
+// 功能模块只描述变体本身的字段，不再手写 match 分支 + lua_push*。
+//
+//   #[derive(cosmos::IntoOutput)]
+//   enum Outcome {
+//       Data(Vec<u8>),                      // 1 值
+//       Closed(Nil, &'static str, Vec<u8>), // 3 值：nil, reason, partial
+//   }
+// ---------------------------------------------------------------------------
+
+#[proc_macro_derive(IntoOutput)]
+pub fn derive_into_output(input: TokenStream) -> TokenStream {
+    let input = parse_macro_input!(input as DeriveInput);
+    expand_into_output(&input)
+        .unwrap_or_else(|e| e.to_compile_error())
+        .into()
+}
+
+fn expand_into_output(input: &DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
+    let Data::Enum(data) = &input.data else {
+        return err(&input.ident, "#[derive(IntoOutput)] only supports enums");
+    };
+    let name = &input.ident;
+    let (impl_generics, ty_generics, where_clause) = input.generics.split_for_impl();
+
+    let mut arms = Vec::with_capacity(data.variants.len());
+    for variant in &data.variants {
+        let vident = &variant.ident;
+        let pattern = match &variant.fields {
+            Fields::Unit => quote!(Self::#vident),
+            Fields::Unnamed(fields) => {
+                let bindings: Vec<_> = (0..fields.unnamed.len())
+                    .map(|i| format_ident!("__field_{i}"))
+                    .collect();
+                quote!(Self::#vident(#(#bindings),*))
+            }
+            Fields::Named(fields) => {
+                let bindings: Vec<_> = fields
+                    .named
+                    .iter()
+                    .map(|f| f.ident.clone().expect("named field"))
+                    .collect();
+                quote!(Self::#vident { #(#bindings),* })
+            }
+        };
+        let pushes = variant.fields.iter().enumerate().map(|(i, f)| {
+            let binding = match &f.ident {
+                Some(ident) => ident.clone(),
+                None => format_ident!("__field_{i}"),
+            };
+            quote!(+ cosmos::userdata::PushLua::push_lua(#binding, L))
+        });
+        // `0 + a.push_lua(L) + b.push_lua(L)`：操作数从左到右求值，保证压栈顺序
+        arms.push(quote!(#pattern => 0i32 #(#pushes)*));
+    }
+
+    Ok(quote! {
+        impl #impl_generics cosmos::userdata::IntoOutput for #name #ty_generics #where_clause {
+            fn into_output(self) -> cosmos::coroutine::AsyncOutput {
+                cosmos::coroutine::AsyncOutput::Custom(::std::boxed::Box::new(move |L| {
+                    match self {
+                        #(#arms),*
+                    }
+                }))
+            }
+        }
+    })
+}

@@ -47,6 +47,6 @@ impl Drop for Counter {
 }
 
 /// 启动时注册类型，脚本才能在任何实例之前 require("cosmos.Counter")
-pub unsafe fn register(L: *mut cosmos::ffi::lua_State) {
+pub unsafe fn register(L: *mut cosmos::userdata::lua_State) {
     cosmos::userdata::register::<Counter>(L);
 }
