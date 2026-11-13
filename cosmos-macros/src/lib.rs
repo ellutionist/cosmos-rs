@@ -117,12 +117,10 @@ fn gen_method(
 ) -> syn::Result<(Literal, proc_macro2::Ident, proc_macro2::TokenStream)> {
     let sig = &f.sig;
     let method = &sig.ident;
+    let is_async = sig.asyncness.is_some();
 
     if sig.unsafety.is_some() {
         return err(&f.sig, "unsafe methods are not supported");
-    }
-    if sig.asyncness.is_some() {
-        return err(&f.sig, "async methods are not supported");
     }
     if sig.abi.is_some() {
         return err(&f.sig, "extern methods are not supported");
@@ -130,31 +128,43 @@ fn gen_method(
     if sig.variadic.is_some() {
         return err(&f.sig, "variadic methods are not supported");
     }
+    if is_async {
+        if let ReturnType::Type(_, ty) = &sig.output {
+            if as_result(ty).is_some() {
+                return err(
+                    &sig.output,
+                    "async methods returning Result are not supported yet",
+                );
+            }
+        }
+    }
 
     // 静态方法（无 self 接收者）：不做 self 检查，参数从栈 1 开始；
-    // 实例方法：首参是 Receiver，check 后参数从栈 2 开始
-    let is_static = matches!(sig.inputs.first(), Some(FnArg::Typed(_)));
-
-    let self_check = if is_static {
-        quote!()
-    } else {
-        let receiver = match sig.inputs.first() {
-            Some(FnArg::Receiver(r)) => r,
-            _ => return err(&sig.inputs, "first argument must be &self or &mut self"),
-        };
-        if receiver.colon_token.is_some() {
-            return err(&receiver.ty, "typed self is not supported");
+    // 实例方法：首参是 Receiver，check 后参数从栈 2 开始。
+    // &mut self 的守卫需要可变绑定（RefMut 的 DerefMut）
+    let (is_static, self_binding) = match sig.inputs.first() {
+        Some(FnArg::Receiver(r)) => {
+            if r.colon_token.is_some() {
+                return err(&r.ty, "typed self is not supported");
+            }
+            let binding = match (&r.reference, &r.mutability) {
+                (Some(_), None) => {
+                    quote!(let this = cosmos::userdata::check_shared::<#ty>(L, 1);)
+                }
+                (Some(_), Some(_)) => {
+                    quote!(let mut this = cosmos::userdata::check::<#ty>(L, 1);)
+                }
+                _ => return err(r, "only &self and &mut self receivers are supported"),
+            };
+            (false, binding)
         }
-        let check_fn = match (&receiver.reference, &receiver.mutability) {
-            (Some(_), None) => quote!(cosmos::userdata::check_shared),
-            (Some(_), Some(_)) => quote!(cosmos::userdata::check),
-            _ => return err(receiver, "only &self and &mut self receivers are supported"),
-        };
-        quote!(let this = #check_fn::<#ty>(L, 1);)
+        Some(FnArg::Typed(_)) => (true, quote!()),
+        None => return err(&sig.inputs, "method needs a receiver or arguments"),
     };
 
     let mut arg_idents = Vec::new();
-    let mut arg_conversions = Vec::new();
+    let mut arg_conversions_sync = Vec::new();
+    let mut arg_conversions_async = Vec::new();
     let mut stack_idx: i32 = if is_static { 1 } else { 2 };
     let mut arg_n: usize = 0;
     let mut inputs = sig.inputs.iter();
@@ -169,8 +179,14 @@ fn gen_method(
         let ident = format_ident!("arg{arg_n}");
         arg_n += 1;
         arg_idents.push(ident.clone());
-        arg_conversions.push(quote! {
+        arg_conversions_sync.push(quote! {
             let #ident = <#arg_ty as cosmos::userdata::FromLua>::from_lua(L, #stack_idx)?;
+        });
+        arg_conversions_async.push(quote! {
+            let #ident = match <#arg_ty as cosmos::userdata::FromLua>::from_lua(L, #stack_idx) {
+                ::core::result::Result::Ok(v) => v,
+                ::core::result::Result::Err(e) => return cosmos::userdata::raise(L, &e),
+            };
         });
         stack_idx += 1;
     }
@@ -182,35 +198,6 @@ fn gen_method(
         quote!(this.#method(#(#arg_idents),*))
     };
 
-    // 返回值：走 PushLua 直接压栈（trampoline 在 lua_resume 保护帧内，
-    // userdata 等任意值零装箱）；Result<T, E> → Ok 压栈 / Err 转 lua_error
-    let ret_conv = match &sig.output {
-        ReturnType::Default => quote! {
-            let ret = #call;
-            Ok(<() as cosmos::userdata::PushLua>::push_lua(ret, L))
-        },
-        ReturnType::Type(_, ret_ty) => {
-            if let Some((ok_ty, _)) = as_result(ret_ty) {
-                quote! {
-                    let ret = #call;
-                    match ret {
-                        ::core::result::Result::Ok(v) => {
-                            Ok(<#ok_ty as cosmos::userdata::PushLua>::push_lua(v, L))
-                        }
-                        ::core::result::Result::Err(e) => {
-                            Err(::std::string::ToString::to_string(&e))
-                        }
-                    }
-                }
-            } else {
-                quote! {
-                    let ret = #call;
-                    Ok(<#ret_ty as cosmos::userdata::PushLua>::push_lua(ret, L))
-                }
-            }
-        }
-    };
-
     let tramp_ident = format_ident!("__cosmos_m_{}_{}", ty_label, method);
     // c 字面量（&'static CStr，NUL 结尾）：&str 字面量不保证 NUL，
     // 直接传给 lua_setfield 会读越界
@@ -219,16 +206,72 @@ fn gen_method(
         Literal::c_string(&cs)
     };
 
-    let tramp = quote! {
-        #[allow(non_snake_case)]
-        unsafe extern "C" fn #tramp_ident(
-            L: *mut cosmos::ffi::lua_State,
-        ) -> cosmos::ffi::c_int {
-            cosmos::userdata::trampoline(L, |L| unsafe {
-                #self_check
-                #(#arg_conversions)*
-                #ret_conv
-            })
+    let tramp = if is_async {
+        // async 方法：守卫（RefMut/Ref）被 move 进外层 future 持有，
+        // 整个 await 期间 RefCell borrow flag 保持"已借"，其他方法调用报 lua_error。
+        // yield_with 必须是尾表达式（5.1 语义：lua_yield 的 -1 要作为返回值交出去）
+        let ret_ty = match &sig.output {
+            ReturnType::Default => quote!(()),
+            ReturnType::Type(_, t) => quote!(#t),
+        };
+        quote! {
+            #[allow(non_snake_case)]
+            unsafe extern "C" fn #tramp_ident(
+                L: *mut cosmos::ffi::lua_State,
+            ) -> cosmos::ffi::c_int {
+                unsafe {
+                    #self_binding
+                    #(#arg_conversions_async)*
+                    cosmos::coroutine::yield_with(
+                        L,
+                        Box::pin(async move {
+                            let ret = #call.await;
+                            <#ret_ty as cosmos::userdata::IntoOutput>::into_output(ret)
+                        }),
+                    )
+                }
+            }
+        }
+    } else {
+        // 同步方法：走 PushLua 直接压栈（trampoline 在 lua_resume 保护帧内，
+        // userdata 等任意值零装箱）；Result<T, E> → Ok 压栈 / Err 转 lua_error
+        let ret_conv = match &sig.output {
+            ReturnType::Default => quote! {
+                let ret = #call;
+                Ok(<() as cosmos::userdata::PushLua>::push_lua(ret, L))
+            },
+            ReturnType::Type(_, ret_ty) => {
+                if let Some((ok_ty, _)) = as_result(ret_ty) {
+                    quote! {
+                        let ret = #call;
+                        match ret {
+                            ::core::result::Result::Ok(v) => {
+                                Ok(<#ok_ty as cosmos::userdata::PushLua>::push_lua(v, L))
+                            }
+                            ::core::result::Result::Err(e) => {
+                                Err(::std::string::ToString::to_string(&e))
+                            }
+                        }
+                    }
+                } else {
+                    quote! {
+                        let ret = #call;
+                        Ok(<#ret_ty as cosmos::userdata::PushLua>::push_lua(ret, L))
+                    }
+                }
+            }
+        };
+        quote! {
+            #[allow(non_snake_case)]
+            unsafe extern "C" fn #tramp_ident(
+                L: *mut cosmos::ffi::lua_State,
+            ) -> cosmos::ffi::c_int {
+                cosmos::userdata::trampoline(L, |L| unsafe {
+                    #self_binding
+                    #(#arg_conversions_sync)*
+                    #ret_conv
+                })
+            }
         }
     };
 

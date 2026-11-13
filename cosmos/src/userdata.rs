@@ -5,24 +5,27 @@
 //! UserData impl（见 cosmos-macros crate）。
 //!
 //! 运行时侧：
-//! - push::<T> 把 T placement-write 进 lua_newuserdata 的槽（Lua GC 托管，
-//!   不额外堆分配），metatable 在首次 push 时懒构建
+//! - push::<T> 把 T 包进 RefCell 后 placement-write 进 lua_newuserdata 的槽
+//!   （Lua GC 托管，不额外堆分配），metatable 在首次 push 时懒构建
 //! - metatable 兼任类型表：__index = 自身（静态构造 + 实例方法共用一张表）、
 //!   __gc = drop_in_place 统一生成，经 package.preload 用 require 引入
 //!   （local Counter = require("cosmos.Counter")）
 //! - 类型校验用 luaL_checkudata（registry 按 type_name 找 metatable 后比对）
+//! - 方法借 &mut/& 走 RefCell::try_borrow：Lua 边界上编译期独占性降级为
+//!   运行期检查，借用冲突（重入/跨协程交错）转成 lua_error 而非 aliasing UB
 //!
 //! 线程模型：全部约束在单线程（同 coroutine.rs 的 TLS 通道）；
 //! 方法 trampoline 在 lua_resume 的保护帧内执行，lua_error 长跳安全。
 
 use std::any::TypeId;
-use std::cell::RefCell;
+use std::cell::{Ref, RefCell, RefMut};
 use std::collections::{HashMap, HashSet};
 use std::ffi::CString;
 use std::marker::PhantomData;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::ptr;
 
+use crate::coroutine::AsyncOutput;
 use crate::ffi::*;
 
 /// #[cosmos::userdata] 宏为每个类型生成该 impl
@@ -163,35 +166,50 @@ pub fn register<T: UserData>(L: *mut lua_State) {
 }
 
 /// 构造 userdata 并把 T 压上 Lua 栈（栈顶 +1 个值）。
-/// L 可以是协程线程，metatable 注册统一记在主状态名下
+/// L 可以是协程线程，metatable 注册统一记在主状态名下。
+///
+/// 值包在 RefCell 里存进 userdata：方法拿 &mut/& 时走 try_borrow 运行期检查，
+/// 借用冲突（重入/跨协程交错）变成 lua_error 而不是 aliasing UB——
+/// Rust 的编译期独占性在 Lua 边界降级为运行期检查
 pub fn push<T: UserData>(L: *mut lua_State, value: T) {
     unsafe {
         let main = main_state(L);
         ensure_metatable::<T>(main, L);
         // LuaJIT userdata 对齐保证是 8 字节，更高对齐的类型直接断言拒绝
-        debug_assert!(std::mem::align_of::<T>() <= 8);
-        let p = lua_newuserdata(L, std::mem::size_of::<T>()) as *mut T;
-        ptr::write(p, value);
+        debug_assert!(std::mem::align_of::<RefCell<T>>() <= 8);
+        let p = lua_newuserdata(L, std::mem::size_of::<RefCell<T>>()) as *mut RefCell<T>;
+        ptr::write(p, RefCell::new(value));
         // 5.1 的 luaL_getmetatable 是宏（registry 上的 lua_getfield），直接用 lua_getfield
         lua_getfield(L, LUA_REGISTRYINDEX, type_cstring::<T>().as_ptr());
         lua_setmetatable(L, -2);
     }
 }
 
-/// 方法 trampoline 里取 &mut T。luaL_checkudata 校验 metatable，不符直接 lua_error。
-/// 返回的引用只在本次调用内有效（userdata 因参数压栈而被锚定，不会被 GC）
-pub unsafe fn check<T: UserData>(L: *mut lua_State, idx: c_int) -> &'static mut T {
-    let p = luaL_checkudata(L, idx, type_cstring::<T>().as_ptr());
-    &mut *(p as *mut T)
+/// 方法 trampoline 里取 &mut T（经 RefCell::try_borrow_mut）。
+/// luaL_checkudata 校验 metatable，不符直接 lua_error；借用冲突同样 lua_error。
+///
+/// 返回 RefMut<'static, T> 的 'static 由 transmute 延展：RefCell 以 placement-write
+/// 常驻 Lua GC 内存、地址稳定且调用期间被栈锚定不会回收，活期覆盖任何使用场景，
+/// 因此把 try_borrow 借出的短生命周期延长为 'static 是安全的。
+/// 独占性由 RefCell 的 borrow 标志在运行期保证，不再依赖 &'static mut 的类型承诺
+pub unsafe fn check<T: UserData>(L: *mut lua_State, idx: c_int) -> RefMut<'static, T> {
+    let p = luaL_checkudata(L, idx, type_cstring::<T>().as_ptr()) as *mut RefCell<T>;
+    match (*p).try_borrow_mut() {
+        Ok(r) => std::mem::transmute(r),
+        Err(_) => raise(L, "attempt to mutably borrow userdata that is already borrowed"),
+    }
 }
 
-pub unsafe fn check_shared<T: UserData>(L: *mut lua_State, idx: c_int) -> &'static T {
-    let p = luaL_checkudata(L, idx, type_cstring::<T>().as_ptr());
-    &*(p as *const T)
+pub unsafe fn check_shared<T: UserData>(L: *mut lua_State, idx: c_int) -> Ref<'static, T> {
+    let p = luaL_checkudata(L, idx, type_cstring::<T>().as_ptr()) as *mut RefCell<T>;
+    match (*p).try_borrow() {
+        Ok(r) => std::mem::transmute(r),
+        Err(_) => raise(L, "attempt to borrow userdata that is mutably borrowed"),
+    }
 }
 
 unsafe extern "C" fn gc_trampoline<T: UserData>(L: *mut lua_State) -> c_int {
-    let p = lua_touserdata(L, 1) as *mut T;
+    let p = lua_touserdata(L, 1) as *mut RefCell<T>;
     if !p.is_null() {
         // Drop 里 panic 不能穿过 extern "C" 帧，吞掉
         let _ = catch_unwind(AssertUnwindSafe(|| ptr::drop_in_place(p)));
@@ -227,9 +245,10 @@ where
     }
 }
 
-unsafe fn raise(L: *mut lua_State, msg: &str) -> c_int {
+pub unsafe fn raise(L: *mut lua_State, msg: &str) -> ! {
     lua_pushlstring(L, msg.as_ptr() as *const c_char, msg.len());
-    lua_error(L) // longjmp，不返回
+    lua_error(L); // longjmp，不返回
+    unreachable!()
 }
 
 /// lua_close 前调用，清掉该状态的注册缓存（否则线程本地 map 会残留死键）
@@ -343,5 +362,59 @@ impl<T: UserData> PushLua for T {
     fn push_lua(self, L: *mut lua_State) -> i32 {
         push::<T>(L, self);
         1
+    }
+}
+
+/// 值 → 异步边界类型 AsyncOutput：async 方法/op 的返回值要跨 yield 边界，
+/// 必须收敛进枚举（标量零分配，开放值域走 Custom 闭包）。
+///
+/// 与 PushLua 的分工：PushLua 是"值 → 直接压栈"（同步方法，trampoline 内），
+/// IntoOutput 是"值 → 边界类型"（异步方法/op，future 完成后由 poll loop 压栈）
+pub trait IntoOutput {
+    fn into_output(self) -> AsyncOutput;
+}
+
+impl IntoOutput for () {
+    fn into_output(self) -> AsyncOutput {
+        AsyncOutput::Nil
+    }
+}
+impl IntoOutput for i64 {
+    fn into_output(self) -> AsyncOutput {
+        AsyncOutput::Integer(self)
+    }
+}
+impl IntoOutput for f64 {
+    fn into_output(self) -> AsyncOutput {
+        AsyncOutput::Number(self)
+    }
+}
+impl IntoOutput for bool {
+    fn into_output(self) -> AsyncOutput {
+        AsyncOutput::Boolean(self)
+    }
+}
+impl IntoOutput for String {
+    fn into_output(self) -> AsyncOutput {
+        AsyncOutput::String(self)
+    }
+}
+impl<T: IntoOutput> IntoOutput for Option<T> {
+    fn into_output(self) -> AsyncOutput {
+        match self {
+            Some(v) => v.into_output(),
+            None => AsyncOutput::Nil,
+        }
+    }
+}
+/// 返回 userdata 类型本身：装箱进 Custom 闭包（开放值域跨边界，闭包兼做存放+压栈）。
+/// 孤儿规则保证下游无法为 String 等已实现 IntoOutput 的类型再实现 UserData，
+/// 不会与本 blanket impl 冲突
+impl<T: UserData> IntoOutput for T {
+    fn into_output(self) -> AsyncOutput {
+        AsyncOutput::Custom(Box::new(move |L| {
+            push::<T>(L, self);
+            1
+        }))
     }
 }
