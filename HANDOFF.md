@@ -19,9 +19,9 @@ cosmos-rs/
   cosmos/            # 运行时 + 桥接层：machine / ffi / userdata / coroutine / stack / libs / builtin
   cosmos-macros/     # #[userdata]、#[derive(FromLua/PushLua)]，生成全部 trampoline
   cosmos-network/    # 功能模块：tcp/{stream,tls} / http / websocket + bridge.rs（叶子转换）
-  src/lib.rs         # 对外导出 Machine、Module、Network 与 cosmos 桥接能力
-  src/main.rs        # CLI：注入 Runtime Handle/Network、传递参数；demo.rs 是 userdata 示例
-  examples/machine.rs # Rust 嵌入示例，examples/machine.lua 验证脚本参数与模块入口
+  Cargo.toml         # 虚拟 workspace，默认成员为 cosmos-cli
+  cosmos-cli/        # clap 命令行入口，注入 Runtime Handle/Network
+  cosmos-network/examples/machine.rs # Rust 嵌入示例，根 examples/machine.lua 验证参数与模块入口
   examples/*.lua     # 全部端到端用例
   cosmos-network/lua/ # 内嵌 Lua 源码（include_str! 随二进制编译）
 ```
@@ -122,7 +122,8 @@ LuaCoroutine 先释放挂起 Future 中的借用守卫，再解除协程锚定�
 ### 4.4 Machine 嵌入与插件
 
 ```rust
-use cosmos_rs::{Machine, Network};
+use cosmos::Machine;
+use cosmos_network::Network;
 
 let runtime = tokio::runtime::Builder::new_multi_thread()
     .worker_threads(2).enable_all().build().unwrap();
@@ -131,7 +132,7 @@ machine.add_module(Network).unwrap();
 runtime.block_on(machine.exec("cosmos.time.sleep(10)")).unwrap();
 ```
 
-- 核心类型在 cosmos crate，根 crate 直接重导出，避免核心反向依赖网络库。
+- 核心 Machine/Module 从 cosmos crate 引入，Network 从 cosmos-network 引入；根目录为虚拟 workspace。
   Machine 只持有 Handle，不创建或关闭 Runtime；宿主负责 Runtime 存活并驱动执行。
 - `Module::register(&self, &mut Machine) -> Result<(), String>` 同步注册插件，进入注入的 Runtime 与本地任务上下文，
   不要求插件 Send/Sync。Network 注册全部网络类型并加载编译内嵌的 Lua 定义，替代旧裸指针注册与 LUA_SOURCES。
@@ -142,7 +143,7 @@ runtime.block_on(machine.exec("cosmos.time.sleep(10)")).unwrap();
 - 多线程 Runtime 的普通 Rust 任务可以在工作线程运行；Lua 与 HTTP handler 通过 LocalSet 留在固定宿主线程，
   不能直接将 Machine 或其执行 Future 交给要求 Send 的 tokio::spawn。
 - HTTP 连接池由各 client 实例持有，不同实例独立，避免不同宿主 Runtime 或 VM 复用隐藏的全局池。
-- 完整 Rust 插件示例见 examples/machine.rs，外部调用不需要 Lua 裸指针。
+- 完整 Rust 插件示例见 cosmos-network/examples/machine.rs，外部调用不需要 Lua 裸指针。
 
 ### 4.5 HTTP client 实例与连接池
 
@@ -189,7 +190,7 @@ local response, err = client:request("GET", url, {
 - `FromLua` 及其 derive 在成功、失败时恢复入口栈高度；相对索引先通过 `stack::abs_index` 固定。
 - userdata 注册恢复入口栈高度，`push` 只增加一个值；类型表与模块路径对应的表复用。
 - 移除了无调用方的 `with_alpn_server`、`LuaFunction::registry_ref/main/push_to`、`UserData::type_name`，
-  旧 throwing check、重复 raise、状态别名与示例注册包装；Counter 注册直接放在宿主入口。
+  旧 throwing check、重复 raise、状态别名与示例注册包装。
 
 ### Clippy 与底层安全契约
 
@@ -204,7 +205,7 @@ local response, err = client:request("GET", url, {
 - Rust 布局：`builtin/mod.rs` 负责启动，`builtin/time.rs` 负责时间函数，
   `builtin/light_thread.rs` 负责轻线程，`builtin/sync/` 负责同步原语；底层 `LuaCoroutine` 留在 `coroutine.rs`。
 - Machine 初始化顺序：`luaL_newstate` → `userdata::init` → `luaL_openlibs` → `builtin::open`。
-  宿主随后 add_module(Network) 并按需注册 Counter 等自定义类型。
+  宿主随后 add_module(Network) 并按需注册自定义类型；CLI 不注册示例类型。
   `builtin::open` 自行注册 LightThread，宿主不再单独调用线程注册函数。
 - Lua 时间入口为 `cosmos.time.sleep/now_ms/now_us`，轻线程入口为 `cosmos.thread.spawn/wait`，类型表为 `cosmos.LightThread`。
 - `libs.rs` 仅保留 `run_lua_source`，不再承担内建模块实现或注册。
@@ -297,33 +298,34 @@ assert(err == nil, err)
 | `cosmos-network/src/http/server.rs` | hyper auto server、请求 DTO、handler 协程、WebSocket 升级入口 |
 | `cosmos-network/src/websocket/mod.rs` | ws/wss 客户端入口与连接选项 |
 | `cosmos-network/src/websocket/conn.rs` | `WsConn`、帧收发、关闭与服务端升级后的回调执行 |
-| `src/lib.rs` | 对外重导出核心 Machine/Module 与网络插件 Network |
-| `src/main.rs` | CLI 参数、宿主 Runtime 驱动与测试 echo 服务 |
-| `tests/machine.rs` | 嵌入、插件、线程亲和、VM/Runtime 隔离、错误、关闭顺序与 client 池释放回归 |
+| `cosmos-cli/src/main.rs` | clap 参数解析、脚本/标准输入、宿主 Runtime 与 Machine 驱动 |
+| `cosmos-cli/tests/cli.rs` | 命令行帮助、版本、参数透传、标准输入与退出码回归 |
+| `cosmos-network/tests/machine.rs` | 嵌入、插件、线程亲和、VM/Runtime 隔离、错误、关闭顺序与 client 池释放回归 |
 
 ## 7. 验证清单
+
+CLI 用法：`cosmos-cli <SCRIPT> [ARG]...`，`-` 从标准输入读取；`--help` / `--version` 须放在脚本路径前。
+脚本后的参数原样传给 Lua chunk 的 `...`。参数或文件读取错误退出 2，Lua 编译/执行错误退出 1。
 
 ```sh
 cargo build
 
 # 单进程
-./target/debug/cosmos-rs examples/websocket.lua   # 期望最后一行 all websocket checks passed
-./target/debug/cosmos-rs examples/http.lua        # 期望 http ok
-./target/debug/cosmos-rs examples/userdata.lua    # OK
-./target/debug/cosmos-rs examples/spawn.lua       # OK
-./target/debug/cosmos-rs examples/sleep.lua       # OK
-./target/debug/cosmos-rs examples/sync.lua        # all sync checks passed
-./target/debug/cosmos-rs examples/machine.lua host 参数
-cargo run --example machine                    # 多线程 Runtime 下的 Rust 嵌入/插件示例
-# examples/error.lua 期望 exit=1（故意调用 sleep(-1)）
+./target/debug/cosmos-cli examples/websocket.lua   # 期望最后一行 all websocket checks passed
+./target/debug/cosmos-cli examples/http.lua        # 期望 http ok
+./target/debug/cosmos-cli examples/spawn.lua       # OK
+./target/debug/cosmos-cli examples/sleep.lua       # OK
+./target/debug/cosmos-cli examples/sync.lua        # all sync checks passed
+./target/debug/cosmos-cli examples/machine.lua host 参数
+cargo run -p cosmos-network --example machine                    # 多线程 Runtime 下的 Rust 嵌入/插件示例
 
 # 双进程
-(./target/debug/cosmos-rs examples/tcp_server.lua 19001 &) ; sleep 1
-./target/debug/cosmos-rs examples/tcp_client.lua 19001     # OK
-(./target/debug/cosmos-rs examples/tls_server.lua 19443 &) ; sleep 1
-./target/debug/cosmos-rs examples/tls_client.lua 19443     # OK
+(./target/debug/cosmos-cli examples/tcp_server.lua 19001 &) ; sleep 1
+./target/debug/cosmos-cli examples/tcp_client.lua 19001     # OK
+(./target/debug/cosmos-cli examples/tls_server.lua 19443 &) ; sleep 1
+./target/debug/cosmos-cli examples/tls_client.lua 19443     # OK
 
-cargo test --workspace  # 25 项测试及 Machine !Send 编译失败用例通过
+cargo test --workspace  # 29 项测试及 Machine !Send 编译失败用例通过
 ```
 
 ## 8. 坑与注意事项

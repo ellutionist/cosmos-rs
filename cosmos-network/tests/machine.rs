@@ -3,8 +3,9 @@ use std::future::Future;
 use std::task::{Context, Poll, Waker};
 use std::thread::{self, ThreadId};
 
-use cosmos_rs::cosmos::userdata::LuaFunction;
-use cosmos_rs::{cosmos, Machine, Module, Network};
+use cosmos::userdata::LuaFunction;
+use cosmos::{Machine, Module};
+use cosmos_network::Network;
 use tokio::runtime::{Builder, Runtime};
 
 thread_local! {

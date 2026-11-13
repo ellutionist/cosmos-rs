@@ -2,16 +2,12 @@
 //!
 //! 用法：
 //! ```ignore
-//! #[cosmos::userdata]
-//! impl Counter {
-//!     fn get(&self) -> i64 { ... }
-//!     fn inc(&mut self, by: i64) -> i64 { ... }
+//! #[cosmos::userdata(name = "network.http.client")]
+//! impl HttpClient {
+//!     fn new(opts: Option<ClientOptions>) -> Self { ... }
 //! }
-//!
-//! // 自定义 Lua require 路径（默认是类型名，如 require("cosmos.Counter")）
-//! #[cosmos::userdata(name = "http.client")]
-//! impl HttpClient { ... }
 //! ```
+//! 默认路径取类型短名，name 指定相对 cosmos 的模块路径。
 //!
 //! 每个方法生成一个 extern "C" trampoline（参数转换 / panic 捕获 /
 //! 返回值压栈，见 cosmos::userdata::trampoline），并生成
@@ -100,8 +96,8 @@ pub fn userdata(attr: TokenStream, item: TokenStream) -> TokenStream {
     expanded.into()
 }
 
-/// `#[cosmos::userdata(name = "http.client")]`：Lua require 路径覆盖，
-/// 默认是类型短名（require("cosmos.Counter")）
+/// `#[cosmos::userdata(name = "network.http.client")]`：Lua require 路径覆盖，
+/// 默认是类型短名，显式 name 相对 cosmos 根模块解析。
 fn parse_userdata_attr(attr: proc_macro2::TokenStream) -> syn::Result<Option<String>> {
     if attr.is_empty() {
         return Ok(None);

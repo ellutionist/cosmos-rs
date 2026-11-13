@@ -1,5 +1,5 @@
 -- WebSocket 模块端到端测试：HTTP server 按 path 升级到 WebSocket，客户端用同模块收发
--- 运行：cargo run -- examples/websocket.lua
+-- 运行：cargo run -p cosmos-cli -- examples/websocket.lua
 
 local HttpServer = require("cosmos.network.http.server")
 local HttpClient = require("cosmos.network.http.client")

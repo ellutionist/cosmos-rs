@@ -468,3 +468,62 @@
 - 按用户要求，将实例连接池、TLS 配置快照、调用迁移、生命周期回归及配套文档提交到本地 Git，不 push。
 - 提交前差异检查通过，沿用已完成的构建、25 项测试、严格 Clippy、HTTP/WebSocket 回归及压测脚本验证结果。
 - 后续 HTTP 调用统一显式创建并复用 client 实例。
+
+## 2026-11-13 新增 cosmos-cli 并清理根包
+
+### 核心逻辑
+
+- 新增 cosmos-cli 工作区成员，使用 clap derive 解析脚本路径、脚本参数、帮助和版本；
+  CLI 创建单线程 Tokio Runtime，通过 Handle 初始化 Machine 并注入 Network，不接触裸 Lua 栈。
+- 支持文件脚本和 `-` 标准输入；参数通过 Lua chunk 的 `...` 传入，参数/输入错误退出 2，
+  Lua 编译或执行错误退出 1。保留 Counter 及 TCP/TLS echo 环境变量入口，原 examples 继续可用。
+- 根 Cargo.toml 改为虚拟 workspace，默认成员为 cosmos-cli；删除根 src/ 及冗余 cosmos_rs 重导出包，
+  核心类型从 cosmos 引入、网络插件从 cosmos-network 引入。
+- demo 与 echo 服务迁到 cosmos-cli/src；Rust 嵌入示例和 Machine 集成测试迁到 cosmos-network，
+  更新 AGENTS.md、HANDOFF.md 和 Lua 用例中的运行命令。
+
+### 踩坑、验证与下一步
+
+- SCRIPT 与 ARG 分别声明时，紧跟脚本路径的 --help 会被 clap 当成工具选项；
+  改用从 SCRIPT 开始的 trailing_var_arg 连续参数组，脚本之后的 --help、--version、-- 和空字符串均原样透传。
+  路径保留 OsString 以支持非 UTF-8 文件名，Lua 参数显式校验 UTF-8。
+- 新增 4 项 CLI 进程回归；cargo build --workspace --all-targets --locked、
+  cargo test --workspace --locked（29 项及 Machine !Send 编译失败用例）、严格 Clippy 全部通过。
+- 新二进制实际运行 userdata/spawn/sleep/sync/http/websocket、TCP/TLS 单进程及双进程全部通过，
+  error.lua 按预期退出 1；CLI machine.lua 与迁移后的 Rust 嵌入示例通过。
+- HTTP 压测脚本以 4 个 worker 在短窗口完成数千次请求、0 错误；默认 cargo run、帮助/版本及 workspace 元数据验证通过。
+- 本轮未 commit / push。后续以 cosmos-cli 作为可执行入口，验证核心及宏时使用 cargo test --workspace。
+
+## 2026-11-13 清除 CLI 中的测试服务与示例注册
+
+- 按用户要求删除 CLI 的两个 echo 端口参数、对应环境变量处理和整个 echo.rs，
+  清除仅由测试服务使用的 rustls、tokio-rustls、rustls-pemfile 直接依赖及 clap env 功能。
+- 移除 CLI 的 demo 模块和 Counter 默认注册。Counter 迁至 cosmos/examples/userdata.rs，
+  仅由独立 Rust 示例宿主显式注册，再运行根 examples/userdata.lua；正式 CLI 只解析参数并驱动 Machine/Network。
+- 踩坑：迁移宿主入口时误将旧测试辅助逻辑一同放进 CLI；测试服务和示例类型应留在测试或 examples，
+  不作为正式工具的隐藏功能。更新 AGENTS.md、HANDOFF.md 与 userdata 用例运行方式。
+- all-targets 构建、29 项测试及 Machine !Send 编译失败用例、严格 Clippy 通过；
+  CLI 回归确认 Counter 不存在，手工确认旧端口选项被拒绝、旧环境变量不再生效。
+- 实际运行独立 userdata 示例、HTTP/WebSocket/Machine Lua 用例及 TCP/TLS 双进程用例全部通过。
+- 本轮未 commit / push。后续 CLI 保持通用执行入口，自定义 userdata 通过宿主显式注册。
+
+## 2026-11-13 删除剩余早期原型测试遗留
+
+- 按用户要求彻底删除 Counter Rust 演示和 examples/userdata.lua，不再通过迁移目录保留原型类型。
+- 删除依赖旧内置 echo 服务的 examples/tcp.lua、examples/tls.lua，以及仅故意触发错误的 examples/error.lua；
+  TCP/TLS 保留使用当前 API 的双进程用例，CLI 错误退出路径继续由进程集成测试覆盖。
+- 清除 CLI 测试和运行时/宏注释中的 Counter 遗留；宏文档改为当前 network.http.client 声明路径，
+  CLI 测试改为检查未注入测试或示例命名空间。同步删除 AGENTS.md、HANDOFF.md 中失效的文件与命令引用。
+- 全仓检查正式入口、builtin 初始化、Network 注册、环境变量、内嵌资源和测试条件编译：
+  未发现剩余的测试服务自动启动、示例类型默认注册或证书嵌入正式代码；网络模块保持零裸 Lua 栈操作。
+  保留当前 API 的单元/集成回归、Machine 嵌入示例、HTTP 压测脚本及仍供 TLS/HTTPS/WSS 用例使用的证书。
+- all-targets 构建、29 项测试及 Machine !Send 编译失败用例、严格 Clippy 与差异检查通过；
+  实际运行 http/websocket/spawn/sleep/sync/machine、TCP/TLS 双进程及 Rust Machine 示例全部通过。
+- 本轮未 commit / push。后续功能验证使用现有独立用例和 cargo test，不在正式入口增加测试开关或演示类型。
+
+## 2026-11-13 提交独立 CLI 与原型清理
+
+- 按用户要求，将 cosmos-cli、虚拟 workspace、嵌入示例/测试迁移、原型服务与演示清理及配套文档提交到本地 Git。
+- 提交前差异检查通过，沿用已完成的 all-targets 构建、29 项测试、Machine !Send 检查、严格 Clippy 和 examples 回归结果。
+- Machine 执行语义保持不变：主协程结束后 exec 返回；宿主保留 Machine 可继续执行，CLI 则销毁 Machine 并退出。
+- 不 push。后续以独立 CLI 为执行入口，测试辅助逻辑不进入正式工具。

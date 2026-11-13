@@ -1,6 +1,7 @@
 //! Rust 宿主示例：注入多线程 Runtime Handle，并安装网络和自定义插件。
 
-use cosmos_rs::{cosmos, Machine, Module, Network};
+use cosmos::{Machine, Module};
+use cosmos_network::Network;
 
 struct Host;
 
@@ -39,7 +40,7 @@ fn main() -> Result<(), String> {
             .await?;
         machine
             .exec_file(
-                concat!(env!("CARGO_MANIFEST_DIR"), "/examples/machine.lua"),
+                concat!(env!("CARGO_MANIFEST_DIR"), "/../examples/machine.lua"),
                 &["host".to_string(), "参数".to_string()],
             )
             .await

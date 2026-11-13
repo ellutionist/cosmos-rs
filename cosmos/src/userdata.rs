@@ -9,7 +9,7 @@
 //!   （Lua GC 托管，不额外堆分配），metatable 在首次 push 时懒构建
 //! - metatable 兼任类型表：__index = 自身（静态构造 + 实例方法共用一张表）、
 //!   __gc = drop_in_place 统一生成，经 package.preload 用 require 引入
-//!   （local Counter = require("cosmos.Counter")）
+//!   （如 local Channel = require("cosmos.sync.channel")）
 //! - 声明路径按点分段，自动创建父模块；类型表同时是父模块字段和 require 返回值
 //! - 类型校验比较 userdata 的 metatable，类型或借用失败只返回 Err
 //! - 方法借 &mut/& 走 RefCell::try_borrow：Lua 边界上编译期独占性降级为
@@ -33,7 +33,7 @@ use crate::ffi::*;
 
 /// #[cosmos::userdata] 宏为每个类型生成该 impl
 pub trait UserData: 'static {
-    /// Lua 侧 require 引入用的类型名（local Counter = require("cosmos.Counter")），
+    /// Lua 侧 require 引入用的相对路径（如 sync.channel），
     /// 宏默认生成类型短名（路径最后一段）
     fn lua_name() -> &'static str {
         std::any::type_name::<Self>()
@@ -198,7 +198,7 @@ unsafe fn ensure_metatable<T: UserData>(main: *mut lua_State, lua_state: *mut lu
         lua_setfield(lua_state, LUA_REGISTRYINDEX, type_cstring::<T>().as_ptr());
 
         // 静态构造和实例方法共用这一张表：__index 指向自己，
-        // obj:method() → mt.method，Counter.new() → 命名空间字段直接索引 mt
+        // obj:method() → mt.method，类型表上的静态方法直接索引 mt
         lua_pushvalue(lua_state, -1);
         lua_setfield(lua_state, -2, c"__index".as_ptr());
 
@@ -227,7 +227,7 @@ unsafe fn ensure_metatable<T: UserData>(main: *mut lua_State, lua_state: *mut lu
 }
 
 /// 提前注册类型（构建 metatable + 挂 require 入口），
-/// 让脚本可以在任何实例产生之前 require("cosmos.Counter")。
+/// 让脚本可以在任何实例产生之前通过声明路径 require 对应类型表。
 /// 不调用也能工作：首次 push 时会懒注册，只是 require 会晚于第一个实例
 ///
 /// # Safety

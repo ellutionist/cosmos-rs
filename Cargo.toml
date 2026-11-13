@@ -1,15 +1,4 @@
-[package]
-name = "cosmos-rs"
-version = "0.1.0"
-edition = "2021"
-
 [workspace]
-members = ["cosmos", "cosmos-macros", "cosmos-network"]
-
-[dependencies]
-cosmos = { path = "cosmos" }
-tokio = { version = "1", features = ["rt", "rt-multi-thread", "time", "net", "io-util"] }
-cosmos-network = { path = "cosmos-network" }
-rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
-tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12", "logging"] }
-rustls-pemfile = "2"
+members = ["cosmos", "cosmos-macros", "cosmos-network", "cosmos-cli"]
+default-members = ["cosmos-cli"]
+resolver = "2"

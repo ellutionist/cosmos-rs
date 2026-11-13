@@ -1,5 +1,5 @@
 -- HTTP 压测用服务端（单进程、单 runtime）
--- 运行：cargo run --release -- examples/http_bench.lua [port] [body_bytes]
+-- 运行：cargo run -p cosmos-cli --release -- examples/http_bench.lua [port] [body_bytes]
 -- 然后：wrk -t1 -c10 -d10s --latency http://127.0.0.1:<port>/
 
 local HttpServer = require("cosmos.network.http.server")

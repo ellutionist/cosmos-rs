@@ -1,7 +1,7 @@
 -- 用自己的 HttpClient 压自己的 HttpServer
 --
--- 服务端：cargo run --release -- examples/http_bench.lua <port> [body_bytes]
--- 客户端：cargo run --release -- examples/http_bench_client.lua <port> [conns] [seconds] [path] [method] [body_bytes]
+-- 服务端：cargo run -p cosmos-cli --release -- examples/http_bench.lua <port> [body_bytes]
+-- 客户端：cargo run -p cosmos-cli --release -- examples/http_bench_client.lua <port> [conns] [seconds] [path] [method] [body_bytes]
 --
 -- 每个 worker 是一个 Lua 协程：发一个请求、等响应、再发下一个，
 -- N 个 worker 并发即 N 条 keep-alive 连接（与 wrk -c N 等价的负载形态）。

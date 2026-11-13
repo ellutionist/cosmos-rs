@@ -29,7 +29,7 @@
 - `cosmos-network/src/bridge.rs`：只放无法下沉到 cosmos 的叶子转换
   （如 `Bytes` ↔ Lua 字符串）、C 闭包 trampoline 与类型注册；
 
-宿主通过 `Machine` 创建/执行/销毁 VM，`src/main.rs` 只处理命令行和测试服务，不再手动管理 Lua 栈。
+宿主通过 `Machine` 创建/执行/销毁 VM，`cosmos-cli/src/main.rs` 只处理命令行与脚本执行，不再手动管理 Lua 栈。
 
 新增返回形态时，优先补 cosmos 的基层 trait 实现或宏能力，再组合到功能模块里；
 不要为一个场景在 bridge 里新写一段栈操作。
@@ -38,7 +38,7 @@
 
 - **不自动 commit / push**：只有用户明确要求时才提交。
 - 行为修改必须实际运行 `examples/` 下对应用例验证（含相关回归），
-  不能只凭"编译通过"或"看起来对"；`cargo test` 覆盖 derive 单元测试。
+  不能只凭"编译通过"或"看起来对"；`cargo test --workspace` 覆盖 derive 单元测试。
 - 优先 Rust 原生依赖，不引入 C 库；整体是单线程 LocalSet 模型
   （Lua 协程 `!Send`，网络任务与协程在同一线程交错推进）。
 - `Machine` 注入 Tokio `Handle`，不接管 Runtime 所有权；宿主须在注入的 Runtime 上 await 执行 API。
@@ -61,16 +61,15 @@
 cargo build
 
 # 单进程用例
-./target/debug/cosmos-rs examples/websocket.lua
-./target/debug/cosmos-rs examples/http.lua
-./target/debug/cosmos-rs examples/userdata.lua
+./target/debug/cosmos-cli examples/websocket.lua
+./target/debug/cosmos-cli examples/http.lua
 
 # 双进程用例
-./target/debug/cosmos-rs examples/tcp_server.lua 19001 &
-./target/debug/cosmos-rs examples/tcp_client.lua 19001
+./target/debug/cosmos-cli examples/tcp_server.lua 19001 &
+./target/debug/cosmos-cli examples/tcp_client.lua 19001
 
-./target/debug/cosmos-rs examples/tls_server.lua 19443 &
-./target/debug/cosmos-rs examples/tls_client.lua 19443
+./target/debug/cosmos-cli examples/tls_server.lua 19443 &
+./target/debug/cosmos-cli examples/tls_client.lua 19443
 
-cargo test
+cargo test --workspace
 ```

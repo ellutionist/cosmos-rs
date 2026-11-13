@@ -1,0 +1,11 @@
+[package]
+name = "cosmos-cli"
+version = "0.1.0"
+edition = "2021"
+description = "基于 cosmos Machine 的 Lua 命令行运行工具"
+
+[dependencies]
+clap = { version = "4.6", features = ["derive"] }
+cosmos = { path = "../cosmos" }
+cosmos-network = { path = "../cosmos-network" }
+tokio = { version = "1.49", features = ["rt"] }
