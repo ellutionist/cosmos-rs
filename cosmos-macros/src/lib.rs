@@ -146,7 +146,8 @@ fn gen_method(
             (false, binding)
         }
         Some(FnArg::Typed(_)) => (true, quote!()),
-        None => return err(&sig.inputs, "method needs a receiver or arguments"),
+        // 无参静态方法（如 TlsContext.new()）：参数从栈 1 开始，但没有要转换的实参
+        None => (true, quote!()),
     };
 
     let mut arg_idents = Vec::new();

@@ -21,10 +21,14 @@ fn main() {
         .build()
         .unwrap();
 
-    // 测试用：设置 COSMOS_ECHO_PORT 时在 runtime 上起一个 echo server
+    // 测试用：设置 COSMOS_ECHO_PORT / COSMOS_TLS_ECHO_PORT 时起 echo server
     if let Ok(port) = std::env::var("COSMOS_ECHO_PORT") {
         let port: u16 = port.parse().expect("invalid COSMOS_ECHO_PORT");
         rt.spawn(echo_server(port));
+    }
+    if let Ok(port) = std::env::var("COSMOS_TLS_ECHO_PORT") {
+        let port: u16 = port.parse().expect("invalid COSMOS_TLS_ECHO_PORT");
+        rt.spawn(tls_echo_server(port));
     }
 
     match rt.block_on(run(&code, &script_args)) {
@@ -51,6 +55,59 @@ async fn echo_server(port: u16) {
                     Ok(0) | Err(_) => break,
                     Ok(n) => {
                         if sock.write_all(&buf[..n]).await.is_err() {
+                            break;
+                        }
+                    }
+                }
+            }
+        });
+    }
+}
+
+/// 测试用 TLS echo server：证书为 examples/certs 下的自签 localhost 证书
+/// （SAN: DNS:localhost, IP:127.0.0.1），客户端用同一 PEM 作为信任根
+async fn tls_echo_server(port: u16) {
+    use std::sync::Arc;
+
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio_rustls::TlsAcceptor;
+
+    let cert_pem: &[u8] = include_bytes!("../examples/certs/cert.pem");
+    let key_pem: &[u8] = include_bytes!("../examples/certs/key.pem");
+    let certs = rustls_pemfile::certs(&mut &cert_pem[..])
+        .collect::<Result<Vec<_>, _>>()
+        .expect("bad test cert");
+    let key = rustls_pemfile::private_key(&mut &key_pem[..])
+        .expect("bad test key")
+        .expect("test key missing");
+    let config = rustls::ServerConfig::builder()
+        .with_no_client_auth()
+        .with_single_cert(certs, key)
+        .expect("tls server config");
+    let acceptor = TlsAcceptor::from(Arc::new(config));
+
+    let listener = tokio::net::TcpListener::bind(("127.0.0.1", port))
+        .await
+        .expect("tls echo server bind failed");
+    loop {
+        let (sock, _) = listener.accept().await.expect("tls echo accept failed");
+        let acceptor = acceptor.clone();
+        tokio::spawn(async move {
+            // 客户端拒绝证书时握手失败，直接丢弃这条连接
+            let Ok(mut tls) = acceptor.accept(sock).await else {
+                return;
+            };
+            let mut buf = [0u8; 1024];
+            loop {
+                match tls.read(&mut buf).await {
+                    Ok(0) => {
+                        // 对端发了 close_notify：回一个，让客户端看到干净 EOF
+                        let _ = tls.shutdown().await;
+                        break;
+                    }
+                    Err(_) => break,
+                    Ok(n) => {
+                        if tls.write_all(&buf[..n]).await.is_err() {
                             break;
                         }
                     }

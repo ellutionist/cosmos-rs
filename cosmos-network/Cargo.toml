@@ -5,4 +5,8 @@ edition = "2021"
 
 [dependencies]
 cosmos = { path = "../cosmos" }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
+rustls-pemfile = "2"
 tokio = { version = "1", features = ["net", "io-util", "time"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12", "logging"] }
+webpki-roots = "0.26"

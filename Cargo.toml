@@ -11,3 +11,6 @@ cosmos = { path = "cosmos" }
 tokio = { version = "1", features = ["rt", "time", "net", "io-util"] }
 cosmos-ext-demo = { path = "../cosmos-ext-demo" }
 cosmos-network = { path = "cosmos-network" }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12", "logging"] }
+rustls-pemfile = "2"

@@ -23,10 +23,14 @@
 
 use std::cell::Cell;
 use std::future::Future;
+use std::pin::Pin;
 use std::rc::Rc;
+use std::task::{Context, Poll};
 use std::time::Duration;
 
-use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{
+    AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader, ReadBuf,
+};
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::TcpStream;
 use tokio::time::Instant;
@@ -38,9 +42,12 @@ use cosmos::ffi::{
 };
 use cosmos::userdata::{FromLua, IntoOutput, LuaStr, PushLua};
 
+use crate::error::classify_io;
+use crate::tls::TlsIo;
+
 /// 可选 deadline 包裹一个 future：Some 时到点返回 Err(())（调用方转成 "timeout"），
 /// None 时无限等待。用于 settimeout 生效后的各读写点。
-async fn with_deadline<F, T>(deadline: Option<Instant>, fut: F) -> Result<T, ()>
+pub(crate) async fn with_deadline<F, T>(deadline: Option<Instant>, fut: F) -> Result<T, ()>
 where
     F: Future<Output = T>,
 {
@@ -51,12 +58,12 @@ where
 }
 
 /// settimeout 的毫秒参数：<= 0 表示清除超时（None）
-fn timeout_from_ms(ms: i64) -> Option<Duration> {
+pub(crate) fn timeout_from_ms(ms: i64) -> Option<Duration> {
     (ms > 0).then(|| Duration::from_millis(ms as u64))
 }
 
 /// setbufsize 的字节参数：<= 0 表示不限（None）
-fn size_limit(n: i64) -> Option<usize> {
+pub(crate) fn size_limit(n: i64) -> Option<usize> {
     (n > 0).then_some(n as usize)
 }
 
@@ -65,6 +72,59 @@ fn size_limit(n: i64) -> Option<usize> {
 pub enum State {
     Connected = 0,
     Closed = 1,
+}
+
+/// split 后的读半：明文流或 TLS 流，统一实现 AsyncRead，
+/// 让 reader 的 receive 状态机对两种连接只有一份实现
+pub enum ReadSide {
+    Plain(OwnedReadHalf),
+    Tls(tokio::io::ReadHalf<TlsIo>),
+}
+
+impl AsyncRead for ReadSide {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        match self.get_mut() {
+            ReadSide::Plain(r) => Pin::new(r).poll_read(cx, buf),
+            ReadSide::Tls(r) => Pin::new(r).poll_read(cx, buf),
+        }
+    }
+}
+
+/// split 后的写半：对应 ReadSide
+pub enum WriteSide {
+    Plain(OwnedWriteHalf),
+    Tls(tokio::io::WriteHalf<TlsIo>),
+}
+
+impl AsyncWrite for WriteSide {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<std::io::Result<usize>> {
+        match self.get_mut() {
+            WriteSide::Plain(w) => Pin::new(w).poll_write(cx, buf),
+            WriteSide::Tls(w) => Pin::new(w).poll_write(cx, buf),
+        }
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        match self.get_mut() {
+            WriteSide::Plain(w) => Pin::new(w).poll_flush(cx),
+            WriteSide::Tls(w) => Pin::new(w).poll_flush(cx),
+        }
+    }
+
+    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        match self.get_mut() {
+            WriteSide::Plain(w) => Pin::new(w).poll_shutdown(cx),
+            WriteSide::Tls(w) => Pin::new(w).poll_shutdown(cx),
+        }
+    }
 }
 
 /// 连接入口：静态方法 Tcp.connect(host, port, timeout_ms?)
@@ -83,7 +143,7 @@ impl Tcp {
                 timeout: None,
                 max_buf: None,
             }),
-            Ok(Err(e)) => Err(e.to_string()),
+            Ok(Err(e)) => Err(classify_io(&e)),
             Err(()) => Err("timeout".to_string()),
         }
     }
@@ -121,14 +181,14 @@ impl TcpConn {
         let (r, w) = stream.into_split();
         (
             TcpReader {
-                inner: Some(BufReader::new(r)),
+                inner: Some(BufReader::new(ReadSide::Plain(r))),
                 state: self.state.clone(),
                 buf: Vec::new(),
                 timeout: self.timeout,
                 max_buf: self.max_buf,
             },
             TcpWriter {
-                inner: Some(w),
+                inner: Some(WriteSide::Plain(w)),
                 state: self.state.clone(),
                 timeout: self.timeout,
             },
@@ -221,13 +281,13 @@ impl IntoOutput for ReceiveOutcome {
 }
 
 pub struct TcpReader {
-    inner: Option<BufReader<OwnedReadHalf>>,
-    state: Rc<Cell<State>>,
+    pub(crate) inner: Option<BufReader<ReadSide>>,
+    pub(crate) state: Rc<Cell<State>>,
     /// 内置读缓冲：跨 fill 复用，返回时 mem::take 零拷贝移出
-    buf: Vec<u8>,
-    timeout: Option<Duration>,
+    pub(crate) buf: Vec<u8>,
+    pub(crate) timeout: Option<Duration>,
     /// *a/*l/*L/receiveuntil 的累积上限；None 不限
-    max_buf: Option<usize>,
+    pub(crate) max_buf: Option<usize>,
 }
 
 #[cosmos::userdata]
@@ -266,7 +326,7 @@ impl TcpReader {
                             Err(FillError::Io(e)) => {
                                 self.state.set(State::Closed);
                                 return ReceiveOutcome::Error(
-                                    e.to_string(),
+                                    classify_io(&e),
                                     std::mem::take(&mut self.buf),
                                 );
                             }
@@ -301,7 +361,7 @@ impl TcpReader {
                             Err(FillError::Io(e)) => {
                                 self.state.set(State::Closed);
                                 return ReceiveOutcome::Error(
-                                    e.to_string(),
+                                    classify_io(&e),
                                     std::mem::take(&mut self.buf),
                                 );
                             }
@@ -360,7 +420,7 @@ impl TcpReader {
                             self.state.set(State::Closed);
                             self.buf.truncate(filled);
                             return ReceiveOutcome::Error(
-                                e.to_string(),
+                                classify_io(&e),
                                 std::mem::take(&mut self.buf),
                             );
                         }
@@ -403,7 +463,7 @@ impl TcpReader {
 
 /// receiveuntil 迭代器的状态：独占 reader 的流，每次 next() 读一段
 pub struct TcpUntil {
-    inner: Option<BufReader<OwnedReadHalf>>,
+    inner: Option<BufReader<ReadSide>>,
     state: Rc<Cell<State>>,
     delim: Vec<u8>,
     /// 单次调用内的累积缓冲（分隔符可能跨 BufReader 分块边界）
@@ -464,7 +524,7 @@ impl TcpUntil {
                     Ok(b) => b,
                     Err(FillError::Io(e)) => {
                         self.state.set(State::Closed);
-                        return ReceiveOutcome::Error(e.to_string(), std::mem::take(&mut self.buf));
+                        return ReceiveOutcome::Error(classify_io(&e), std::mem::take(&mut self.buf));
                     }
                     Err(FillError::Timeout) => {
                         return ReceiveOutcome::Timeout(std::mem::take(&mut self.buf));
@@ -525,7 +585,7 @@ enum FillError {
 /// 只借用不消费：调用方按需 extend 到自己的 buf 后再 consume。
 async fn fill<'a>(
     deadline: Option<Instant>,
-    inner: &'a mut BufReader<OwnedReadHalf>,
+    inner: &'a mut BufReader<ReadSide>,
 ) -> Result<&'a [u8], FillError> {
     match with_deadline(deadline, inner.fill_buf()).await {
         Ok(Ok(b)) => Ok(b),
@@ -546,7 +606,7 @@ enum ChunkError {
 /// 单次 read，带可选 deadline；Size 模式攒够 n 字节前反复调用（共用同一 deadline）
 async fn read_chunk(
     deadline: Option<Instant>,
-    inner: &mut BufReader<OwnedReadHalf>,
+    inner: &mut BufReader<ReadSide>,
     buf: &mut [u8],
 ) -> Result<usize, ChunkError> {
     match with_deadline(deadline, inner.read(buf)).await {
@@ -557,9 +617,9 @@ async fn read_chunk(
 }
 
 pub struct TcpWriter {
-    inner: Option<OwnedWriteHalf>,
-    state: Rc<Cell<State>>,
-    timeout: Option<Duration>,
+    pub(crate) inner: Option<WriteSide>,
+    pub(crate) state: Rc<Cell<State>>,
+    pub(crate) timeout: Option<Duration>,
 }
 
 #[cosmos::userdata]
@@ -585,15 +645,19 @@ impl TcpWriter {
             Ok(Ok(())) => Ok(bytes.len() as i64),
             Ok(Err(e)) => {
                 self.state.set(State::Closed);
-                Err(e.to_string())
+                Err(classify_io(&e))
             }
             // 超时不断连接：write_all 未完成的部分可能已部分写出
             Err(()) => Err("timeout".to_string()),
         }
     }
 
-    fn close(&mut self) {
-        self.inner.take(); // drop → shutdown 写半（对端读会收到 EOF）
+    /// 半关闭写端：明文发 FIN，TLS 发 close_notify（等对端收尾后才返回）
+    async fn close(&mut self) {
+        if let Some(mut inner) = self.inner.take() {
+            let deadline = self.timeout.map(|d| Instant::now() + d);
+            let _ = with_deadline(deadline, inner.shutdown()).await;
+        }
         self.state.set(State::Closed);
     }
 }
