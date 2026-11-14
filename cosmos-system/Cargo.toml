@@ -1,0 +1,12 @@
+[package]
+name = "cosmos-system"
+version = "0.1.0"
+edition = "2021"
+description = "Explicit process signals and process information for cosmos"
+
+[dependencies]
+cosmos = { path = "../cosmos" }
+tokio = { version = "1.49", features = ["rt", "signal", "sync", "time"] }
+
+[dev-dependencies]
+tokio = { version = "1.49", features = ["rt-multi-thread"] }

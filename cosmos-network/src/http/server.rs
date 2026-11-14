@@ -26,6 +26,7 @@ use std::pin::Pin;
 use std::rc::Rc;
 use std::sync::Arc;
 
+use super::lifecycle::Life;
 use bytes::Bytes;
 use http_body_util::{BodyExt, Limited};
 use hyper::body::Incoming;
@@ -36,8 +37,8 @@ use hyper::{Request as HyperRequest, Response, StatusCode};
 use hyper_util::rt::TokioIo;
 use hyper_util::server::conn::auto;
 use std::io;
+use std::time::Duration;
 use tokio::net::TcpListener;
-use tokio::task::JoinHandle;
 use tokio_rustls::TlsAcceptor;
 
 use cosmos::userdata::{LuaFunction, Nil};
@@ -77,6 +78,7 @@ struct ServerOptions {
 
 /// 服务端共享状态：锚定的 handler；Rc 由 accept 循环与各连接共同持有
 struct ServerInner {
+    life: Rc<Life>,
     handler: LuaFunction,
     max_body: usize,
     ws_max_message: usize,
@@ -355,7 +357,21 @@ impl Service<HyperRequest<Incoming>> for LuaService {
     fn call(&self, req: HyperRequest<Incoming>) -> Self::Future {
         let inner = self.inner.clone();
         let peer = self.peer.clone();
-        Box::pin(async move { Ok(handle(req, inner, peer).await) })
+        let guard = inner.life.request();
+        let mut force = inner.life.forcing();
+        Box::pin(async move {
+            let _guard = guard;
+            if *force.borrow() {
+                return Ok(plain_response(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "server shutting down",
+                ));
+            }
+            tokio::select! {biased;
+                _=force.changed()=>Ok(plain_response(StatusCode::SERVICE_UNAVAILABLE,"server shutting down")),
+                response=handle(req,inner,peer)=>Ok(response),
+            }
+        })
     }
 }
 
@@ -480,13 +496,20 @@ async fn accept_loop(inner: Rc<ServerInner>, listener: TcpListener, acceptor: Op
         let inner = inner.clone();
         let acceptor = acceptor.clone();
         let peer: Arc<str> = peer.to_string().into();
-        tokio::task::spawn_local(async move {
+        let (id, guard) = inner.life.connection();
+        let life = inner.life.clone();
+        let mut draining = life.draining();
+        let task = tokio::task::spawn_local(async move {
+            let _guard = guard;
+            if *draining.borrow() {
+                return;
+            }
             match acceptor {
                 None => serve_conn(TokioIo::new(sock), inner, peer).await,
-                Some(acceptor) => match acceptor
-                    .accept(crate::tcp::transport::PlainIo::tcp(sock))
-                    .await
-                {
+                Some(acceptor) => match tokio::select! {biased;
+                    _=draining.changed()=>return,
+                    result=acceptor.accept(crate::tcp::transport::PlainIo::tcp(sock))=>result,
+                } {
                     Ok(stream) => {
                         serve_conn(TokioIo::new(TlsIo::Server(stream)), inner, peer).await
                     }
@@ -494,6 +517,7 @@ async fn accept_loop(inner: Rc<ServerInner>, listener: TcpListener, acceptor: Op
                 },
             }
         });
+        life.track(id, task.abort_handle());
     }
 }
 
@@ -501,27 +525,55 @@ async fn serve_conn<I>(io: I, inner: Rc<ServerInner>, peer: Arc<str>)
 where
     I: hyper::rt::Read + hyper::rt::Write + Unpin + Send + 'static,
 {
+    let mut draining = inner.life.draining();
     let service = LuaService { inner, peer };
     let builder = auto::Builder::new(LocalExec);
     // 客户端断开/keep-alive 超时等连接级错误不必上报；handler 错误已单独记日志。
     // with_upgrades：HTTP 请求可被 handler 升级成 WebSocket（101 后连接脱管）
-    let _ = builder.serve_connection_with_upgrades(io, service).await;
+    let connection = builder.serve_connection_with_upgrades(io, service);
+    tokio::pin!(connection);
+    if !*draining.borrow() {
+        tokio::select! {biased;_=draining.changed()=>{},_=connection.as_mut()=>return}
+    }
+    connection.as_mut().graceful_shutdown();
+    let _ = connection.await;
 }
 
 /// 服务端句柄：close() 停止 accept（已有连接继续跑到结束）。
 /// 与 C++ 一致：句柄被 GC 回收不等于 close（accept 任务持有自己的 Rc），
 /// 只有显式 close() 或进程退出才停止监听
+#[derive(Clone)]
 pub(crate) struct HttpServerHandle {
-    task: Option<JoinHandle<()>>,
+    life: Rc<Life>,
     port: u16,
 }
 
 #[cosmos::userdata(name = "network.http.handle")]
 impl HttpServerHandle {
-    fn close(&mut self) {
-        if let Some(task) = self.task.take() {
-            task.abort();
+    fn close(&self) {
+        self.life.close();
+    }
+    async fn shutdown(self, timeout: Option<Duration>) -> Result<bool, String> {
+        self.life.start_drain();
+        if let Some(timeout) = timeout {
+            if tokio::time::timeout(timeout, self.life.wait())
+                .await
+                .is_err()
+            {
+                self.life.force();
+                self.life.wait().await;
+                return Ok(false);
+            }
+        } else {
+            self.life.wait().await;
         }
+        Ok(true)
+    }
+    fn is_draining(&self) -> bool {
+        *self.life.draining().borrow()
+    }
+    fn connections(&self) -> i64 {
+        self.life.connections() as i64
     }
 
     /// 实际监听端口（传 0 让系统分配时用）
@@ -544,11 +596,16 @@ impl HttpServer {
         opts: Option<ServerOptions>,
     ) -> Result<HttpServerHandle, String> {
         let opts = opts.unwrap_or_default();
+        if !(0..=65535).contains(&port) {
+            return Err("HTTP server port must be in 0..=65535".into());
+        }
         let listener = TcpListener::bind((host.as_str(), port as u16))
             .await
             .map_err(|e| classify_io(&e))?;
         let local_port = listener.local_addr().map_err(|e| classify_io(&e))?.port();
+        let life = Life::new();
         let inner = Rc::new(ServerInner {
+            life: life.clone(),
             handler,
             stream_body: opts.stream_body,
             max_body: opts
@@ -563,9 +620,14 @@ impl HttpServer {
                 .unwrap_or(DEFAULT_WS_MAX_MESSAGE),
         });
         let acceptor = opts.tls.map(|c| TlsAcceptor::from(c.0));
-        let task = tokio::task::spawn_local(accept_loop(inner, listener, acceptor));
+        let guard = life.accept_guard();
+        let task = tokio::task::spawn_local(async move {
+            let _guard = guard;
+            accept_loop(inner, listener, acceptor).await;
+        });
+        life.install(task);
         Ok(HttpServerHandle {
-            task: Some(task),
+            life,
             port: local_port,
         })
     }

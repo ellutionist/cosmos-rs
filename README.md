@@ -22,6 +22,7 @@
   - [JSON：cosmos.encoding.json](#jsoncosmosencodingjson)
   - [TOML：cosmos.encoding.toml](#tomlcosmosencodingtoml)
   - [YAML：cosmos.encoding.yaml](#yamlcosmosencodingyaml)
+- [系统插件](#系统插件)
 - [文本插件](#文本插件)
 - [图片插件](#图片插件)
 - [加密插件](#加密插件)
@@ -506,6 +507,10 @@ print(assert(yaml.encode(config)))
 
 XML 提供独立文档/节点、命名空间和保留原文的编辑，见 [XML 文档](cosmos-encoding/xml.md) 与 [xml.lua](examples/xml.lua)。
 
+## 系统插件
+
+可选 `system` feature 提供 `cosmos.system.signal` 的显式信号订阅和 `cosmos.system.process` 进程信息，`full` 包含它。应用自行编排停止顺序；HTTP 服务端支持停止接收与优雅排空。见 [System 文档](cosmos-system/README.md)、[system.lua](examples/system.lua) 和 [http_shutdown.lua](examples/http_shutdown.lua)。
+
 ## 文本插件
 
 构建 CLI 时通过 `--features text` 或 `--features full` 启用。`cosmos-text` 提供编译型正则、捕获组与可挂起的替换回调、Unicode 规范化/大小写及 Rust OpenCC 繁简转换。用法见 [Text 文档](cosmos-text/README.md) 和 [text.lua](examples/text.lua)。名称清洗、匹配与规范化顺序由应用组织。
@@ -742,12 +747,13 @@ C 扩展的调用是同步的：阻塞操作会阻塞 `Machine` 所在线程，�
 
 ### 插件开关
 
-默认仅启用 `network`。`encoding`、`encryption`、`database`、`image`、`text` 按需启用，`full` 开启全部插件：`cargo build --release -p cosmos-cli --features full`。
+默认仅启用 `network`。`encoding`、`encryption`、`database`、`image`、`text`、`system` 按需启用，`full` 开启全部插件：`cargo build --release -p cosmos-cli --features full`。
 
 | Feature | 插件 | 依赖 |
 | --- | --- | --- |
 | `network` | 网络（TCP / UDP / TLS / socket / HTTP / WebSocket） | — |
-| `full` | 全部插件 | `network` + `encoding` + `encryption` + `database` + `image` + `text` |
+| `full` | 全部插件 | `network` + `encoding` + `encryption` + `database` + `image` + `text` + `system` |
+| `system` | 显式信号订阅与进程信息（默认关闭） | — |
 | `text` | 文本（正则 / Unicode / 繁简转换；默认关闭） | — |
 | `image` | 图片（PNG / JPEG / WebP、缩放裁剪、像素；默认关闭） | — |
 | `encoding` | 编解码（hex / base64 / uri / json / toml / yaml） | — |
@@ -771,6 +777,7 @@ cosmos-network/   网络插件：TCP / TLS / socket / HTTP / WebSocket
 cosmos-encoding/  编解码插件：hex / base64 / uri / json
 cosmos-encryption/ 加密插件：摘要 / HMAC / 密码 / 随机数 / Ed25519 / RSA
 cosmos-database/  数据库插件：MySQL / Redis
+cosmos-system/    系统插件：信号 / 进程信息
 cosmos-text/      文本插件：正则 / Unicode / 繁简转换
 cosmos-image/     图片插件：编解码 / 缩放裁剪 / 像素
 cosmos-cli/       命令行入口
@@ -796,6 +803,8 @@ cargo test --workspace
 | `tcp_client.lua` + `tcp_server.lua` | TCP echo（双进程） |
 | `tls_client.lua` + `tls_server.lua` | TLS echo（双进程） |
 | `network_socket.lua` | 顺序协议 socket 与 STARTTLS |
+| [system.lua](examples/system.lua) | 显式信号订阅与进程信息 |
+| [http_shutdown.lua](examples/http_shutdown.lua) | 停止接收、优雅排空与强制超时 |
 | [proxy.lua](examples/proxy.lua) | HTTP 代理、逐跳路由、流式与池隔离 |
 | [url.lua](examples/url.lua) | URL 组件、查询参数与标准重定向 |
 | [http_stream.lua](examples/http_stream.lua) | HTTP 流式上传/下载、文件范围、条件缓存与取消 |

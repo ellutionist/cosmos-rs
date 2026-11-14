@@ -53,3 +53,13 @@ body 是一次性流：可连续读取，或交给一次 HTTP 发送；开始手
 字符串请求保持原重定向行为。保留原方法/body 的重定向（例如 307 / 308）不能自动重放一次性流，会明确返回错误；转换到 GET 的重定向可继续跟随并取消原上传。跨源仍剥离凭证头。
 
 对端断开、发送取消或 Machine 销毁会取消相应的本地生产任务；响应结束后关闭关联的请求输入。文件关闭遵循前面的所有权配置。原生系统调用不能强制撤销，已经派发的文件 I/O 可能执行到完成；不承诺取消会回滚文件副作用。服务端停止接受与已有连接排空仍属于路线图的服务生命周期阶段。
+
+## 服务端停止与排空
+
+handle:close() 保留原语义：停止 accept，已建立的连接继续执行。`handle:shutdown(timeout_ms?)` 则停止接收，并请求 HTTP/1.1/HTTP/2 优雅关闭，等待在途 handler、连接及响应体结束；返回 true 表示正常排空。到达超时时限会强制结束连接和在途 handler，等待清理后返回 false。缺省无限等待，0 立即尝试，不能排空时强制结束。
+
+`:is_draining()` 查询是否已发起排空，`:connections()` 包含普通连接、空闲 keep-alive 和 TLS 半握手。未完成 TLS 握手在排空时关闭；等待 shutdown 的协程被取消不恢复监听，可由另一协程继续等待。重复 shutdown 幂等，handle 仍保持线程亲和，不持有跨 await 的 userdata 借用。
+
+在控制协程中调用 shutdown，避免从自己的 handler 内无限等待自身完成。升级后的 WebSocket 不再属于 HTTP 连接，由应用先关闭相应 WebSocket；文件等已派发的系统调用仍不能回滚。GC 回收 handle 不自动停服，沿用既有生命周期，Machine 销毁取消 LocalSet 任务。
+
+实际 HTTP/1.1/HTTP/2、流式响应、强制超时及 Lua 资源释放见 [http_shutdown.lua](../examples/http_shutdown.lua)。显式信号订阅由可选 [cosmos-system](../cosmos-system/README.md) 提供，Network 不会自动安装进程信号处理。

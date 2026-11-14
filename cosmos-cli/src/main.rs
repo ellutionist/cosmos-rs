@@ -17,6 +17,8 @@ use cosmos_encryption::Encryption;
 use cosmos_image::Image;
 #[cfg(feature = "network")]
 use cosmos_network::Network;
+#[cfg(feature = "system")]
+use cosmos_system::System;
 #[cfg(feature = "text")]
 use cosmos_text::Text;
 
@@ -103,6 +105,8 @@ fn run(
     machine.add_module(Encryption)?;
     #[cfg(feature = "network")]
     machine.add_module(Network)?;
+    #[cfg(feature = "system")]
+    machine.add_module(System)?;
     #[cfg(any(feature = "mysql", feature = "redis"))]
     machine.add_module(Database)?;
 

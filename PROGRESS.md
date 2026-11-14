@@ -1184,3 +1184,14 @@
 - 已在用户指定真实 MySQL/Redis 上运行 database_resources.lua，验证绑定/NUL/高精度/日期/微秒/LIMIT、队列超时/满载、提交/回滚、Redis MULTI/EXEC、取消/关闭唤醒及清理；原生协议服务端验证精确 COM 字节序列和二进制 NULL bitmap。进一步执行工作区/feature/原示例后按连续授权提交并继续生命周期。
 
 - 收尾通过：工作区 109 项常规测试和 5 项编译失败文档检查、严格 Clippy、MySQL-only/Redis-only feature，真实 MySQL 8.4.5 / Redis 的新资源示例与旧 mysql.lua/redis.lua 均通过并清理。补充按服务端能力协商 PS_MULTI_RESULTS，真实 CALL 的两组二进制结果和最终 OK 验证通过；准备响应兼容 10/12 字节格式。按连续授权单独提交，继续生命周期。
+
+
+## 2026-11-14 服务生命周期与系统插件
+
+- 数据库已提交为 3cfd219。本批 System 插件独立裁剪，CLI system 默认关闭并纳入 full；提供进程 ID/可执行路径与显式信号订阅，不在 register 时安装处理器，不接管 Runtime/退出策略。订阅串行等待、超时/取消、关闭唤醒，Machine 销毁释放；Unix/Windows 名称有平台边界，Tokio 的全进程处理行为已在文档披露。
+- Network handle.close 保留停 accept 语义，新增拥有型 shutdown(timeout)、is_draining、connections；共享状态分为监听/连接/请求计数、graceful/force 通知和完成等待，不在 Lua resume 期间借用共享 RefCell。HTTP/1.1/HTTP/2 排空响应体，超时 force 关闭连接并取消 handler，TLS 半握手直接关闭，等待者取消后可继续 shutdown；WebSocket 升级后仍由应用关闭。
+- 采用原生 watch/Notify 与本地 Drop guard，H2 独立 handler 同样纳入强制取消/计数，避免只 abort TCP 后遗留 Lua handler。监听结束也计入完成条件，防止 shutdown 返回时端口仍被 accept future 占有；不添加业务服务框架。
+- 对照原后端 main.rs 的显式 SIGINT/SIGTERM 与服务排空，提供相同通用原语，后台任务/DB/日志停止顺序留在应用。原后端没有已确认的通用子进程用法，media_probe 是 FFmpeg FFI 而非进程调用，不擅自扩大 process 到命令执行或恢复 CDP。
+- 已验证两种 Runtime、真实信号（独立子进程）、超时/关闭/VM 销毁、HTTP1/H2 流式排空、强制超时、GC、TLS 半握手、取消排空等待者后继续等待；工作区和 feature/实际示例收尾后按授权提交并继续日志。
+
+- 收尾通过：工作区 114 项常规测试与 5 项编译失败文档检查、严格 Clippy，system-only CLI 9 项/full 10 项、实际 system.lua/http_shutdown.lua，默认构建恢复及非注释中文 0。按连续授权单独提交服务生命周期，接着实现结构化日志和剩余路线图评估。

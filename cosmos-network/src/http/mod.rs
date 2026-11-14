@@ -6,6 +6,7 @@
 pub(crate) mod body;
 pub(crate) mod client;
 pub(crate) mod file;
+mod lifecycle;
 pub(crate) mod server;
 pub(crate) mod url;
 

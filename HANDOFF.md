@@ -10,7 +10,7 @@
 - 已按用户要求将统一返回值桥接、分层修复和冗余清理纳入本次本地提交；最新验证与踩坑见 `PROGRESS.md`。
 - 异步边界采用 `PendingOp::poll_push`，只保留 `PushLua` 转换协议；不采用返回值闭包装箱方案（见 §5）。
 - HTTP/WebSocket 回调已改用 `LuaFunction::call<A, R>`；userdata 借用失败只返回 Err，最外层 trampoline 统一抛 Lua 错误。
-- 外部嵌入使用 `Machine::new(tokio_handle)`，插件实现 `Module` 并通过 add_module 注入；插件包括 `Network`、`Encoding`、`Encryption`、`Database`、`Image`、`Text`，CLI 默认仅启用 network；encoding/encryption/database/image/text 默认关闭，full 开启全部插件。
+- 外部嵌入使用 `Machine::new(tokio_handle)`，插件实现 `Module` 并通过 add_module 注入；插件包括 `Network`、`Encoding`、`Encryption`、`Database`、`Image`、`Text`、`System`，CLI 默认仅启用 network；encoding/encryption/database/image/text/system 默认关闭，full 开启全部插件。
 - 通用生态顺序见 `ROADMAP.md`；FS 与 datetime 按用户要求属于 builtin，当前首批已完成迁移核对并按用户要求提交。目录统一为 `builtin/fs/mod.rs` 与 `builtin/time/mod.rs`，不保留同名入口 .rs 与子目录并存的布局；接口见 `cosmos/fs.md`、`cosmos/time.md`。
 - 本轮最新授权：用户要求一次完成 ROADMAP 剩余项，每完成一个 module 核对需求、验证、更新进度并单独 commit；覆盖此前逐模块等待检查的节奏，不 push。模块顺序为代理、日期日历、数据库资源、生命周期、日志，业务工具层按实际复用需求组织。
 - 先前交付节奏：每完成一个 module，逐项核对迁移/功能需求、验证并记录后停下供用户检查，再等待提交指令；不自动连做下一模块。FS/time 已提交；用户随后授权的 HTTP 流式模块已完成需求核对与验证，已获用户确认提交；随后授权的密码与随机数模块已获用户确认提交；随后授权的 XML 已获用户确认提交；独立图片模块及 CLI 默认/ full 调整已获用户确认提交；文本模块已提交为 e2fa04b；用户随后授权的 URL 模块已完成迁移核对和验证，本轮获用户确认提交并授权开始 HTTP/SOCKS 代理。接口见 `cosmos-text/README.md`、`cosmos-network/url.md`；不自动继续代理。纳秒时间戳用整数字符串保存；文件根目录检查使用组件级路径 API，见对应文档。
@@ -80,6 +80,13 @@ cosmos-rs/
 - HTTP client 已改为实例独占连接池，构造时固定 TLS 配置，调用迁移为 new + 冒号 request。
 
 ## 4. 最近完成的工作
+
+### 服务生命周期（2026-11-14，按连续授权提交）
+
+- 数据库已提交为 3cfd219。新增 System 插件（CLI system 默认关闭、纳入 full），显式信号订阅和进程 ID/路径；安装不订阅，Tokio 全进程信号处理 caveat 已披露，不替宿主 exit 或选择业务停止顺序。
+- HTTP handle.shutdown 支持 grace/force、监听/连接/handler 计数，TLS 半握手关闭、HTTP1/H2/流式排空和取消等待后继续；close 保留旧语义，WebSocket 脱管由应用关闭。共享状态独立 lifecycle.rs，零裸 Lua FFI。
+- 两种 Runtime、真实受控子进程信号、超时/关闭/VM 销毁、HTTP1/H2/流式/force/弱引用/TLS 半握手验证通过。工作区 114 项常规测试、5 项编译失败文档检查、严格 Clippy，system-only CLI 9 项/full 10 项、实际 system.lua/http_shutdown.lua 与非注释中文 0 检查通过，默认构建已恢复。
+- 原后端 process 当前只需信息与信号，media_probe 是 FFmpeg FFI，不是子进程；不添加无确定使用方的命令执行。按连续授权提交后继续最后的结构化日志及路线图核对，不 push。
 
 ### 数据库资源与预编译（2026-11-14，按连续授权提交）
 

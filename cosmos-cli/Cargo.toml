@@ -6,11 +6,12 @@ description = "Lua command-line runner powered by cosmos Machine"
 
 [features]
 default = ["network"]
-full = ["network", "encoding", "encryption", "database", "image", "text"]
+full = ["network", "encoding", "encryption", "database", "image", "text", "system"]
 network = ["dep:cosmos-network"]
 encoding = ["dep:cosmos-encoding"]
 image = ["dep:cosmos-image"]
 text = ["dep:cosmos-text"]
+system = ["dep:cosmos-system"]
 encryption = ["dep:cosmos-encryption"]
 database = ["mysql", "redis"]
 mysql = ["dep:cosmos-database", "cosmos-database/mysql", "network", "encoding", "encryption"]
@@ -23,6 +24,7 @@ cosmos-network = { path = "../cosmos-network", optional = true }
 cosmos-encoding = { path = "../cosmos-encoding", optional = true }
 cosmos-image = { path = "../cosmos-image", optional = true }
 cosmos-text = { path = "../cosmos-text", optional = true }
+cosmos-system = { path = "../cosmos-system", optional = true }
 cosmos-encryption = { path = "../cosmos-encryption", optional = true }
 cosmos-database = { path = "../cosmos-database", default-features = false, optional = true }
 tokio = { version = "1.49", features = ["rt"] }
