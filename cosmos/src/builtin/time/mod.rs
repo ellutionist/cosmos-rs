@@ -1,4 +1,7 @@
-//! 内建时间模块：协程休眠与当前系统时间，通过 cosmos.time 或 require("cosmos.time") 访问。
+//! 内建时间模块：真实时钟、休眠、单调计时及日期/时区，统一通过 cosmos.time 访问。
+
+mod clock;
+mod datetime;
 
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -26,4 +29,12 @@ impl Time {
             Err(error) => -(error.duration().as_micros() as i64),
         }
     }
+}
+
+/// 注册共享 time 父表及其计时/日期句柄。
+pub(super) unsafe fn register_types(lua_state: *mut crate::ffi::lua_State) {
+    crate::userdata::register::<Time>(lua_state);
+    crate::userdata::register::<clock::Instant>(lua_state);
+    crate::userdata::register::<clock::Deadline>(lua_state);
+    crate::userdata::register::<datetime::Datetime>(lua_state);
 }

@@ -66,6 +66,9 @@ fn stdin_runs_with_builtins_and_forwards_flag_like_unicode_and_empty_args() {
         assert(select("#", ...) == 5)
         assert(a == "--help" and b == "--version" and c == "-42" and d == "\228\184\173\230\150\135" and e == "")
         assert(cosmos.test == nil and cosmos.example == nil)
+        assert(require('cosmos.fs') == cosmos.fs and cosmos.fs.path.join('a', 'b'))
+        assert(require('cosmos.time.datetime') == cosmos.time.datetime)
+        assert(cosmos.time.datetime.from_timestamp_ms(0):format('%Y') == '1970')
         cosmos.time.sleep(0)
         print("stdin arguments ok")
     "##,

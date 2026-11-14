@@ -63,6 +63,8 @@ cosmos.sync.notify.new():wait() -- 常驻：主协程等待，请求协程在后
 
 ## 快速开始
 
+需要 Rust 1.89+；后续通用生态计划见 [ROADMAP.md](ROADMAP.md)。
+
 默认配置需要 Rust 1.89+ / Cargo、C 编译器和 `make`（LuaJIT 在构建时自动编译）：
 
 ```sh
@@ -125,6 +127,10 @@ end
 
 内建模块随 `Machine` 创建自动加载，无需 `require` 也可通过 `cosmos.*` 访问。
 
+### cosmos.fs：异步文件系统
+
+`cosmos.fs` 提供文件、目录、元数据、原子写入和文件锁；`cosmos.fs.path` 提供路径操作。文件 I/O 在工作线程执行，同一共享句柄串行推进。完整接口及取消语义见 [FS 文档](cosmos/fs.md)，实际用法见 [fs.lua](examples/fs.lua)。
+
 ### cosmos.time：时间与休眠
 
 ```lua
@@ -134,6 +140,8 @@ print(cosmos.time.now_us())   -- Unix 微秒时间戳
 ```
 
 `sleep` 挂起当前协程而非整个进程；`now_ms` / `now_us` 是真实系统时间，可用作日志时间戳。
+
+`cosmos.time.instant/deadline` 提供单调计时与截止时间，`cosmos.time.datetime` 提供日期解析、格式化、UTC/固定偏移/IANA 时区转换。它们同样属于 builtin；用法见 [时间文档](cosmos/time.md) 和 [datetime.lua](examples/datetime.lua)。
 
 ### cosmos.thread：协程管理
 
@@ -581,7 +589,7 @@ conn:close()
 
 ## 嵌入 Rust 程序
 
-宿主添加 `cosmos` 与 `tokio` 依赖，在异步上下文中创建并执行 `Machine`。`Machine` 默认加载时间、协程和同步模块；插件通过 `add_module` 安装：
+宿主添加 `cosmos` 与 `tokio` 依赖，在异步上下文中创建并执行 `Machine`。`Machine` 默认加载文件系统、时间与日期、协程和同步模块；插件通过 `add_module` 安装：
 
 ```rust
 use cosmos::{Machine, Module};
@@ -753,6 +761,8 @@ cargo test --workspace
 | 示例 | 说明 |
 | --- | --- |
 | `sleep.lua` | 时间与休眠 |
+| [fs.lua](examples/fs.lua) | builtin 异步文件、目录、原子操作与文件锁 |
+| [datetime.lua](examples/datetime.lua) | builtin 日期、时区和单调计时 |
 | `spawn.lua` | 协程 spawn / join / wait / kill |
 | `sync.lua` | Channel / Notify / Semaphore / Mutex |
 | `null.lua` | 可存储空值 |

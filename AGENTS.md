@@ -57,6 +57,7 @@
 ## 其他工程约定
 
 - **不自动 commit / push**：只有用户明确要求时才提交。
+- 按 module 分批推进：每完成一个模块，运行验证并更新进度后停下来让用户检查，等待用户的提交指令；不自动连续实现下一个模块。
 - Git 提交信息（标题与正文）统一使用英文；与用户交流、代码注释和项目文档仍使用中文。
 - 行为修改必须实际运行 `examples/` 下对应用例验证（含相关回归），
   不能只凭"编译通过"或"看起来对"；`cargo test --workspace` 覆盖 derive 单元测试。
@@ -70,7 +71,8 @@
 - 不做死抽象：公共层只在有明确复用点（至少两个使用方）时抽取，
   避免无意义的包装函数。
 - Lua 状态指针统一命名为 `lua_state`，未使用时为 `_lua_state`；宏生成代码同样遵守。
-- Lua 模块命名统一 `cosmos.network.*`、`cosmos.encoding.*`、`cosmos.encryption.*`、`cosmos.database.*`、`cosmos.time`、`cosmos.thread`、`cosmos.sync`；
+- 文件系统（`cosmos.fs`）和时间/日期（`cosmos.time`）属于 builtin，随 Machine 自动安装，不拆为可选插件；其他生态模块按 `ROADMAP.md` 推进，业务策略保留在应用层。
+- Lua 模块命名统一 `cosmos.network.*`、`cosmos.encoding.*`、`cosmos.encryption.*`、`cosmos.database.*`、`cosmos.fs`、`cosmos.time`、`cosmos.thread`、`cosmos.sync`；
   userdata 用 `#[cosmos::userdata(name = "…")]` 指定相对 `cosmos` 的路径，注册层自动组装父模块表，
   父表字段与对应 `require` 入口复用同一张类型表。
 

@@ -2,12 +2,22 @@
 name = "cosmos"
 version = "0.1.0"
 edition = "2021"
+rust-version = "1.89"
 
 [dependencies]
-tokio = { version = "1.49", features = ["rt", "time", "sync"] }
+tokio = { version = "1.49", features = ["rt", "time", "sync", "macros"] }
+chrono = { version = "0.4", default-features = false, features = ["std"] }
+chrono-tz = "0.10"
+tempfile = "3"
 libc = "0.2"
 cosmos-macros = { path = "../cosmos-macros" }
 
 [build-dependencies]
 luajit-src = "210.5"
 cc = "1"
+
+[target.'cfg(unix)'.dependencies]
+rustix = { version = "1", features = ["fs"] }
+
+[dev-dependencies]
+tokio = { version = "1.49", features = ["rt-multi-thread"] }

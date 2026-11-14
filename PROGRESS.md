@@ -1004,3 +1004,23 @@
 - 按用户明确要求，提交保留的通用 WebSocket 并发收发、后台完整收帧、取消与关闭清理，以及示例、回归和文档；CDP 插件已撤销，不纳入提交。
 - 沿用上一轮通过的工作区 65 项普通测试、5 项编译失败文档检查、严格 Clippy、CLI feature 与实际 WebSocket / HTTP 用例；本轮仅核对差异并提交，没有新的行为改动，不重复运行测试，不 push。
 - 随后只读评估 Librarian Rust 后端完整复刻所需的通用生态能力，业务功能仍留给应用代码。
+
+## 2026-11-14 路线图与 builtin FS / 日期时间首批
+
+- 按用户调整先建立 ROADMAP.md：文件系统与日期时间直接属于 builtin，其他生态沿现有插件扩展或新增通用插件；不恢复 CDP，不引入站点、媒体归档或通知等业务策略。本批停在 FS/time，不继续 HTTP 流式传输。
+- 新增 builtin/fs：拥有型共享文件/目录句柄、分块二进制读写、游标/截断、metadata、目录迭代、路径处理、复制/重命名、同目录原子替换、不覆盖操作与系统建议锁。每个句柄用异步信号量串行派发阻塞工作，工作线程只持有 Rust 数据，不发送 Lua 引用；类型和字段保持内部可见。
+- 排队操作取消不关闭句柄；派发后的 I/O 取消/超时关闭共享句柄并唤醒等待者，已开始的系统调用可能继续，完成后释放资源。独立文件系统修改不承诺取消即回滚，原子替换与 fsync 失败时的副作用已写入文档。不覆盖重命名使用原生原子接口，不采用存在检查再覆盖的竞态实现。
+- builtin/time 增加 Instant / Deadline 和不可变 Datetime，支持真实时间、RFC3339、自定义格式、固定偏移及 IANA 时区，明确拒绝 DST 歧义/不存在时间、无效日期、越界与闰秒；保持旧 now_ms/now_us 的真实 Unix 时间语义。解析按字段保留显式偏移，纯日期补午夜，不用 NaiveDate 回退吞掉不完整时间。格式错误返回英文错误，不导致格式化 panic。
+- 使用 Rust 原生 chrono/chrono-tz、tempfile 与 rustix，文件锁依赖标准库稳定接口，core 明确 Rust 1.89+；chrono 只启用 std，当前时间复用 SystemTime，不引入宿主本地时区查询依赖。新增 FS / time 文档及实际示例，CLI 全关插件仍可使用两者。
+- 踩坑：macOS 当前文件系统拒绝非 UTF-8 名称，回归明确记录平台限制，同时验证路径字节往返及 UTF-8 名称/符号链接；支持该名称的 Unix 文件系统会继续执行实际读写断言。macOS /var 的 canonicalize 结果可能为 /private/var，路径比较先规范化父目录。模拟阻塞 I/O 测试验证取消、排队与资源回收，实际 VM 销毁测试验证文件锁释放。
+- 工作区 70 项普通测试与 5 项编译失败文档检查、严格 Clippy 通过；无默认 feature CLI 9 项测试通过，并实际运行其 fs/datetime 示例。已恢复默认构建，实际运行默认 datetime、sleep、sync、WebSocket、HTTP 回归；两种注入 Runtime 的 FS/time 示例通过。格式、文档链接及非注释中文扫描结果已检查。
+- 按用户新要求，入口统一为 builtin/time/mod.rs，不保留 time.rs 与同名子目录并存；将每完成一个 module 验证后停下供用户检查、等待提交指令的节奏写入 AGENTS 与 ROADMAP。本批未提交或推送，下一步仅等待用户检查。
+
+## 2026-11-14 FS / time 迁移核对与提交
+
+- 按用户要求，对照 Librarian Rust 后端的 NFO 导入、存储路径校验、文件变化检测、归档移动及权限保留核对本批 builtin。发现仅毫秒 metadata 不能复现原有 u64 纳秒 mtime 比较，已增加 modified/accessed/created_ns 十进制整数字符串，Datetime 增加纳秒字符串输入/输出与 parts.nanosecond，避免 Lua number 舍入；新增真实文件在同一毫秒内变化的回归。
+- 补齐组件级 starts_with / strip_prefix / is_normal_relative 和保留 I/O 错误的 try_exists；增加通用 chmod 供应用自行组合暂存与权限策略。metadata.mode 为 0–07777 的权限位，可直接用于 chmod，不包含文件类型位；根目录访问、跨文件系统复制/删除与回滚仍由应用决定。
+- I/O 错误增加跨设备、非目录和非空目录的稳定前缀；实际测试发现 macOS ENOTSUP 未映射为标准 Unsupported，显式兼容 Unix ENOTSUP / EOPNOTSUPP / ENOSYS，便于应用按能力缺口处理 fsync / 原子操作。原子替换仅在临时文件权限确有差异时 chmod，兼容继承权限但不支持重复 chmod 的挂载，不静默降级同步保证。
+- 本阶段功能要求已覆盖，ROADMAP 与接口文档同步。仍未执行真实 NAS/SMB 联调，也不宣称 HTTP 流式、XML、图片等后续能力已完成。
+- 工作区 72 项普通测试、5 项编译失败文档检查与严格 Clippy 通过；全关 CLI 9 项测试及其 FS/datetime 实际示例通过，已恢复默认构建；默认 CLI 实际 FS、datetime、sleep、sync、WebSocket、HTTP 回归全部通过，格式与文档链接检查通过。
+- 按用户明确授权提交本批 builtin FS/time、路线图、工作节奏约定、文档和回归，提交信息使用英文，不 push；提交后停下，不自动开始下一 module。
