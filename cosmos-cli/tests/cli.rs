@@ -315,6 +315,11 @@ fn codec_and_encryption_registration_follow_features() {
             assert(#encryption.sha256("a\0b") == 32)
             assert(encryption.rsa == require("cosmos.encryption.rsa"))
             assert(encryption.ed25519 == require("cosmos.encryption.ed25519"))
+            for _, name in ipairs({{"digest", "hmac", "password", "random"}}) do
+                assert(encryption[name] == require("cosmos.encryption." .. name))
+            end
+            assert(encryption.random.bytes(0) == "")
+            assert(#encryption.digest.sum("sha256", "binary\0input") == 32)
         else
             assert(cosmos.encryption == nil)
             assert(not pcall(require, "cosmos.encryption"))

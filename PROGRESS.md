@@ -1042,3 +1042,22 @@
 - 按用户明确授权，提交 HTTP 流式传输、文件响应、受控文件桥接、需求核对、示例与回归；提交信息使用英文，不 push。
 - 提交前核对全部新增文件与差异，沿用上一轮已通过的工作区测试、严格 Clippy、feature 裁剪与真实示例验证，没有新增行为修改。
 - 用户同时授权继续路线图下一阶段：密码与随机数；完成后按约定核对需求并停下供用户检查，不自动提交新模块。
+
+## 2026-11-14 密码、随机数与增量认证模块
+
+- 按用户授权推进路线图第三阶段，扩展现有 Encryption 插件与 encryption feature，新增 cosmos.encryption.digest / hmac / password / random，不新增 crate 或 CLI 开关。本阶段完成后停止供用户检查，不自动提交或继续 XML/图片。
+- 增量摘要与 HMAC 支持 SHA-1/SHA-256/SHA-512、二进制输入、逐块 update、finalize 与完整输出 verify。上下文共享且串行推进，终结/关闭后不能继续使用；HMAC 使用 RustCrypto verify_slice，摘要使用 subtle 比较。每次新增接口输入最多 64 MiB、HMAC key 最多 64 KiB，总流长度不全量缓存。
+- 兼容性核对发现旧根表 SHA 若改成异步，require 的模块初始化会遇到不可挂起的 C 调用边界。因此旧 sha1/sha256/sha512 原实现保留同步语义，新增 digest.sum / hmac.sum 和增量操作由工作线程计算；增加实际 require 初始化回归。既有 RSA/Ed25519 保持原实现与接口，不改变数据库认证调用方式。
+- 私有 work 模块供摘要/HMAC、密码和随机数复用：宿主线程持有 Lua 参数锚点，获得预算后才复制拥有型 Rust 数据，spawn_blocking 不接收 Lua。跨 Machine/Runtime 最多 2 个原生作业、32 个已接纳作业；预算由原生闭包持有，取消不能提前释放已开始计算的额度。等上下文锁时取消不关闭状态，进入操作后失败/取消会关闭状态并唤醒等待者，显式 close 幂等。
+- 密码使用 RustCrypto Argon2id v19，默认 m=19456 KiB/t=2/p=1/32 字节输出，每次生成新的 16 字节 OS salt，标准 PHC 返回。验证兼容 id/i/d、v16/v19，先校验 PHC 字段与内存/迭代/lane/输出上限，再分配工作区；支持最大 64 MiB/10 次/4 lane/64 字节输出。密码最多 4096 字节，PHC 最多 512 字节，不加入业务密码策略。显式使用 Zeroizing 回收原生密码、派生输出与完整 Argon2 工作区，不承诺擦除 Lua 字符串或第三方摘要/HMAC 内部状态。
+- random.bytes 使用 OS 随机源并传播失败，最大 1 MiB；integer 在 Lua 精确整数闭区间内使用 u64 拒绝采样，避免浮点缩放/取模偏差，不提供伪随机回退。数值参数拒绝小数、非有限数和越界值。
+- 新增 examples/crypto.lua：RFC 2202/4231 HMAC 向量、SHA 与二进制边界、模块身份/重载、8 MiB 分块文件摘要、输入上限及错误后继续使用、Argon2 随机 salt/错误密码/成本上限、Lua 定时器在计算期间推进、OS 随机与整数边界。该示例不依赖 Encoding。两种注入 Runtime 的集成回归同时验证 PHC 与原后端使用的原生 Argon2 双向互操作、取消后的 Lua 对象回收、计算期间 VM 销毁和后续 Machine 可用。
+- 原生单元回归验证 Argon2 各版本/变体、成本拒绝、拒绝采样与熵错误传播、增量状态取消/排队、最多两个计算作业、取消作业仍占预算，以及满队列明确报错。CLI feature 回归补充四个新 require 入口。
+- 已对照 Librarian auth.rs、playback.rs、storage.rs、updates.rs 与归档/导入摘要路径完成迁移核对，结果写入 ROADMAP。默认密码格式、随机令牌材料、HMAC 签发/验证和文件分块摘要均满足本阶段需要；令牌期限、票据格式、密码策略等仍属于应用。
+- 工作区 83 项普通测试、5 项编译失败文档检查与严格 Clippy 通过；最终 Encryption 6 项单元、2 项新集成和既有认证回归通过。全关/仅 encryption CLI 各 9 项测试通过，仅 encryption CLI 实际运行 crypto.lua 通过且无 Encoding 依赖，全关正常依赖树不含 Encryption/Argon2/HMAC 等依赖，已恢复默认构建。默认 CLI 实际新/旧加密示例通过；真实 MySQL 8.4.5 明文与 TLS 的完整示例通过，只操作会话临时表。格式、链接、差异与非注释中文扫描通过，README/ROADMAP/HANDOFF 已同步；本批未提交或推送。
+
+## 2026-11-14 提交密码与随机数模块
+
+- 按用户明确授权，提交增量摘要/HMAC、Argon2 密码哈希、安全随机数、资源预算、文档及回归；提交信息使用英文，不 push。
+- 提交前核对全部差异并沿用已通过的工作区、严格 Clippy、CLI feature、真实示例和 MySQL 明文/TLS 验证，没有新增行为修改。
+- 用户同时授权下一个模块；本次先做 Encoding 的 XML，完成后核对迁移需求并停下供检查，不同时推进独立图片模块。

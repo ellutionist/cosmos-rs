@@ -498,7 +498,7 @@ print(assert(yaml.encode(config)))
 
 ## 加密插件
 
-`cosmos-encryption` 提供 `cosmos.encryption.*`。摘要返回原始字节，需要文本时与编解码插件组合：
+`cosmos-encryption` 提供 `cosmos.encryption.*`，支持增量摘要、HMAC、Argon2 密码哈希、安全随机数及非对称算法。接口与资源边界见 [Encryption 文档](cosmos-encryption/README.md)，完整用法见 [crypto.lua](examples/crypto.lua)。摘要返回原始字节，需要文本时与编解码插件组合：
 
 ```lua
 local encryption = require("cosmos.encryption")
@@ -728,7 +728,7 @@ C 扩展的调用是同步的：阻塞操作会阻塞 `Machine` 所在线程，�
 | --- | --- | --- |
 | `network` | 网络（TCP / UDP / TLS / socket / HTTP / WebSocket） | — |
 | `encoding` | 编解码（hex / base64 / uri / json / toml / yaml） | — |
-| `encryption` | 加密（sha1 / sha256 / sha512 / ed25519 / rsa） | — |
+| `encryption` | 加密（摘要 / HMAC / 密码 / 随机数 / Ed25519 / RSA） | — |
 | `database` | 数据库（MySQL + Redis） | `mysql` + `redis` |
 | `mysql` | 仅 MySQL | `network` + `encoding` + `encryption` |
 | `redis` | 仅 Redis | `network` |
@@ -746,7 +746,7 @@ cosmos/           核心运行时：Lua VM 管理、协程调度、桥接层
 cosmos-macros/    过程宏：#[userdata]、#[derive(PushLua, FromLua)]
 cosmos-network/   网络插件：TCP / TLS / socket / HTTP / WebSocket
 cosmos-encoding/  编解码插件：hex / base64 / uri / json
-cosmos-encryption/ 加密插件：sha / ed25519 / rsa
+cosmos-encryption/ 加密插件：摘要 / HMAC / 密码 / 随机数 / Ed25519 / RSA
 cosmos-database/  数据库插件：MySQL / Redis
 cosmos-cli/       命令行入口
 examples/         端到端 Lua 示例
@@ -777,6 +777,7 @@ cargo test --workspace
 | [websocket_concurrent.lua](examples/websocket_concurrent.lua) | 并发收发、取消与关闭 |
 | `encoding.lua` / `json.lua` | 编解码与 JSON |
 | `encryption.lua` | 哈希与签名 |
+| [crypto.lua](examples/crypto.lua) | 增量文件摘要、HMAC、Argon2 密码和安全随机数 |
 | `mysql.lua` / `redis.lua` | 数据库端到端（需本地服务） |
 
 运行方式：

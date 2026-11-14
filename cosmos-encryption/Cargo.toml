@@ -2,10 +2,15 @@
 name = "cosmos-encryption"
 version = "0.1.0"
 edition = "2021"
-description = "Rust-native digest, RSA and Ed25519 modules for cosmos"
+description = "Rust-native digest, authentication and cryptographic modules for cosmos"
 
 [dependencies]
 cosmos = { path = "../cosmos" }
+argon2 = { version = "0.5.3", features = ["zeroize"] }
+hmac = "0.12.1"
+subtle = "2"
+zeroize = "1"
+tokio = { version = "1.49", features = ["rt", "sync"] }
 sha1 = "0.10"
 sha2 = "0.10"
 rsa = "0.9"
@@ -14,4 +19,5 @@ ed25519-dalek = { version = "2.2", features = ["hazmat"] }
 
 [dev-dependencies]
 cosmos-encoding = { path = "../cosmos-encoding" }
-tokio = { version = "1.49", features = ["rt", "time"] }
+tempfile = "3"
+tokio = { version = "1.49", features = ["rt-multi-thread", "time"] }

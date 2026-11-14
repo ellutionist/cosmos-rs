@@ -1,5 +1,10 @@
-//! Rust 原生加密插件，提供认证需要的摘要与非对称算法。
+//! Rust 原生加密插件，提供摘要、消息认证、密码哈希、安全随机数和非对称算法。
 #![warn(unreachable_pub)]
+
+mod digest;
+mod password;
+mod random;
+mod work;
 
 use cosmos::{Machine, Module};
 use ed25519_dalek::hazmat::{raw_sign, ExpandedSecretKey};
@@ -12,12 +17,16 @@ use rsa::{Oaep, RsaPublicKey};
 use sha1::Sha1;
 use sha2::{Digest, Sha256, Sha512};
 
-/// 注册 cosmos.encryption 的摘要、RSA 与 Ed25519 接口。
+/// 注册 cosmos.encryption 的摘要、认证、密码、随机数、RSA 与 Ed25519 接口。
 pub struct Encryption;
 
 impl Module for Encryption {
     fn register(&self, machine: &mut Machine) -> Result<(), String> {
         machine.register::<Digests>();
+        machine.register::<digest::Digest>();
+        machine.register::<digest::Hmac>();
+        machine.register::<password::Password>();
+        machine.register::<random::Random>();
         machine.register::<Rsa>();
         machine.register::<Ed25519>();
         machine.register::<SigningKey>();
