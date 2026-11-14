@@ -1,6 +1,8 @@
 //! 编解码插件，通过 Machine 注入，输入输出均支持二进制字符串。
 #![warn(unreachable_pub)]
 
+mod json;
+
 use base64::engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD};
 use base64::Engine;
 use cosmos::{Machine, Module};
@@ -20,7 +22,7 @@ impl Module for Encoding {
         machine.register::<Hex>();
         machine.register::<Base64>();
         machine.register::<Uri>();
-        Ok(())
+        json::register(machine)
     }
 }
 

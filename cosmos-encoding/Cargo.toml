@@ -9,6 +9,7 @@ cosmos = { path = "../cosmos" }
 base64 = "0.22"
 hex = "0.4"
 percent-encoding = "2.3"
+sonic-rs = { version = "0.5", features = ["arbitrary_precision"] }
 
 [dev-dependencies]
 tokio = { version = "1.49", features = ["rt", "time"] }

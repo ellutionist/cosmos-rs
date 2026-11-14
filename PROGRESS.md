@@ -857,3 +857,20 @@
 - 按用户明确要求，将 Redis 驱动、独立数据库 feature、CLI 选择、回归用例、第三方许可和文档一并提交，不 push。
 - 提交前核对完整差异和新增文件，沿用已通过的工作区 59 项测试、5 项编译失败检查、feature 组合与依赖隔离、严格 Clippy，以及仅 Redis / 仅 MySQL CLI 的真实服务器回归；本轮没有行为修改，不重复执行完整回归。
 - 用户询问如果只再接一个数据库的建议：优先评估 PostgreSQL 与 pgmoon，复用现有异步网络、TLS 和 Lua 协议适配路径；后续需核对 SCRAM 认证、密码学依赖和类型转换。本轮只提交和调研建议，未开始接入新数据库。
+
+## 2026-11-14 使用 sonic-rs 接入 JSON
+
+- 按用户安排，将 ClickHouse 原生 TCP 接入记入 HANDOFF 的待做；当前在 cosmos-encoding 中新增 cosmos.encoding.json，随 Encoding 插件注册，CLI 默认可用，Machine 宿主无需新增插件类型。使用 sonic-rs 0.5.11 与 arbitrary_precision，不引入 C JSON 库。
+- encode / decode 的数据错误返回 nil+err，null 统一复用 cosmos.null。连续正整数键表编码为数组、字符串键表为对象、普通空表为对象；array / object 可显式标记，解码共享元表保留空容器形状。拒绝混合/稀疏键、循环引用、非法 UTF-8、非有限浮点数和不支持的 Lua 类型，共享但不循环的子表允许重复编码。
+- 大于 Lua 安全整数范围的整数字面量、浮点溢出和非零下溢值保留为 RawNumber userdata，text / tostring 返回原文，重新编码仍为数字；普通小数默认使用 Lua 双精度。lossless_numbers=true 保留全部数字原文，json.number.new 支持显式构造；RawNumber 独立持有文本，不锚定整个解析文档。
+- 核心桥接补充全类型键遍历、不透明表身份、原始元表字段读取、数组元素写入和结束构造时设置元表，支持借用 LuaValue 压栈以共享元表。所有裸 FFI 留在 cosmos 私有桥接层，功能 crate 只组合受控 Value / Output / FromLua / PushLua；表字段读取与递归输出检查 Lua 栈空间。外部插件测试验证元表字段借用跨重入 GC 保活，以及元素/元表输出非法时的栈回滚。
+- 深层回归发现 sonic 调试版 DOM 递归解析在普通测试线程栈上会溢出，改用完整惰性验证与容器遍历，标量仍由 sonic 解析；先检查 UTF-8 和容器深度，避免 LazyValue 对非法 UTF-8 在调试构建中 panic。编解码最多 64 层容器、100 万值节点、64 MiB 输入/输出；编码另计原始字符串/对象键/精确数字字节预算。验证了 64 层数组/对象、空容器边界、65 层与万层输入拒绝，以及错误后继续使用原 VM，没有调大测试线程栈。
+- CLI 与 Database 会重复安装 Encoding，初版 Lua 包装重复覆盖 native_decode，导致 lossless_numbers 丢失；初始化增加幂等标记，测试覆盖默认 CLI、重复安装后旧容器/数字继续使用。sonic 的 SIMD 后端按编译目标选择，缺少特性时使用自身通用实现，不切换 serde_json；未强制 target-cpu=native，也未宣称已验证其他架构或当前 Lua 桥接性能。
+- 工作区 60 项普通测试、5 项编译失败文档检查和严格 Clippy 通过；CLI 默认 / 仅 encoding / 仅 Redis / 全关配置分别通过 10 / 9 / 10 / 9 项测试，仅 Redis 的普通依赖树不含 cosmos-encoding 或 sonic。实际运行默认 CLI 的 json、encoding、null、HTTP、WebSocket，以及仅 encoding CLI 的 json 示例均通过，已恢复默认 CLI 构建。
+- 新增 examples/json.lua，插件 README 说明接口、形状、NULL、精度、同步执行和资源限制，HANDOFF 更新当前实现与待做。不自动提交；下一步可在真实负载下测量 Lua 转换与 sonic 编解码成本，再决定优化方向，ClickHouse 保持待做。
+
+## 2026-11-14 提交 sonic-rs JSON
+
+- 按用户明确要求，将 JSON 模块、受控表桥接能力、精确数字与资源限制、回归用例和文档一并提交，不 push。
+- 提交前核对全部改动与新增文件，差异检查通过；沿用已通过的工作区 60 项测试、5 项编译失败检查、严格 Clippy、CLI feature 组合及实际示例结果。本轮无行为修改，不重复执行完整回归。
+- ClickHouse 原生 TCP 仍在待做；后续优先根据真实 JSON 负载测量转换与编解码成本。

@@ -55,6 +55,7 @@ extern "C" {
     pub(crate) fn lua_yield(lua_state: *mut lua_State, nresults: c_int) -> c_int;
 
     pub(crate) fn lua_gettop(lua_state: *mut lua_State) -> c_int;
+    pub(crate) fn lua_checkstack(lua_state: *mut lua_State, extra: c_int) -> c_int;
     pub(crate) fn lua_type(lua_state: *mut lua_State, idx: c_int) -> c_int;
     pub(crate) fn lua_tonumber(lua_state: *mut lua_State, idx: c_int) -> lua_Number;
     pub(crate) fn lua_tointeger(lua_state: *mut lua_State, idx: c_int) -> lua_Integer;
@@ -72,6 +73,9 @@ extern "C" {
     pub(crate) fn lua_pushlstring(lua_state: *mut lua_State, s: *const c_char, len: size_t);
     pub(crate) fn lua_pushvalue(lua_state: *mut lua_State, idx: c_int);
     pub(crate) fn lua_rawgeti(lua_state: *mut lua_State, idx: c_int, n: c_int);
+    pub(crate) fn lua_rawget(lua_state: *mut lua_State, idx: c_int);
+    pub(crate) fn lua_rawseti(lua_state: *mut lua_State, idx: c_int, n: c_int);
+    pub(crate) fn lua_topointer(lua_state: *mut lua_State, idx: c_int) -> *const c_void;
     pub(crate) fn lua_next(lua_state: *mut lua_State, idx: c_int) -> c_int;
     pub(crate) fn lua_pushlightuserdata(lua_state: *mut lua_State, p: *mut c_void);
     pub(crate) fn lua_pushcclosure(lua_state: *mut lua_State, f: lua_CFunction, n: c_int);

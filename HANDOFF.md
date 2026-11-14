@@ -23,7 +23,7 @@ cosmos-rs/
   cosmos/            # 运行时 + 桥接层：machine / ffi / userdata / light_thread / stack / libs / builtin
   cosmos-macros/     # #[userdata]、#[derive(FromLua/PushLua)]，只生成 Rust 调用/转换组合
   cosmos-network/    # 功能模块：tcp/{stream,tls} / http / websocket + bridge.rs（叶子转换）
-  cosmos-encoding/   # Encoding 插件：Hex、Base64、URI 组件编解码
+  cosmos-encoding/   # Encoding 插件：Hex、Base64、URI、sonic-rs JSON
   cosmos-encryption/ # Encryption 插件：SHA、RSA-OAEP、Ed25519
   cosmos-database/   # Database 插件：按 feature 选择 mysql / redis，内嵌 Lua 协议与 client 池
   Cargo.toml         # 虚拟 workspace，默认成员为 cosmos-cli
@@ -72,6 +72,15 @@ cosmos-rs/
 
 ## 4. 最近完成的工作
 
+### sonic-rs JSON（2026-11-14）
+
+- `cosmos.encoding.json` 随 Encoding 安装，CLI 默认可用，Machine 宿主仍显式注入插件。JSON 功能只组合受控转换，不引入裸 FFI；ClickHouse 原生 TCP 按用户要求留在待做。
+- encode / decode 的数据错误返回 nil+err，null 复用 cosmos.null。连续整数键为数组、字符串键为对象、普通空表为对象；array / object 标记和解码共享元表保留容器形状。拒绝稀疏/混合键、循环引用、无效 UTF-8、非有限数和无关 userdata。
+- 启用 sonic arbitrary_precision。大整数及溢出/非零下溢浮点保留 RawNumber userdata，普通小数默认 Lua 双精度；lossless_numbers=true 保留所有数字原文，json.number.new 可直接构造，text / tostring 读取原文，编码输出数字字面量。
+- 普通测试线程栈上，sonic 的调试版递归 DOM 解析会栈溢出；改为严格 UTF-8 与容器深度预检、sonic 完整惰性验证、容器遍历后构造值。编解码统一最多 64 层、100 万节点、64 MiB 输入/输出，超限不破坏 VM。不得通过增大测试线程栈掩盖问题。
+- 核心桥接增加全类型键遍历、调用内表身份、原始元表字段读取、数组写入及结束时设置元表；底层操作仍全部私有，字段借用保活与异常回滚有外部插件回归。重复安装 Encoding 使用 Lua 初始化标记，防止 CLI 与 Database 同时注入时重复包装 decode，丢失参数或容器形状。
+- sonic 的 SIMD 后端按编译目标选择，通用路径仍是 sonic，不自动切换 serde_json；不强制 target-cpu=native。新增 examples/json.lua 和独立文档；后续再做真实负载性能测量，不以 sonic 本身的基准宣称当前 Lua 桥接吞吐量。
+
 ### Redis 与按数据库划分的 feature（2026-11-14）
 
 - 基于本地 lua-resty-redis 0.34 / 74d0c11 适配到 `cosmos.database.redis`，保留 BSD 许可。协议、pipeline、事务和 Pub/Sub 用 Lua；Rust 只装配插件、解析 URL，共用 mysql / redis 的 URL 叶子转换。无 ngx / resty 注入或 Lua FFI。
@@ -98,7 +107,7 @@ cosmos-rs/
 - `cosmos.network.socket` 提供顺序 `connect/send/receive/close`、Unix domain socket 和 `starttls/starttls_server`；TLS 在已有流上升级，回放 BufReader 的预读字节。该接口的 I/O 失败、超时和取消均丢弃连接，旧 split 接口继续保留原有超时语义。
 - `tcp/transport.rs` 的 PlainIo 组合 TCP/Unix 与预读前缀，`stream.rs` 的私有表示 Duplex 复用旧读写状态机。TLS 写入完成前须在同一 deadline 内 flush，避免已接收明文但仍未发完密文导致停滞；重复 split 返回 nil+错误。
 - `cosmos-encoding` 与 `cosmos-encryption` 仅公开 Module 插件类型，功能通过受控转换与宏注册。同步二进制参数复用新增的 `&[u8]: FromLua`；异步参数仍须拥有数据或独立锚点。
-- Encoding 的首批接口是 Hex、标准/URL-safe Base64、严格 URI 百分号编解码；暂不含 JSON。Encryption 提供二进制 SHA-1/256/512、SPKI/PKCS#1 公钥的 RSA-OAEP-SHA1/256、标准 Ed25519 与 MariaDB 密码材料派生。算法实现均为 Rust，不引入 OpenSSL。
+- Encoding 提供 Hex、标准/URL-safe Base64、严格 URI 百分号编解码及 sonic-rs JSON。Encryption 提供二进制 SHA-1/256/512、SPKI/PKCS#1 公钥的 RSA-OAEP-SHA1/256、标准 Ed25519 与 MariaDB 密码材料派生。算法实现均为 Rust，不引入 OpenSSL。
 - 示例见 `examples/null.lua`、`network_socket.lua`、`encoding.lua`、`encryption.lua`；各插件使用说明见各自 README。MySQL 驱动的后续进度见上一节，不重新引入全局 ngx 兼容层。
 
 ### 4.1 WebSocket（服务端复用 HTTP 端口）
@@ -360,6 +369,7 @@ assert(err == nil, err)
 
 ### 尚未排期
 
+- ClickHouse 原生 TCP 接入：用户明确放到待做；候选 Rust 原生客户端需评估协议版本、列式类型、流式结果与取消/回池、压缩依赖，不在当前 JSON 工作中启动。
 - UDP：优先级待用户确认；Unix domain socket 已包含在顺序 socket 接口。
 - HTTP/3：用户明确暂缓。
 - 压测脚本：`examples/http_bench.lua` / `examples/http_bench_client.lua`。
@@ -388,6 +398,8 @@ assert(err == nil, err)
 | `cosmos-network/src/tcp/transport.rs` | TCP/Unix 明文传输与 TLS 升级前的预读回放 |
 | `cosmos-network/src/socket.rs` | 顺序 socket、监听、TLS 原地升级与失败/取消时关闭 |
 | `cosmos-encoding/src/lib.rs` | Encoding 插件及 Hex、Base64、URI 编解码 |
+| `cosmos-encoding/src/json.rs` | sonic-rs JSON、容器转换、精确数字及资源限制 |
+| `cosmos-encoding/lua/json.lua` | JSON 共享元表、容器标记与 decode 参数适配 |
 | `cosmos-encryption/src/lib.rs` | Encryption 插件及摘要、RSA、Ed25519 |
 | `cosmos-database/src/lib.rs` | 按 mysql / redis feature 注册 Database 插件及依赖 |
 | `cosmos-database/src/options.rs` | 两种数据库的 URL 百分号、主机、布尔值叶子转换 |

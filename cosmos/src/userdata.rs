@@ -35,7 +35,7 @@ mod call;
 mod context;
 
 pub use call::{Call, LuaCallable, LuaClosure};
-pub use context::{Output, TableReader, TableWriter, Value, ValueKind};
+pub use context::{Output, TableIdentity, TableReader, TableWriter, Value, ValueKind};
 
 /// `#[cosmos::userdata]` 宏为每个类型生成该 impl
 pub trait UserData: 'static {
@@ -768,6 +768,12 @@ impl<'lua> FromLua<'lua> for LuaValue {
 }
 
 impl PushLua for LuaValue {
+    unsafe fn push_lua(self, output: &mut Output<'_>) -> i32 {
+        (&self).push_lua(output)
+    }
+}
+
+impl PushLua for &LuaValue {
     unsafe fn push_lua(self, output: &mut Output<'_>) -> i32 {
         let lua_state = output.lua_state;
         self.anchor.push_to(lua_state);

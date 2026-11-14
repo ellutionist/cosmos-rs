@@ -281,9 +281,14 @@ fn codec_and_encryption_registration_follow_features() {
             assert(encoding == cosmos.encoding)
             assert(encoding.hex == require("cosmos.encoding.hex"))
             assert(encoding.hex.encode("a\0b") == "610062")
+            local json = require("cosmos.encoding.json")
+            assert(json == encoding.json and json.null == cosmos.null)
+            assert(json.encode(json.decode('[]')) == '[]')
+            assert(json.encode(json.decode('[1.2300]', {{lossless_numbers=true}})) == '[1.2300]')
         else
             assert(cosmos.encoding == nil)
             assert(not pcall(require, "cosmos.encoding"))
+            assert(not pcall(require, "cosmos.encoding.json"))
         end
         if {encryption} then
             local encryption = require("cosmos.encryption")

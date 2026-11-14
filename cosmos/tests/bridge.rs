@@ -2,7 +2,8 @@
 #![deny(warnings)]
 
 use cosmos::userdata::{
-    Call, LuaBytes, LuaCallable, LuaClosure, LuaFunction, LuaStr, Nil, Output, PushLua,
+    Call, FromLua, LuaBytes, LuaCallable, LuaClosure, LuaFunction, LuaStr, Nil, Output, PushLua,
+    Value,
 };
 use cosmos::{Machine, Module};
 use std::future::Future;
@@ -44,6 +45,32 @@ struct EmptyReply {}
 #[derive(cosmos::PushLua)]
 struct InvalidField {
     value: (),
+}
+
+struct InvalidContainer(bool);
+
+impl PushLua for InvalidContainer {
+    unsafe fn push_lua(self, output: &mut Output<'_>) -> i32 {
+        let mut table = output.array(1);
+        if self.0 {
+            table.index(1, ());
+            table.finish()
+        } else {
+            table.finish_with_metatable("无效元表")
+        }
+    }
+}
+
+struct MetaText<'lua>(&'lua str);
+
+impl<'lua> FromLua<'lua> for MetaText<'lua> {
+    unsafe fn from_lua(value: Value<'lua>) -> Result<Self> {
+        value
+            .table()?
+            .metatable_field::<&str>(c"text")?
+            .map(Self)
+            .ok_or_else(|| "缺少元表文本".into())
+    }
 }
 
 struct Binary(Vec<u8>);
@@ -147,6 +174,20 @@ impl Api {
     fn invalid_field() -> InvalidField {
         InvalidField { value: () }
     }
+
+    fn invalid_container(element: bool) -> InvalidContainer {
+        InvalidContainer(element)
+    }
+
+    fn borrowed_metatable_after_callback(value: MetaText<'_>, callback: LuaFunction) -> String {
+        let mut run = Box::pin(callback.call::<_, ()>(()));
+        let mut context = Context::from_waker(Waker::noop());
+        assert!(matches!(
+            run.as_mut().poll(&mut context),
+            Poll::Ready(Ok(()))
+        ));
+        value.0.to_owned()
+    }
 }
 
 struct Plugin;
@@ -187,6 +228,14 @@ fn external_macros_and_closures_use_only_controlled_bridge_operations() {
         end)
         assert(retained == string.rep('持有',8192), '重入删除字段并 GC 后借用仍应有效')
         assert(binary == string.rep('\0\255binary',8192), '二进制字段借用也应跨重入和 GC 保活，长度=' .. tostring(binary and #binary))
+        local meta = {text=string.rep('元表借用',8192)}
+        local container = setmetatable({}, meta)
+        local retained_meta = api.borrowed_metatable_after_callback(container, function()
+            meta.text = nil
+            collectgarbage('collect')
+            for i=1,32 do string.rep('覆写',8192) end
+        end)
+        assert(retained_meta == string.rep('元表借用',8192))
         local gc = cosmos.thread.spawn(function()
             for i=1,10 do collectgarbage('collect'); cosmos.time.sleep(0) end
         end)
@@ -206,6 +255,10 @@ fn external_macros_and_closures_use_only_controlled_bridge_operations() {
         assert(select('#', next()) == 1 and next() == nil)
         local ok, err = pcall(api.invalid_field)
         assert(not ok and err:find('表字段必须恰好输出一个值', 1, true))
+        local ok, err = pcall(api.invalid_container, true)
+        assert(not ok and err:find('数组元素必须恰好输出一个值', 1, true))
+        local ok, err = pcall(api.invalid_container, false)
+        assert(not ok and err:find('元表必须是 table 或 nil', 1, true))
         assert(api.borrowed('失败后可继续调用') == '失败后可继续调用')
     "#)).unwrap();
 }

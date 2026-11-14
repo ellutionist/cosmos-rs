@@ -145,7 +145,49 @@ pub struct TableReader<'lua> {
     value: Value<'lua>,
 }
 
+/// 当前转换期间用于识别共享表与循环引用，不提供地址或底层状态访问。
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+pub struct TableIdentity(usize);
+
 impl<'lua> TableReader<'lua> {
+    pub fn identity(&self) -> TableIdentity {
+        TableIdentity(unsafe { lua_topointer(self.value.lua_state, self.value.index) } as usize)
+    }
+
+    /// 原始读取元表字段，不调用 __index；借用转换沿用当前调用的锚点。
+    ///
+    /// # Safety
+    /// T 遵守 FromLua 契约，不保存字段视图；借用结果仅在当前调用作用域使用。
+    pub unsafe fn metatable_field<T: FromLua<'lua>>(
+        self,
+        name: &CStr,
+    ) -> Result<Option<T>, String> {
+        let lua_state = self.value.lua_state;
+        let _restore = StackRestore::new(lua_state);
+        if lua_checkstack(lua_state, 3) == 0 {
+            return Err("Lua 栈空间不足".into());
+        }
+        if lua_getmetatable(lua_state, self.value.index) == 0 {
+            return Ok(None);
+        }
+        lua_pushlstring(
+            lua_state,
+            name.to_bytes().as_ptr().cast(),
+            name.to_bytes().len(),
+        );
+        lua_rawget(lua_state, -2);
+        if lua_type(lua_state, -1) == LUA_TNIL {
+            return Ok(None);
+        }
+        Value {
+            index: lua_gettop(lua_state),
+            temporary: true,
+            ..self.value
+        }
+        .read()
+        .map(Some)
+    }
+
     /// # Safety
     /// 回调遵守 Value::read 的借用约束，不能修改正在遍历的表或使 VM 失效。
     /// 不能保存定位当前字段的 Value 视图；借出的字符串由调用作用域锚定，不依赖字段继续存在。
@@ -153,22 +195,41 @@ impl<'lua> TableReader<'lua> {
         self,
         mut field: impl FnMut(&[u8], Value<'lua>) -> Result<(), String>,
     ) -> Result<(), String> {
+        self.entries(|key, value| {
+            if key.kind() == ValueKind::String {
+                let mut len = 0;
+                let pointer = lua_tolstring(key.lua_state, key.index, &mut len);
+                field(std::slice::from_raw_parts(pointer.cast::<u8>(), len), value)?;
+            }
+            Ok(())
+        })
+    }
+
+    /// 遍历全部键值，保留数值键和其他键的类型，不做隐式字符串转换。
+    ///
+    /// # Safety
+    /// 回调不修改正在遍历的表，不保存键或值的字段视图；借用结果遵守调用作用域约束。
+    pub unsafe fn entries(
+        self,
+        mut field: impl FnMut(Value<'lua>, Value<'lua>) -> Result<(), String>,
+    ) -> Result<(), String> {
         let lua_state = self.value.lua_state;
         let _restore = StackRestore::new(lua_state);
+        if lua_checkstack(lua_state, 3) == 0 {
+            return Err("Lua 栈空间不足".into());
+        }
         lua_pushnil(lua_state);
         while lua_next(lua_state, self.value.index) != 0 {
-            if lua_type(lua_state, -2) == LUA_TSTRING {
-                let mut len = 0;
-                let key = lua_tolstring(lua_state, -2, &mut len);
-                field(
-                    std::slice::from_raw_parts(key.cast::<u8>(), len),
-                    Value {
-                        index: lua_gettop(lua_state),
-                        temporary: true,
-                        ..self.value
-                    },
-                )?;
-            }
+            let value = Value {
+                index: lua_gettop(lua_state),
+                temporary: true,
+                ..self.value
+            };
+            let key = Value {
+                index: value.index - 1,
+                ..value
+            };
+            field(key, value)?;
             lua_settop(lua_state, -2);
         }
         Ok(())
@@ -202,11 +263,20 @@ impl<'lua> Output<'lua> {
     }
 
     pub fn table(&mut self, fields: usize) -> TableWriter<'_, 'lua> {
+        self.new_table(0, fields)
+    }
+
+    pub fn array(&mut self, elements: usize) -> TableWriter<'_, 'lua> {
+        self.new_table(elements, 0)
+    }
+
+    fn new_table(&mut self, elements: usize, fields: usize) -> TableWriter<'_, 'lua> {
         unsafe {
             let restore = StackRestore::new(self.lua_state);
+            assert_ne!(lua_checkstack(self.lua_state, 4), 0, "Lua 栈空间不足");
             lua_createtable(
                 self.lua_state,
-                0,
+                i32::try_from(elements).expect("数组元素过多"),
                 i32::try_from(fields).expect("表字段过多"),
             );
             TableWriter {
@@ -224,6 +294,26 @@ pub struct TableWriter<'out, 'lua> {
 }
 
 impl TableWriter<'_, '_> {
+    /// # Safety
+    /// value 遵守 PushLua 契约，输出一个值；下标从 1 开始。
+    pub unsafe fn index<T: PushLua>(&mut self, index: usize, value: T) {
+        let index = i32::try_from(index).expect("数组下标过大");
+        assert!(index > 0, "数组下标从 1 开始");
+        assert_eq!(self.output.push(value), 1, "数组元素必须恰好输出一个值");
+        lua_rawseti(self.output.lua_state, -2, index);
+    }
+
+    /// # Safety
+    /// value 遵守 PushLua 契约，输出一张元表或 nil。设置元表后立即结束构造，避免触发字段元方法。
+    pub unsafe fn finish_with_metatable<T: PushLua>(self, value: T) -> i32 {
+        assert_eq!(self.output.push(value), 1, "元表必须恰好输出一个值");
+        assert!(
+            matches!(lua_type(self.output.lua_state, -1), LUA_TTABLE | LUA_TNIL),
+            "元表必须是 table 或 nil"
+        );
+        lua_setmetatable(self.output.lua_state, -2);
+        self.finish()
+    }
     /// # Safety
     /// value 遵守 PushLua 契约；非单值输出会被拒绝并撤销表构造。
     pub unsafe fn field<T: PushLua>(&mut self, name: &CStr, value: T) {
