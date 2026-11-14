@@ -16,6 +16,7 @@ use cosmos::userdata::{
 use crate::http::client::HttpClient;
 use crate::http::server::{HttpRequest, HttpServer, HttpServerHandle};
 use crate::http::{Headers, LuaBytes};
+use crate::socket::{Socket, SocketListener};
 use crate::tcp::stream::{
     ReceivePattern, Tcp, TcpConn, TcpListener, TcpReader, TcpUntil, TcpWriter, UntilIter,
 };
@@ -131,6 +132,8 @@ impl<'lua> FromLua<'lua> for ServerCfg {
 
 /// 注册全部网络 userdata 类型。
 pub(crate) fn register(machine: &mut cosmos::Machine) {
+    machine.register::<Socket>();
+    machine.register::<SocketListener>();
     machine.register::<Tcp>();
     machine.register::<TcpConn>();
     machine.register::<TcpReader>();

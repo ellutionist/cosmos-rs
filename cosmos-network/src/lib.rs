@@ -8,6 +8,7 @@
 mod bridge;
 mod error;
 mod http;
+mod socket;
 mod tcp;
 mod websocket;
 

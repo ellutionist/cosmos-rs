@@ -1,7 +1,9 @@
 //! 从外部 crate 验证受控桥接，避免宏意外依赖 cosmos 私有实现。
 #![deny(warnings)]
 
-use cosmos::userdata::{Call, LuaCallable, LuaClosure, LuaFunction, LuaStr, Nil, Output, PushLua};
+use cosmos::userdata::{
+    Call, LuaBytes, LuaCallable, LuaClosure, LuaFunction, LuaStr, Nil, Output, PushLua,
+};
 use cosmos::{Machine, Module};
 use std::future::Future;
 use std::task::{Context, Poll, Waker};
@@ -18,6 +20,8 @@ struct Options {
 #[derive(cosmos::FromLua)]
 struct BorrowedOptions<'a> {
     text: &'a str,
+    #[lua(default)]
+    data: Option<&'a [u8]>,
 }
 
 #[derive(cosmos::PushLua)]
@@ -83,6 +87,11 @@ struct Api;
 impl Api {
     async fn noop() {}
 
+    async fn binary_echo(value: LuaBytes) -> Vec<u8> {
+        tokio::task::yield_now().await;
+        value.to_vec()
+    }
+
     fn empty(_value: Empty) -> EmptyReply {
         EmptyReply {}
     }
@@ -107,14 +116,20 @@ impl Api {
         value.text.to_owned()
     }
 
-    fn borrowed_after_callback(value: BorrowedOptions<'_>, callback: LuaFunction) -> String {
+    fn borrowed_after_callback(
+        value: BorrowedOptions<'_>,
+        callback: LuaFunction,
+    ) -> (String, Vec<u8>) {
         let mut run = Box::pin(callback.call::<_, ()>(()));
         let mut context = Context::from_waker(Waker::noop());
         assert!(matches!(
             run.as_mut().poll(&mut context),
             Poll::Ready(Ok(()))
         ));
-        value.text.to_owned()
+        (
+            value.text.to_owned(),
+            value.data.unwrap_or_default().to_vec(),
+        )
     }
 
     async fn echo(value: LuaStr, opts: Option<Options>) -> Reply {
@@ -162,18 +177,22 @@ fn external_macros_and_closures_use_only_controlled_bridge_operations() {
         assert(api.structured({text='表字段借用'}) == '表字段借用')
         assert(api.borrowed_identity('原样返回借用') == '原样返回借用')
         assert(api.borrowed_options({text='结构体借用'}) == '结构体借用')
-        local target = {text=string.rep('持有',8192)}
-        local retained = api.borrowed_after_callback(target, function()
+        local target = {text=string.rep('持有',8192), data=string.rep('\0\255binary',8192)}
+        local retained, binary = api.borrowed_after_callback(target, function()
             target.text = nil
+            target.data = nil
             collectgarbage('collect')
             for i=1,32 do string.rep('覆写',8192) end
             collectgarbage('collect')
         end)
         assert(retained == string.rep('持有',8192), '重入删除字段并 GC 后借用仍应有效')
+        assert(binary == string.rep('\0\255binary',8192), '二进制字段借用也应跨重入和 GC 保活，长度=' .. tostring(binary and #binary))
         local gc = cosmos.thread.spawn(function()
             for i=1,10 do collectgarbage('collect'); cosmos.time.sleep(0) end
         end)
         for _, n in ipairs({8,4096,4097,8192}) do
+            local binary = string.rep(string.char(0,128,255), math.floor(n/3)) .. string.rep(string.char(255), n%3)
+            assert(api.binary_echo(binary) == binary, '异步二进制参数不能进行文本解码')
             local reply = api.echo(string.rep('a',n)..'\0tail', {prefix='前缀', ignored=true, [1]=false})
             assert(reply.len == n+5)
             assert(reply.text == '前缀'..string.rep('a',n)..'\0tail')

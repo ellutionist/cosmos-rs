@@ -2,3 +2,4 @@
 
 pub(crate) mod stream;
 pub(crate) mod tls;
+pub(crate) mod transport;

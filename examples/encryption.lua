@@ -1,0 +1,46 @@
+-- 加密插件：摘要返回原始字节；需要文本时组合 encoding。
+local encryption = require("cosmos.encryption")
+local hex = require("cosmos.encoding.hex")
+local ed = require("cosmos.encryption.ed25519")
+local rsa = require("cosmos.encryption.rsa")
+assert(encryption == cosmos.encryption and ed == encryption.ed25519 and rsa == encryption.rsa)
+assert(hex.encode(encryption.sha1("abc")) == "a9993e364706816aba3e25717850c26c9cd0d89d")
+assert(hex.encode(encryption.sha256("abc")) == "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad")
+assert(hex.encode(encryption.sha512("abc")) == "ddaf35a193617abacc417349ae20413112e6fa4e89a97ea20a9eeee64b55d39a2192992a274fc1a836ba3c23a3feebbd454d4423643ce80e2a9ac94fa54ca49f")
+
+-- RFC 8032 的 Ed25519 空消息向量。
+local seed = assert(hex.decode("9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60"))
+local key = assert(ed.from_seed(seed))
+assert(hex.encode(key:public_key()) == "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a")
+local signature = key:sign("")
+assert(hex.encode(signature) == "e5564300c360ac729086e2cc806e828a84877f1eb8e5d974d873e065224901555fb8821590a33bacc61e39701cf9b46bd25bf5f0595bbe24655141438e7a100b")
+assert(ed.verify(key:public_key(), "", signature))
+assert(ed.verify(key:public_key(), "changed", signature) == false)
+assert(ed.from_seed("short") == nil)
+assert(ed.verify("short", "", signature) == nil)
+
+-- lua-resty-mysql client_ed25519 的既有回归向量，不能对密码重复做 seed 派生。
+local challenge = string.rep("\x42", 32)
+local maria = ed.from_key_material("password")
+local signed = maria:sign(challenge)
+assert(#signed == 64 and hex.encode(signed:sub(1, 8)) == "6f25ecb9d36d417d")
+assert(maria:sign(challenge) == signed)
+assert(ed.verify(maria:public_key(), challenge, signed))
+for _, material in ipairs({ "", string.rep("p", 100), "a\0\255" }) do
+    local derived = ed.from_key_material(material)
+    collectgarbage("collect")
+    assert(ed.verify(derived:public_key(), challenge, derived:sign(challenge)))
+end
+
+local file = assert(io.open("examples/certs/rsa-public.pem", "rb"))
+local public = assert(rsa.new(file:read("*a")))
+file:close()
+assert(public:size() == 256)
+local ciphertext = assert(public:encrypt("secret\0data"))
+assert(#ciphertext == public:size())
+assert(public:encrypt("secret\0data") ~= ciphertext)
+assert(#assert(public:encrypt("secret\0data", "sha256")) == public:size())
+assert(public:encrypt(string.rep("x", public:size())) == nil)
+assert(public:encrypt("value", "invalid") == nil)
+assert(rsa.new("invalid PEM") == nil)
+print("SHA、RSA-OAEP、Ed25519 标准向量和 MariaDB 派生验证通过")

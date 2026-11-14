@@ -5,7 +5,7 @@ mod sync;
 mod time;
 
 use crate::ffi::*;
-use crate::userdata::{push_module, register};
+use crate::userdata::{push_module, register, Null, Output, PushLua};
 
 /// 初始化内建模块，并注册时间、LightThread 与同步原语类型。
 ///
@@ -16,6 +16,8 @@ pub(crate) unsafe fn open(lua_state: *mut lua_State) {
     light_thread::register_types(lua_state);
     sync::register_types(lua_state);
     push_module(lua_state, "cosmos");
+    Null.push_lua(&mut Output::new(lua_state));
+    lua_setfield(lua_state, -2, c"null".as_ptr());
     light_thread::open(lua_state);
     lua_setfield(lua_state, -2, c"thread".as_ptr());
     lua_settop(lua_state, -2);

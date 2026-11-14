@@ -1,0 +1,17 @@
+[package]
+name = "cosmos-encryption"
+version = "0.1.0"
+edition = "2021"
+description = "cosmos 的 Rust 原生摘要、RSA 与 Ed25519 模块"
+
+[dependencies]
+cosmos = { path = "../cosmos" }
+sha1 = "0.10"
+sha2 = "0.10"
+rsa = "0.9"
+rand = "0.8"
+ed25519-dalek = { version = "2.2", features = ["hazmat"] }
+
+[dev-dependencies]
+cosmos-encoding = { path = "../cosmos-encoding" }
+tokio = { version = "1.49", features = ["rt", "time"] }

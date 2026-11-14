@@ -36,6 +36,8 @@ fn tcp_iterator_survives_binary_data_timeout_and_cancelled_calls() {
             local Tcp = require("cosmos.network.tcp.stream")
             local conn = assert(Tcp.connect("127.0.0.1", {port}, 1000))
             local reader, writer = conn:split()
+            local repeated, split_error = conn:split()
+            assert(repeated == nil and split_error:find("already split", 1, true))
             reader:settimeout(100)
             local iter = assert(reader:receiveuntil("||"))
             assert(iter() == string.rep("x", 8192)..string.char(0, 255).."first")

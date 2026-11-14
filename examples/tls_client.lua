@@ -12,6 +12,8 @@ assert(mctx:use_private_key_file("examples/certs/client.key") == nil, "use_priva
 
 local c1 = assert(Tls.connect("localhost", port, 2000, mctx))
 local r1, w1 = c1:split()
+local repeated, split_error = c1:split()
+assert(repeated == nil and split_error:find("already split", 1, true))
 w1:write("mtls\n")
 assert(r1:receive("*l") == "mtls", "mtls echo mismatch")
 w1:close()
@@ -34,8 +36,9 @@ end
 -- 3) 服务端 reload 后不再要求客户端证书：普通客户端成功
 local c3 = assert(Tls.connect("localhost", port, 2000, pctx))
 local r3, w3 = c3:split()
-w3:write("plain\n")
-assert(r3:receive("*l") == "plain", "post-reload echo mismatch")
+local payload = string.rep(string.char(0,128,255,1), 2048) .. "\0tail"
+w3:write(payload .. "\n")
+assert(r3:receive("*l") == payload, "reload 后的二进制长包应原样回显")
 w3:close()
 print("reload client ok")
 

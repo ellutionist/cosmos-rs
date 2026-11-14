@@ -7,7 +7,7 @@ cosmos-rs 是一个基于 LuaJIT 和 Tokio 的异步 Lua 运行环境，用于�
 - **同步写法，异步执行**：Lua 中直接调用异步接口，等待时挂起当前协程，其他协程继续运行。
 - **内建并发工具**：提供时间、协程，以及 Channel、Notify、Semaphore、Mutex 等同步原语。
 - **方便嵌入**：每个 `Machine` 拥有独立的 Lua 环境，复用宿主的 Tokio Runtime，支持多次执行脚本并保留状态。
-- **插件扩展**：Rust 插件实现 `Module` 后通过 API 注入，可以向 Lua 暴露类型与方法；[网络插件](cosmos-network/README.md) 默认随 CLI 启用。
+- **插件扩展**：Rust 插件实现 `Module` 后通过 API 注入。CLI 默认启用[网络](cosmos-network/README.md)、[编解码](cosmos-encoding/README.md)、[加密](cosmos-encryption/README.md)和[数据库（MySQL）](cosmos-database/README.md)插件，由同名 `network`、`encoding`、`encryption`、`database` feature 控制。
 
 ## 异步运行模型
 
@@ -34,6 +34,8 @@ cargo build --release -p cosmos-cli
 脚本路径后的参数通过 Lua 的 `...` 传入；`-` 表示从标准输入读取脚本。CLI 在脚本主协程结束后退出，常驻服务需要保持主协程运行。
 
 内建模块的用法见 [时间](examples/sleep.lua)、[协程](examples/spawn.lua)和[同步原语](examples/sync.lua)示例。
+
+`cosmos.null` 表示可保存在表和数组中的空值，与 Lua `nil` 区分，兼容 `ngx.null` / `cjson.null`。它在条件判断中为真，应通过 `value == cosmos.null` 判断空值。Rust 桥接使用 `cosmos::userdata::Null`；[空值示例](examples/null.lua)展示字段、数组和通道中的用法。
 
 ### 模块搜索路径
 

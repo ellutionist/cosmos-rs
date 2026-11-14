@@ -19,21 +19,22 @@ use std::task::{Context, Poll};
 use std::time::Duration;
 
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
-use rustls::pki_types::{CertificateDer, PrivateKeyDer, ServerName, UnixTime};
 use rustls::client::Resumption;
+use rustls::pki_types::{CertificateDer, PrivateKeyDer, ServerName, UnixTime};
 use rustls::server::WebPkiClientVerifier;
 use rustls::{ClientConfig, DigitallySignedStruct, RootCertStore, ServerConfig, SignatureScheme};
-use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt, BufReader, ReadBuf};
+use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt, ReadBuf};
 use tokio::net::TcpStream;
 use tokio::time::Instant;
 use tokio_rustls::client::TlsStream as ClientTlsStream;
 use tokio_rustls::server::TlsStream as ServerTlsStream;
 use tokio_rustls::{TlsAcceptor, TlsConnector};
 
-use crate::error::classify_io;
 use super::stream::{
-    size_limit, timeout_from_ms, with_deadline, ReadSide, State, TcpReader, TcpWriter, WriteSide,
+    size_limit, timeout_from_ms, with_deadline, Duplex, State, TcpReader, TcpWriter,
 };
+use super::transport::PlainIo;
+use crate::error::classify_io;
 
 /// 客户端的默认配置只构建一次（webpki 根证书 ~150 个锚点）
 static DEFAULT_CLIENT: OnceLock<Arc<ClientConfig>> = OnceLock::new();
@@ -55,8 +56,8 @@ fn default_client_config() -> Arc<ClientConfig> {
 /// TLS 流：客户端和服务端的 tokio-rustls 流是两个类型，统一成一个枚举，
 /// 让 split 后的读写半（ReadSide/WriteSide::Tls）只有一种类型
 pub(crate) enum TlsIo {
-    Client(ClientTlsStream<TcpStream>),
-    Server(ServerTlsStream<TcpStream>),
+    Client(ClientTlsStream<PlainIo>),
+    Server(ServerTlsStream<PlainIo>),
 }
 
 impl AsyncRead for TlsIo {
@@ -162,7 +163,12 @@ impl Tls {
 
 /// 复制客户端配置并强制 ALPN（WebSocket 只跑 HTTP/1.1）
 pub(crate) fn with_alpn_client(config: Arc<ClientConfig>, alpn: &[&[u8]]) -> Arc<ClientConfig> {
-    if config.alpn_protocols.iter().map(|p| p.as_slice()).eq(alpn.iter().copied()) {
+    if config
+        .alpn_protocols
+        .iter()
+        .map(|p| p.as_slice())
+        .eq(alpn.iter().copied())
+    {
         return config;
     }
     let mut cfg = (*config).clone();
@@ -177,29 +183,41 @@ pub(crate) async fn connect_tls_io(
     timeout_ms: Option<i64>,
     ctx: Option<ClientCfg>,
 ) -> Result<TlsIo, String> {
-    let config = match ctx {
-        Some(ClientCfg(c)) => c,
-        None => default_client_config(),
-    };
-    let server_name = ServerName::try_from(host.to_string())
-        .map_err(|e| format!("invalid server name '{host}': {e}"))?;
+    let server_name = client_server_name(host)?;
     let deadline = timeout_ms
         .and_then(timeout_from_ms)
         .map(|d| Instant::now() + d);
-
     let tcp = match with_deadline(deadline, TcpStream::connect((host, port))).await {
-        Ok(Ok(s)) => s,
-        Ok(Err(e)) => return Err(classify_io(&e)),
+        Ok(Ok(stream)) => stream,
+        Ok(Err(error)) => return Err(classify_io(&error)),
         Err(()) => return Err("timeout".to_string()),
     };
-    let stream = match with_deadline(deadline, TlsConnector::from(config).connect(server_name, tcp))
-        .await
+    handshake_client(PlainIo::tcp(tcp), server_name, deadline, ctx).await
+}
+
+pub(crate) fn client_server_name(host: &str) -> Result<ServerName<'static>, String> {
+    ServerName::try_from(host.to_owned())
+        .map_err(|error| format!("invalid server name '{host}': {error}"))
+}
+
+/// 建连与协议内升级共用 TLS 客户端握手，deadline 可覆盖之前的 TCP 连接。
+pub(crate) async fn handshake_client(
+    io: PlainIo,
+    server_name: ServerName<'static>,
+    deadline: Option<Instant>,
+    ctx: Option<ClientCfg>,
+) -> Result<TlsIo, String> {
+    let config = ctx.map_or_else(default_client_config, |ctx| ctx.0);
+    match with_deadline(
+        deadline,
+        TlsConnector::from(config).connect(server_name, io),
+    )
+    .await
     {
-        Ok(Ok(s)) => s,
-        Ok(Err(e)) => return Err(classify_io(&e)),
-        Err(()) => return Err("timeout".to_string()),
-    };
-    Ok(TlsIo::Client(stream))
+        Ok(Ok(stream)) => Ok(TlsIo::Client(stream)),
+        Ok(Err(error)) => Err(classify_io(&error)),
+        Err(()) => Err("timeout".to_string()),
+    }
 }
 
 /// 配置对象（对应 C++ ssl_ctx）：所有 setter 都会让已构建的配置失效，
@@ -508,23 +526,12 @@ impl TlsConn {
     }
 
     /// 拆成 reader/writer：TLS 会话读写共用状态，走 tokio::io::split
-    fn split(&mut self) -> (TcpReader, TcpWriter) {
-        let stream = self.stream.take().expect("connection already split");
-        let (r, w) = tokio::io::split(stream);
-        (
-            TcpReader {
-                inner: Some(BufReader::new(ReadSide::Tls(r))),
-                state: self.state.clone(),
-                buf: Vec::new(),
-                timeout: self.timeout,
-                max_buf: self.max_buf,
-            },
-            TcpWriter {
-                inner: Some(WriteSide::Tls(w)),
-                state: self.state.clone(),
-                timeout: self.timeout,
-            },
-        )
+    fn split(&mut self) -> Result<(TcpReader, TcpWriter), String> {
+        let stream = self
+            .stream
+            .take()
+            .ok_or("connection is closed or already split")?;
+        Ok(Duplex::tls(stream, self.state.clone(), self.timeout, self.max_buf).split())
     }
 
     /// 关闭连接：先发 close_notify（rustls poll_shutdown），再 drop 底层流
@@ -557,7 +564,7 @@ impl TlsListener {
             Ok(Err(e)) => return Err(classify_io(&e)),
             Err(()) => return Err("timeout".to_string()),
         };
-        let stream = match with_deadline(deadline, self.acceptor.accept(sock)).await {
+        let stream = match with_deadline(deadline, self.acceptor.accept(PlainIo::tcp(sock))).await {
             Ok(Ok(s)) => s,
             Ok(Err(e)) => return Err(classify_io(&e)),
             Err(()) => return Err("timeout".to_string()),

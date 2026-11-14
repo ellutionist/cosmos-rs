@@ -5,11 +5,17 @@ edition = "2021"
 description = "基于 cosmos Machine 的 Lua 命令行运行工具"
 
 [features]
-default = ["network"]
+default = ["network", "encoding", "encryption", "database"]
 network = ["dep:cosmos-network"]
+encoding = ["dep:cosmos-encoding"]
+encryption = ["dep:cosmos-encryption"]
+database = ["dep:cosmos-database", "network", "encoding", "encryption"]
 
 [dependencies]
 clap = { version = "4.6", features = ["derive"] }
 cosmos = { path = "../cosmos" }
 cosmos-network = { path = "../cosmos-network", optional = true }
+cosmos-encoding = { path = "../cosmos-encoding", optional = true }
+cosmos-encryption = { path = "../cosmos-encryption", optional = true }
+cosmos-database = { path = "../cosmos-database", optional = true }
 tokio = { version = "1.49", features = ["rt"] }

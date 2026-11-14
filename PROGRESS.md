@@ -786,3 +786,54 @@
 - 按用户要求，将默认 network feature、Lua / C 搜索路径参数与 Machine 配置 API、CLI C ABI 导出及回归、项目与网络 README、交接和进度记录一并提交，不 push。
 - 提交前核对完整差异与新增文件，沿用已通过的工作区 40 项测试、5 项编译失败检查、无默认 feature 回归、严格 Clippy、examples 和 macOS debug / release-LTO 真实 C 扩展验证结果。
 - 后续保留外部 Machine 宿主自行配置最终链接的边界；Linux 配置仍待实际环境回归。
+
+## 2026-11-14 调研 lua-resty-mysql 的 cosmos 适配范围
+
+- 用户提供本地仓库 /Users/ellutionist/code/github/openresty/lua-resty-mysql，调研基于 0.29 / 3af1b39；随后明确先列系统改造与生态补齐项，本轮未修改驱动或运行时实现。
+- 原库协议主体可保留 Lua，运行依赖集中于 ngx.socket.tcp、ngx.null、ngx.sha1_bin、ngx.config，以及 resty.sha256、可选 resty.rsa / resty.mysql.auth_ed25519。实测仅添加 Lua 路径时在 resty.sha256 缺失处加载失败。
+- 系统侧需梳理 socket 接口与返回值适配、连接后 TLS 升级、Unix domain socket 和独立 NULL 表示；现有 TCP/TLS 读写、Machine / Module、LocalSet 与受控桥接可以复用。MySQL TLS 在明文 greeting 和 SSLRequest 之后升级，现有 Tls.connect 的建连即握手模式不能直接替代。
+- 生态侧需补二进制 SHA-1 / SHA-256 / SHA-512、RSA-OAEP-SHA1 及 PEM 公钥处理、MariaDB 特殊 Ed25519 签名、MySQL 连接池与租借/取消语义、SQL 引用工具，以及面向真实 MySQL / MariaDB 的 CLI 用例与回归。SQL 预编译语句属于上游尚未实现的新能力，区别于本轮运行时移植。
+- 连接池需明确 Machine 或显式客户端隔离，保留复用次数、空闲过期、pool_size/backlog 等语义，并禁止未读尽结果、超时/取消后的不完整连接回池；HTTP 的 hyper 池不能直接复用为普通 TCP 池。
+- MariaDB client_ed25519 直接以 SHA-512(password) 作为扩展密钥来源，不能直接套用会再次派生密钥的普通 Ed25519 seed 签名 API。迁移时保留现有长密码 RSA scramble 索引修复、NULL、大整数文本精度和多结果集行为。
+- 本机仅发现 MySQL 8.4 客户端，没有服务端；尚未做真实数据库认证或查询验证。后续优先明确公共能力与独立 cosmos.mysql Lua 包的边界，再逐项实现与验证，不自动提交。
+
+## 2026-11-14 第一阶段：空值与顺序协议传输基础
+
+- cosmos.null 采用空指针 lightuserdata，与 ngx.null / cjson.null 的表示一致。新增公开桥接原语 userdata::Null 与 ValueKind::Null，和 Nil 分开，支持 derive、异步返回、表/数组及通道传递；FFI 仍限内部，新增跨 crate 回归和 examples/null.lua。
+- Network 新增 cosmos.network.socket，提供 connect/connect_unix、send/receive、settimeout、close，以及 TCP/Unix 监听。复用原 TCP/TLS 读写器与读取状态机；异步收发独占同一 socket，失败、超时或取消后丢弃连接，保留 partial 返回值。旧 split API 保持原有超时后可继续使用的语义。
+- starttls / starttls_server 在原连接上升级 TLS，PlainIo 回放 BufReader 已预读的字节，支持 SSLRequest 与 ClientHello 同时到达；明文 TCP、Unix 与 TLS 通过封闭的 Duplex 组合，已有 HTTP/TLS 入口也使用同一底层传输。
+- Unix TLS 的大于 8 KiB 回归暴露 tokio-rustls 可能先接受全部明文、仍有密文待发送；补齐 write_all 后同一 deadline 下的 flush，避免双方转入等待响应后停滞。重复 split 改为 nil+错误，不触发 Rust panic。
+- 空值回归、socket 升级/取消/部分写入回归、工作区测试及严格 Clippy 已通过；新增 examples/network_socket.lua 覆盖 TCP/Unix 的原地 TLS、大块二进制、超时 partial、读取与握手取消、握手超时及证书拒绝。实际运行 null、network_socket、HTTP、WebSocket、spawn、sleep、sync 及 TCP/TLS 双进程用例均通过。
+- 按用户的两阶段安排，后续 encoding / encryption 使用 Rust 原生实现，复用 Null 与受控桥接；本轮未自动提交。
+
+## 2026-11-14 第二阶段：Rust 原生 encoding / encryption 插件
+
+- 新增 cosmos-encoding 与 cosmos-encryption 两个独立 crate，只公开 Encoding / Encryption 这两个 Module 入口。CLI 默认启用对应 feature，也可分别关闭或单独启用；Machine 保持显式注入，不向核心 VM 加入算法依赖。模块表继续由 userdata 声明路径自动组装。
+- Encoding 首批提供 Hex、标准 Base64、无 padding 的 URL-safe Base64 和 URI 组件百分号编解码；全部支持二进制字符串，严格校验非法编码，URI 解码不将加号转换为空格。本轮未引入 JSON 接口。
+- Encryption 提供 SHA-1 / SHA-256 / SHA-512 原始摘要、SPKI 与 PKCS#1 PEM 公钥的 RSA-OAEP-SHA1/256，以及标准 Ed25519 和 MariaDB client_ed25519 的直接 SHA-512 材料派生。算法使用 RustCrypto / ed25519-dalek，RSA 使用系统安全随机数；未引入 OpenSSL 或其他 C 算法库。
+- RSA 构造与公钥方法统一在同一类型，删除仅用于工厂分组的空壳类型。Ed25519 公钥和扩展状态封装在密钥对象内部，只接受 seed 或私密材料，不暴露任意扩展密钥、随机数前缀与调用方混入的公钥。
+- 桥接补充同步借用 &[u8] 的 FromLua，不做 UTF-8 转换；临时表字段借用复用调用作用域锚点。扩展外部插件回归，同时验证字符串和二进制字段在重入删除字段、强制 GC 后仍有效，异步参数仍禁止裸借用。derive 的可选缺省字段须明确标注 #[lua(default)]，不能仅靠 Option 推断。
+- 编解码通过 RFC 4648 向量、全 256 字节往返和非法输入回归；Ed25519 通过 RFC 8032 与上游 MariaDB 向量。排查并修正手写 RFC 签名 fixture 多出的一个十六进制字符，实际签名与官方向量一致。RSA 两种公钥格式、两种 OAEP 摘要的私钥解密回归通过，并实际使用 OpenSSL 解密 CLI 生成的二进制密文验证互操作；OpenSSL 仅作测试对照。
+- 工作区 47 项测试及 5 项编译失败检查通过；CLI 无默认 feature、仅 encoding、仅 encryption 各 8 项测试通过；工作区及无默认 feature CLI 的严格 Clippy 通过。实际运行 encoding、encryption、null、network_socket、HTTP、WebSocket、spawn、sleep、sync 示例全部通过；格式和差异检查通过。
+- 新增两个插件 README 和 examples，根 README 链接插件文档并解释 cosmos.null 的真值语义；HANDOFF 与模块命名约定同步更新。不自动提交。
+- 下一步仍是独立 MySQL Lua 驱动、连接池及真实 MySQL/MariaDB 的认证和查询回归；当前没有数据库服务端，不能把算法向量和传输回归等同于完整驱动验证。
+
+## 2026-11-14 接入 cosmos-database.mysql 并验证真实数据库
+
+- 按用户要求新增 cosmos-database crate，只公开 Database 插件，MySQL 位于 cosmos.database.mysql；自动注入 Network / Encoding / Encryption，Rust 只处理插件装配和 URL 选项转换，协议与池保留 Lua 实现。CLI 新增默认 database feature，依赖所需的三个已有 feature；核心 Machine 不增加默认插件。
+- 以本地 lua-resty-mysql 0.29 / 3af1b39 为基础移植，去除 ngx / resty 运行依赖和早期调试代码，保留原始版权并附完整 BSD 许可；不改动上游仓库，也不引入 MySQL C 客户端或新的 C 算法依赖。新增独立插件 README、第三方声明和 examples/mysql.lua，根文档、HANDOFF、模块命名约定同步更新。
+- 支持 mysql_native_password、caching_sha2_password、sha256_password 和 MariaDB client_ed25519，保留长密码 RSA scramble 的正确循环索引；SHA-2 认证切换的 nonce 按 20 字节读取，避免把终止 NUL 算入摘要或 RSA scramble。对照 MySQL 8.4 官方认证源码确认 nonce 终止语义，离线测试覆盖直接认证和 AuthSwitch 后的完整认证。
+- 连接使用顺序 socket，支持 TCP、Unix、原连接 TLS 升级，默认验证 TLS 证书，可注入 ctx / server name。增加 URL 解析与百分号、IPv6、TLS 参数校验，错误不回显含密码的 URL。SQL 字符串引用组合 encoding.hex 生成 X'…'，不依赖反斜线转义模式。
+- client 实例各自持有空闲池，pool_size 仅限制空闲数，idle_timeout 控制过期，租借先 COM_PING，失效时重新连接；归还将底层连接移交新表，旧句柄不能操作新租借。未读结果、多结果集的 again、未结束事务、autocommit 关闭、I/O 失败或取消均禁止回池；不实现命名全局池与 backlog，传入时明确拒绝。其他会话设置由调用方恢复。
+- 协议收发增加序号、字段长度和逻辑包大小校验，支持 16 MiB 物理包分帧、整帧后的空终止帧，以及 0xfe 长行与 EOF 区分。协议异常立即 abort；完整 SQL ERR 包保留 errno / sqlstate，连接仍可继续用；COM_QUIT 从序号 0 开始，不声明 LOCAL INFILE 能力。
+- 真实认证暴露前置遗漏：原 TcpWriter / socket 发送参数使用 LuaStr，短二进制有损 UTF-8 解码，长二进制被拒绝，造成握手损坏。新增核心 LuaBytes，短串复制、长串 registry 锚定，统一用于两种发送入口；桥接回归覆盖 4096 阈值两侧，TCP 短包和 TLS 长包示例改为真实非 UTF-8 字节。
+- 重入 GC 回归暴露 Option<T> 重新构造 Value 会丢失调用作用域和临时字段标记，可能使 Option<&[u8]> 悬垂。改为组合传递原 Value；外部插件回归在删除原字段、强制 GC 和内存覆写后校验字符串与二进制借用，并验证跨异步等待的二进制参数。
+- 用户提供的 library 库实测服务端为 MySQL 8.4.5。明文 TCP 与 TLS 均通过认证、中文/二进制/NULL/BIGINT、临时表增删与事务回滚、SQL 错误后恢复、多结果集、紧凑数组、池隔离/复用/过期、超时、取消和并发回归；通过终止自己创建的已归还连接验证失效重连。未修改业务表、用户配置或服务端全局状态，凭据仅通过环境变量传入，没有写入仓库。
+- 默认离线测试不访问外部数据库；显式设置 COSMOS_MYSQL_URL 并 --ignored 才执行真实回归。工作区 52 项测试与 5 项编译失败检查通过，真实 MySQL 明文 / TLS 各一轮显式测试通过；无默认 feature CLI 9 项、仅 database CLI 10 项测试通过；工作区及无默认 feature CLI 严格 Clippy、Rust 格式、README 链接与差异检查通过。
+- 实际运行 encoding、encryption、null、network_socket、HTTP、WebSocket、spawn、sleep、sync，以及 TCP / TLS 双进程二进制回归全部通过。未自动提交；后续可补真实 MariaDB / MySQL Unix socket 环境回归及服务端预编译语句，当前不宣称这些已完成。
+
+## 2026-11-14 提交 MySQL 适配与公共基础能力
+
+- 按用户明确要求，将顺序 socket / TLS 升级、Null 与二进制桥接修复、Encoding / Encryption / Database 插件、CLI feature、用例与文档统一提交，不 push。
+- 提交前核对全部差异与新增文件、第三方许可和凭据配置方式，沿用本轮已完成的工作区 52 项测试、5 项编译失败检查、CLI feature 组合、严格 Clippy、实际 examples 与真实 MySQL 明文 / TLS 验证结果；没有行为变更，不重复执行已通过的完整回归。
+- 当前 MySQL 池为 client 级，pool_size 限制空闲连接数。后续优先考虑活跃连接上限与等待队列、会话状态重置、DECIMAL 精度、查询总超时，以及真实 MariaDB / Unix socket 和长期并发回归；本次只提交现有成果。

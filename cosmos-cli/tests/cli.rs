@@ -272,6 +272,41 @@ fn network_registration_follows_feature() {
     );
 }
 
+#[test]
+fn codec_and_encryption_registration_follow_features() {
+    let source = format!(
+        r#"
+        if {encoding} then
+            local encoding = require("cosmos.encoding")
+            assert(encoding == cosmos.encoding)
+            assert(encoding.hex == require("cosmos.encoding.hex"))
+            assert(encoding.hex.encode("a\0b") == "610062")
+        else
+            assert(cosmos.encoding == nil)
+            assert(not pcall(require, "cosmos.encoding"))
+        end
+        if {encryption} then
+            local encryption = require("cosmos.encryption")
+            assert(encryption == cosmos.encryption)
+            assert(#encryption.sha256("a\0b") == 32)
+            assert(encryption.rsa == require("cosmos.encryption.rsa"))
+            assert(encryption.ed25519 == require("cosmos.encryption.ed25519"))
+        else
+            assert(cosmos.encryption == nil)
+            assert(not pcall(require, "cosmos.encryption"))
+        end
+    "#,
+        encoding = cfg!(feature = "encoding"),
+        encryption = cfg!(feature = "encryption")
+    );
+    let result = stdin(&["-"], &source);
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+}
+
 #[cfg(feature = "network")]
 #[test]
 fn script_files_receive_arguments_and_load_network_lua_definitions() {
@@ -290,6 +325,26 @@ fn script_files_receive_arguments_and_load_network_lua_definitions() {
     assert!(String::from_utf8(result.stdout)
         .unwrap()
         .contains("Machine Lua checks passed"));
+}
+
+#[test]
+fn database_registration_follows_feature() {
+    let source = if cfg!(feature = "database") {
+        r#"
+        local mysql = require('cosmos.database.mysql')
+        assert(require('cosmos.database').mysql == mysql)
+        assert(mysql.parse_url('mysql://localhost/example').database == 'example')
+        assert(mysql.quote_sql_str("a\0b") == "X'610062'")
+        "#
+    } else {
+        "assert(cosmos.database == nil); assert(not pcall(require, 'cosmos.database.mysql'))"
+    };
+    let result = stdin(&["-"], source);
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
 }
 
 #[test]

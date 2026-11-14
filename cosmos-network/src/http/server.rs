@@ -352,7 +352,10 @@ async fn accept_loop(inner: Rc<ServerInner>, listener: TcpListener, acceptor: Op
         tokio::task::spawn_local(async move {
             match acceptor {
                 None => serve_conn(TokioIo::new(sock), inner, peer).await,
-                Some(acceptor) => match acceptor.accept(sock).await {
+                Some(acceptor) => match acceptor
+                    .accept(crate::tcp::transport::PlainIo::tcp(sock))
+                    .await
+                {
                     Ok(stream) => {
                         serve_conn(TokioIo::new(TlsIo::Server(stream)), inner, peer).await
                     }

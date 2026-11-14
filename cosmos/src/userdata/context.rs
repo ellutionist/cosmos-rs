@@ -12,6 +12,7 @@ use crate::ffi::*;
 pub enum ValueKind {
     Missing,
     Nil,
+    Null,
     Boolean,
     Number,
     String,
@@ -66,6 +67,11 @@ impl<'lua> Value<'lua> {
         match unsafe { lua_type(self.lua_state, self.index) } {
             LUA_TNONE => ValueKind::Missing,
             LUA_TNIL => ValueKind::Nil,
+            LUA_TLIGHTUSERDATA
+                if unsafe { lua_touserdata(self.lua_state, self.index).is_null() } =>
+            {
+                ValueKind::Null
+            }
             LUA_TBOOLEAN => ValueKind::Boolean,
             LUA_TNUMBER => ValueKind::Number,
             LUA_TSTRING => ValueKind::String,

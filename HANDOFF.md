@@ -9,7 +9,8 @@
 - 已按用户要求将统一返回值桥接、分层修复和冗余清理纳入本次本地提交；最新验证与踩坑见 `PROGRESS.md`。
 - 异步边界采用 `PendingOp::poll_push`，只保留 `PushLua` 转换协议；不采用返回值闭包装箱方案（见 §5）。
 - HTTP/WebSocket 回调已改用 `LuaFunction::call<A, R>`；userdata 借用失败只返回 Err，最外层 trampoline 统一抛 Lua 错误。
-- 外部嵌入使用 `Machine::new(tokio_handle)`，插件实现 `Module` 并通过 add_module 注入；网络插件为 `Network`。
+- 外部嵌入使用 `Machine::new(tokio_handle)`，插件实现 `Module` 并通过 add_module 注入；插件包括 `Network`、`Encoding`、`Encryption`、`Database`，CLI 默认启用四个对应 feature。
+- `cosmos.database.mysql` 已完成 lua-resty-mysql 适配与按 client 隔离的空闲连接池；真实 MySQL 8.4.5 的明文 TCP / TLS 回归通过。认证异常与大包另有离线协议测试；尚未用真实 MariaDB 验证，不支持服务端预编译语句。
 - Lua / C 模块路径分别沿用 LuaJIT 的 `LUA_PATH` / `LUA_CPATH` 与原生默认值（`;;` 展开默认路径）；CLI 可重复传入 `--path` / `--cpath` 前置模板，宿主使用 `Machine::prepend_path` / `prepend_cpath`，不修改进程环境变量。
 - CLI 的 build.rs 为 macOS / Linux 最终二进制保留并导出 Lua C API；该链接参数不会传播给外部 Machine 宿主。宿主需自行配置，见 README 的 C 扩展节；cosmos 的 Rust ffi 仍私有。
 - 交流、注释、文档一律**中文**；**不要自动 commit / push**。
@@ -21,8 +22,11 @@ cosmos-rs/
   cosmos/            # 运行时 + 桥接层：machine / ffi / userdata / light_thread / stack / libs / builtin
   cosmos-macros/     # #[userdata]、#[derive(FromLua/PushLua)]，只生成 Rust 调用/转换组合
   cosmos-network/    # 功能模块：tcp/{stream,tls} / http / websocket + bridge.rs（叶子转换）
+  cosmos-encoding/   # Encoding 插件：Hex、Base64、URI 组件编解码
+  cosmos-encryption/ # Encryption 插件：SHA、RSA-OAEP、Ed25519
+  cosmos-database/   # Database 插件：mysql、内嵌 Lua 协议与 client 连接池
   Cargo.toml         # 虚拟 workspace，默认成员为 cosmos-cli
-  cosmos-cli/        # clap 命令行入口，注入 Runtime Handle，默认 network feature 注入 Network
+  cosmos-cli/        # clap 命令行入口，注入 Runtime Handle，默认 network/encoding/encryption/database
   cosmos-network/examples/machine.rs # Rust 嵌入示例，根 examples/machine.lua 验证参数与模块入口
   examples/*.lua     # 全部端到端用例
   cosmos-network/lua/ # 内嵌 Lua 源码（include_str! 随二进制编译）
@@ -66,6 +70,25 @@ cosmos-rs/
 - HTTP client 已改为实例独占连接池，构造时固定 TLS 配置，调用迁移为 new + 冒号 request。
 
 ## 4. 最近完成的工作
+
+### MySQL 驱动与插件（2026-11-14）
+
+- `cosmos-database` 只公开 `Database`，自动注入 Network / Encoding / Encryption，注册 mysql 的 URL 转换并加载内嵌 Lua。父子模块表继续由声明路径组装，外部宿主无需裸栈或额外 Lua 文件路径。
+- MySQL 协议基于本地 lua-resty-mysql 0.29 / 3af1b39 适配，保留 BSD 许可；不注入全局 ngx / resty 兼容层。支持 TCP/Unix、原地 TLS、四类认证、NULL、BIGINT 字符串、多结果集、紧凑数组和 SQL 十六进制字符串引用。
+- `mysql.new()` 是独立连接；`mysql.client(options_or_url)` 是显式池，pool_size 只限制空闲数，idle_timeout 控制过期；不实现命名全局池或 backlog。租借先 COM_PING，归还转移到新句柄表；旧句柄失效。禁止未读结果、未完成事务和失败/取消连接回池，调用方自行恢复其他会话设置。
+- 真实 MySQL 握手发现旧 TCP 发送用了 LuaStr，短串 UTF-8 有损转换会破坏认证，长串则拒绝非 UTF-8。新增核心 LuaBytes，短串复制、长串锚定，socket 与旧 TcpWriter 统一使用，读写测试改用真正的非 UTF-8 字节。
+- 借用回归还暴露 `Option<T>` 重新构造 Value 丢失字段的 scope / temporary，重入 GC 后可能悬垂；组合转换改为传递原始 Value，外部插件用表字段删除与内存覆写验证。
+- 协议层验证序号、字段长度和逻辑包上限，支持 16 MiB 分帧与空终止帧，区分 0xfe 行前缀与 EOF；异常即丢弃流，完整 ERR 包保留连接。服务端只做会话临时表测试，不修改业务数据。
+- 真实回归通过环境变量 COSMOS_MYSQL_URL 显式启用，默认工作区测试不连接外部数据库。见 examples/mysql.lua 与 cosmos-database/README.md；不要将测试凭据写入代码或文档。
+
+### 适配基础与独立插件（2026-11-14）
+
+- `cosmos.null` 是空指针 lightuserdata，与 `ngx.null` / `cjson.null` 一致，保留表字段与数组位置；桥接使用 `Null` / `ValueKind::Null`，与 `Nil` 区分。
+- `cosmos.network.socket` 提供顺序 `connect/send/receive/close`、Unix domain socket 和 `starttls/starttls_server`；TLS 在已有流上升级，回放 BufReader 的预读字节。该接口的 I/O 失败、超时和取消均丢弃连接，旧 split 接口继续保留原有超时语义。
+- `tcp/transport.rs` 的 PlainIo 组合 TCP/Unix 与预读前缀，`stream.rs` 的私有表示 Duplex 复用旧读写状态机。TLS 写入完成前须在同一 deadline 内 flush，避免已接收明文但仍未发完密文导致停滞；重复 split 返回 nil+错误。
+- `cosmos-encoding` 与 `cosmos-encryption` 仅公开 Module 插件类型，功能通过受控转换与宏注册。同步二进制参数复用新增的 `&[u8]: FromLua`；异步参数仍须拥有数据或独立锚点。
+- Encoding 的首批接口是 Hex、标准/URL-safe Base64、严格 URI 百分号编解码；暂不含 JSON。Encryption 提供二进制 SHA-1/256/512、SPKI/PKCS#1 公钥的 RSA-OAEP-SHA1/256、标准 Ed25519 与 MariaDB 密码材料派生。算法实现均为 Rust，不引入 OpenSSL。
+- 示例见 `examples/null.lua`、`network_socket.lua`、`encoding.lua`、`encryption.lua`；各插件使用说明见各自 README。MySQL 驱动的后续进度见上一节，不重新引入全局 ngx 兼容层。
 
 ### 4.1 WebSocket（服务端复用 HTTP 端口）
 
@@ -191,7 +214,7 @@ local response, err = client:request("GET", url, {
   builtin、light_thread、stack、ffi 实现模块均为私有，libs 仅测试构建存在。
 - VM 创建/关闭/恢复、registry 操作与 userdata 初始化/清理/裸注册/底层 push 均限 crate 内；
   main_state、MethodTable::new、字符串锚点及拷贝阈值为私有。
-- LuaStr 是私有字段的公开类型，仅提供 FromLua 和 Deref<str>；外部不能匹配或构造内部拷贝/锚定分支。
+- LuaStr / LuaBytes 是私有字段的公开类型，分别提供 FromLua 与 Deref<str> / Deref<[u8]>；外部不能匹配或构造内部拷贝/锚定分支，二进制收发必须使用后者。
 - FromLua<'lua> 绑定 Value 的读取生命周期；同步方法可借用字符串及结构体字段，
   LuaFunction::call 与 LightThread::run 要求结果对所有读取生命周期均可转换，拒绝返回临时协程的裸借用。
   同步表字段的借用字符串由 Call 内部 ReadScope 按需 registry 锚定，重入删除字段及 GC 不会使其悬垂；
@@ -326,7 +349,7 @@ assert(err == nil, err)
 
 ### 尚未排期
 
-- UDP / unix socket：优先级待用户确认，勿主动开工。
+- UDP：优先级待用户确认；Unix domain socket 已包含在顺序 socket 接口。
 - HTTP/3：用户明确暂缓。
 - 压测脚本：`examples/http_bench.lua` / `examples/http_bench_client.lua`。
 
@@ -351,6 +374,14 @@ assert(err == nil, err)
 | `cosmos-network/src/tcp/mod.rs` | TCP 协议族模块声明：stream 与 tls |
 | `cosmos-network/src/tcp/stream.rs` | TCP 状态机、`ReceivePattern`/`ReceiveOutcome`、`receiveuntil` |
 | `cosmos-network/src/tcp/tls.rs` | rustls 客户端/服务端、`TlsContext`（证书/信任根/ALPN/mTLS） |
+| `cosmos-network/src/tcp/transport.rs` | TCP/Unix 明文传输与 TLS 升级前的预读回放 |
+| `cosmos-network/src/socket.rs` | 顺序 socket、监听、TLS 原地升级与失败/取消时关闭 |
+| `cosmos-encoding/src/lib.rs` | Encoding 插件及 Hex、Base64、URI 编解码 |
+| `cosmos-encryption/src/lib.rs` | Encryption 插件及摘要、RSA、Ed25519 |
+| `cosmos-database/src/lib.rs` | Database 插件、依赖注入与 Lua 协议加载 |
+| `cosmos-database/src/mysql.rs` | MySQL URL 转为受控连接选项 |
+| `cosmos-database/lua/mysql.lua` | MySQL 文本协议、认证及按 client 隔离的空闲连接池 |
+| `cosmos-database/tests/protocol.rs` | 认证、异常包和 16 MiB 分帧离线回归 |
 | `cosmos-network/src/http/mod.rs` | `Conn`（明文/TLS 统一流）、`Headers`、`LuaBytes` |
 | `cosmos-network/src/http/client.rs` | hyper legacy client、连接池、重定向、整体超时 |
 | `cosmos-network/src/http/server.rs` | hyper auto server、请求 DTO、handler 协程、WebSocket 升级入口 |
@@ -387,7 +418,7 @@ cargo run -p cosmos-network --example machine                    # 多线程 Run
 (./target/debug/cosmos-cli examples/tls_server.lua 19443 &) ; sleep 1
 ./target/debug/cosmos-cli examples/tls_client.lua 19443     # OK
 
-cargo test --workspace  # 36 项测试及 5 项编译失败检查通过（线程约束、FFI 封闭与借用生命周期）
+cargo test --workspace  # 包含离线 MySQL 回归；真实数据库用例须显式设置环境变量并 --ignored
 ```
 
 ## 8. 坑与注意事项

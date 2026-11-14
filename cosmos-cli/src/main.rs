@@ -7,6 +7,12 @@ use std::process::ExitCode;
 
 use clap::Parser;
 use cosmos::Machine;
+#[cfg(feature = "database")]
+use cosmos_database::Database;
+#[cfg(feature = "encoding")]
+use cosmos_encoding::Encoding;
+#[cfg(feature = "encryption")]
+use cosmos_encryption::Encryption;
 #[cfg(feature = "network")]
 use cosmos_network::Network;
 
@@ -81,8 +87,14 @@ fn run(
     let mut machine = Machine::new(runtime.handle().clone())?;
     machine.prepend_path(&path.join(";"))?;
     machine.prepend_cpath(&cpath.join(";"))?;
+    #[cfg(feature = "encoding")]
+    machine.add_module(Encoding)?;
+    #[cfg(feature = "encryption")]
+    machine.add_module(Encryption)?;
     #[cfg(feature = "network")]
     machine.add_module(Network)?;
+    #[cfg(feature = "database")]
+    machine.add_module(Database)?;
 
     let name = if script == Path::new("-") {
         "=stdin".to_string()

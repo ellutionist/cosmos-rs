@@ -568,6 +568,23 @@ impl<'lua> FromLua<'lua> for String {
     }
 }
 
+/// 二进制字符串的同步借用，不校验 UTF-8；表字段借用沿用调用作用域锚定。
+impl<'lua, 'borrow> FromLua<'lua> for &'borrow [u8]
+where
+    'lua: 'borrow,
+{
+    unsafe fn from_lua(value: Value<'lua>) -> Result<Self, String> {
+        let lua_state = value.lua_state;
+        if lua_type(lua_state, value.index) != LUA_TSTRING {
+            return Err(value.expected("binary string"));
+        }
+        let mut len = 0;
+        let data = lua_tolstring(lua_state, value.index, &mut len);
+        value.anchor_borrow()?;
+        Ok(std::slice::from_raw_parts(data.cast::<u8>(), len))
+    }
+}
+
 /// 零拷贝借用：同步方法专用。借用 Lua 字符串的数据，不复制、不分配。
 /// 只能用于同步方法（方法体在 lua_resume 内执行完，字符串被栈锚定不会被 GC）；
 /// 异步方法不得使用——future 跨 yield 后栈帧已丢弃，借用会悬垂（宏会拒绝）。
@@ -598,7 +615,7 @@ where
 const STR_ANCHOR_THRESHOLD: usize = 4096;
 
 /// 异步方法的字符串参数：内部按长度选择拷贝或 registry 锚定，调用方不依赖具体存储方式。
-/// 同步方法请直接用 &str（零拷贝且无需锚定）。
+/// 同步方法请直接用 &str / &[u8]（零拷贝，表字段按需锚定）。
 /// 实现 Deref<Target=str>，方法体里当 &str 用（as_bytes/len/format 都行）。
 ///
 /// 为什么异步方法不能裸借实参 &str（必须拷贝或锚定）：
@@ -615,6 +632,52 @@ const STR_ANCHOR_THRESHOLD: usize = 4096;
 /// （附注：Lua 规定字符串不从弱表移除，别用弱值表观测字符串回收；用内存计数，
 /// 或对 table/userdata 等显式构造对象做弱表观测。）
 pub struct LuaStr(LuaStrRepr);
+
+/// 异步二进制参数：短串复制，长串使用独立 registry 锚点，不进行文本解码。
+pub struct LuaBytes(LuaBytesRepr);
+
+enum LuaBytesRepr {
+    Owned(Vec<u8>),
+    Anchored {
+        bytes: &'static [u8],
+        anchor: RegistryRef,
+    },
+}
+
+impl std::ops::Deref for LuaBytes {
+    type Target = [u8];
+
+    fn deref(&self) -> &[u8] {
+        match &self.0 {
+            LuaBytesRepr::Owned(bytes) => bytes,
+            LuaBytesRepr::Anchored { bytes, anchor } => {
+                assert!(anchor.is_alive(), "Lua VM 已关闭");
+                bytes
+            }
+        }
+    }
+}
+
+impl<'lua> FromLua<'lua> for LuaBytes {
+    unsafe fn from_lua(value: Value<'lua>) -> Result<Self, String> {
+        if lua_type(value.lua_state, value.index) != LUA_TSTRING {
+            return Err(value.expected("binary string"));
+        }
+        let mut len = 0;
+        let pointer = lua_tolstring(value.lua_state, value.index, &mut len);
+        let bytes = std::slice::from_raw_parts(pointer.cast::<u8>(), len);
+        let repr = if len <= STR_ANCHOR_THRESHOLD {
+            LuaBytesRepr::Owned(bytes.to_vec())
+        } else {
+            lua_pushvalue(value.lua_state, value.index);
+            LuaBytesRepr::Anchored {
+                bytes: std::mem::transmute::<&[u8], &'static [u8]>(bytes),
+                anchor: RegistryRef::new(value.lua_state),
+            }
+        };
+        Ok(Self(repr))
+    }
+}
 
 enum LuaStrRepr {
     Owned(String),
@@ -677,7 +740,8 @@ impl<'lua, T: FromLua<'lua>> FromLua<'lua> for Option<T> {
         let idx = value.index;
         match lua_type(lua_state, idx) {
             LUA_TNONE | LUA_TNIL => Ok(None),
-            _ => Ok(Some(T::from_lua(Value::new(lua_state, idx))?)),
+            // 组合转换必须保留字段视图的调用作用域与临时标记。
+            _ => Ok(Some(T::from_lua(value)?)),
         }
     }
 }
@@ -830,6 +894,31 @@ impl PushLua for Vec<u8> {
 /// Lua nil 作为"一个值"的标记：多返回值里占位用
 /// （`()` 是 0 个返回值，二者语义不同）
 pub struct Nil;
+
+/// 可保存在表与数组中的空值，对应 cosmos.null，与 Lua nil 区分。
+/// 使用空指针 lightuserdata，与 ngx.null / cjson.null 的表示一致。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Null;
+
+impl<'lua> FromLua<'lua> for Null {
+    unsafe fn from_lua(value: Value<'lua>) -> Result<Self, String> {
+        let lua_state = value.lua_state;
+        if lua_type(lua_state, value.index) == LUA_TLIGHTUSERDATA
+            && lua_touserdata(lua_state, value.index).is_null()
+        {
+            Ok(Null)
+        } else {
+            Err(value.expected("cosmos.null"))
+        }
+    }
+}
+
+impl PushLua for Null {
+    unsafe fn push_lua(self, output: &mut Output<'_>) -> i32 {
+        unsafe { lua_pushlightuserdata(output.lua_state, std::ptr::null_mut()) };
+        1
+    }
+}
 
 impl<'lua> FromLua<'lua> for Nil {
     unsafe fn from_lua(value: Value<'lua>) -> Result<Self, String> {
