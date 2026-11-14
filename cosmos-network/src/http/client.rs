@@ -213,17 +213,13 @@ async fn do_request(
 ) -> Result<ClientResponse, String> {
     let mut method = Method::from_bytes(method.as_bytes())
         .map_err(|e| format!("invalid method '{method}': {e}"))?;
-    let mut uri: Uri = url
-        .parse()
-        .map_err(|e| format!("invalid url '{url}': {e}"))?;
+    let mut target = super::url::parse(&url)?;
     let mut headers = opts.headers;
     let mut body = opts.body;
     let max_body = opts.max_body.filter(|n| *n > 0).map(|n| n as u64);
     let mut redirects = 0i64;
     loop {
-        if !matches!(uri.scheme_str(), Some("http" | "https")) {
-            return Err("HTTP URL must use http or https".into());
-        }
+        let uri = http_uri(&target)?;
         let replay = body.repeat();
         let mut guard = BodyCleanup(Some(body.clone()));
         let request = build_request(&method, &uri, &headers, body)?;
@@ -270,8 +266,7 @@ async fn do_request(
         } else {
             incoming.collect(None).await?;
         }
-        let next = resolve(&uri, &location)
-            .ok_or_else(|| format!("invalid redirect location '{location}'"))?;
+        let next = super::url::join(&target, &location)?;
         let to_get = status == StatusCode::SEE_OTHER
             || ((status == StatusCode::MOVED_PERMANENTLY || status == StatusCode::FOUND)
                 && method != Method::GET
@@ -285,12 +280,12 @@ async fn do_request(
         } else {
             body = replay?;
         }
-        if origin(&next) != origin(&uri) {
+        if next.origin() != target.origin() {
             headers.0.retain(|(k, _)| {
                 k != "authorization" && k != "cookie" && k != "proxy-authorization"
             });
         }
-        uri = next;
+        target = next;
         redirects += 1;
     }
 }
@@ -335,35 +330,19 @@ fn is_redirect(status: StatusCode) -> bool {
     )
 }
 
-/// (scheme, authority) —— 跨域时剥掉凭证头
-fn origin(uri: &Uri) -> (Option<&str>, Option<&str>) {
-    (uri.scheme_str(), uri.authority().map(|a| a.as_str()))
-}
-
-/// Location 只做常见形态：绝对 URL、以 / 开头的绝对路径、相对路径、仅 query
-fn resolve(base: &Uri, loc: &str) -> Option<Uri> {
-    if loc.starts_with("http://") || loc.starts_with("https://") {
-        return loc.parse().ok();
+/// HTTP 不发送 fragment 或隐式解释 userinfo；凭证由显式请求头提供。
+fn http_uri(url: &url::Url) -> Result<Uri, String> {
+    if !matches!(url.scheme(), "http" | "https") || url.host_str().is_none() {
+        return Err("HTTP URL must use http or https and have a host".into());
     }
-    let scheme = base.scheme_str()?;
-    // 协议相对：//host/path 沿用当前 scheme
-    if let Some(rest) = loc.strip_prefix("//") {
-        return format!("{scheme}://{rest}").parse().ok();
+    if !url.username().is_empty() || url.password().is_some() {
+        return Err(
+            "HTTP URL userinfo is not supported; use explicit authentication headers".into(),
+        );
     }
-    let authority = base.authority()?.as_str();
-    let path = if loc.starts_with('/') {
-        loc.to_string()
-    } else if loc.starts_with('?') {
-        format!("{}{}", base.path(), loc)
-    } else {
-        let base_path = base.path();
-        let dir = match base_path.rfind('/') {
-            Some(i) => &base_path[..=i],
-            None => "/",
-        };
-        format!("{dir}{loc}")
-    };
-    format!("{scheme}://{authority}{path}").parse().ok()
+    url[..url::Position::AfterQuery]
+        .parse()
+        .map_err(|err| format!("invalid HTTP URL: {err}"))
 }
 
 /// hyper 的错误 Display 只有分类名，真正的信息在 source 链上

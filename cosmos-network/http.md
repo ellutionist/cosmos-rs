@@ -2,6 +2,8 @@
 
 HTTP/1.1、HTTP/2 的客户端和服务端共用 `cosmos.network.http.body`。网络输入、普通文件和 Lua 生产函数均可逐块读取或发送；无需把整个文件放进 Lua 字符串。完整用法和本地验收见 [http_stream.lua](../examples/http_stream.lua)，旧字节串接口见 [http.lua](../examples/http.lua)。
 
+请求地址与重定向使用标准 URL 解析，支持相对路径、点段、query/fragment 合并；fragment 不发送，URL userinfo 不提供隐式认证。通用组件与查询操作见 [URL 用法](url.md) 和 [url.lua](../examples/url.lua)。
+
 ## 收发方式
 
 客户端 `client:request(method, url, options)` 默认仍返回字符串 `response.body`；传入 `stream=true` 后，在响应头就绪时返回，`response.body` 是 body 句柄。请求的 `options.body` 可以是字符串，也可以是 body 句柄，两者独立配置。

@@ -1,12 +1,13 @@
 //! HTTP 模块：client 与 server 分开实现（client.rs / server.rs），底层统一走 hyper。
 //!
-//! 这里只放两者共用的数据类型：客户端连接流（明文/TLS 统一枚举）、Headers、
+//! 入口同时包含共享 URL 解析；这里定义客户端连接流（明文/TLS 统一枚举）、Headers、
 //! 二进制 body 包装 LuaBytes。Lua 转换与注册集中在 crate::bridge。
 
 pub(crate) mod body;
 pub(crate) mod client;
 pub(crate) mod file;
 pub(crate) mod server;
+pub(crate) mod url;
 
 use std::pin::Pin;
 use std::task::{Context, Poll};

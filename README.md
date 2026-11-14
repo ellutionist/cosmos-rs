@@ -415,6 +415,8 @@ print(conn:state())           -- 0 打开 / 1 已关闭
 
 wss 使用 `ctx` 指定 TLS 上下文（缺省公有根，ALPN 强制 http/1.1）；`max_message` 限制单条消息上限，缺省 64 MiB。
 
+URL 解析、相对地址合并、组件修改与有序查询参数由 `cosmos.network.http.url` 提供，随 Network 启用；见 [URL 文档](cosmos-network/url.md) 与 [url.lua](examples/url.lua)。
+
 ## 编解码插件
 
 构建 CLI 时通过 `--features encoding` 或 `--features full` 启用。`cosmos-encoding` 提供 `cosmos.encoding.*`，支持二进制编解码和 JSON、TOML、YAML 文本转换：
@@ -792,6 +794,7 @@ cargo test --workspace
 | `tcp_client.lua` + `tcp_server.lua` | TCP echo（双进程） |
 | `tls_client.lua` + `tls_server.lua` | TLS echo（双进程） |
 | `network_socket.lua` | 顺序协议 socket 与 STARTTLS |
+| [url.lua](examples/url.lua) | URL 组件、查询参数与标准重定向 |
 | [http_stream.lua](examples/http_stream.lua) | HTTP 流式上传/下载、文件范围、条件缓存与取消 |
 | `http.lua` | HTTP 客户端 + 服务端（单进程，含重定向、超时、h2） |
 | `websocket.lua` | WebSocket 客户端 + 服务端升级（单进程） |

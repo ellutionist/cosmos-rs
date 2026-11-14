@@ -113,7 +113,7 @@ XML 本阶段扩展 Encoding 插件，接口见 [XML 文档](cosmos-encoding/xml
 ### 5. 文本、URL 与时间进阶
 
 - [x] 编译型正则、Unicode normalization 与大小写、繁简转换（迁移核对通过）。
-- [ ] URL 解析、合并、查询参数，与已有 URI 百分号编码区分职责。
+- [x] URL 解析、合并、查询参数，与已有 URI 百分号编码区分职责（迁移核对通过）。
 - [ ] HTTP / SOCKS 代理能力；直连规则由应用配置。
 - [ ] 补齐日期日历运算和按需扩展的格式支持；继续放在 builtin time。
 
@@ -127,7 +127,19 @@ XML 本阶段扩展 Encoding 插件，接口见 [XML 文档](cosmos-encoding/xml
 | `actor_names.rs` 等繁简处理 | 沿用 ferrous-opencc 0.4 的内嵌 t2s/s2t 词典并按方向缓存，词组、歧义字和 NUL 原生结果对照通过 |
 | 资源与运行模型 | UTF-8/输入输出/捕获/分段预算、2 个计算/16 个已接纳作业；两种 Runtime、取消、VM 销毁与回调挂起通过 |
 
-本批已满足原后端的文本基础能力；Rust regex 不支持环视/反向引用，现有迁移模式不依赖它们。len/truncate 按 Unicode scalar 计数，不提供字形簇或 locale case folding；繁简转换不承诺可逆。已开始的单次原生搜索/OpenCC 转换不能强制中断，仍持有计算预算到结束；OpenCC 另限 1 MiB 输入并保留词组上下文。URL、代理、日历进阶尚未实现，不把文本完成视为第 5 阶段全部完成。
+本批已满足原后端的文本基础能力；Rust regex 不支持环视/反向引用，现有迁移模式不依赖它们。len/truncate 按 Unicode scalar 计数，不提供字形簇或 locale case folding；繁简转换不承诺可逆。已开始的单次原生搜索/OpenCC 转换不能强制中断，仍持有计算预算到结束；OpenCC 另限 1 MiB 输入并保留词组上下文。URL 由下面的独立批次补齐；代理与日历进阶尚未实现，不把文本完成视为第 5 阶段全部完成。
+
+URL 本批扩展 Network，不新增插件或 feature。接口见 [URL 文档](cosmos-network/url.md)，完整用法及真实 HTTP 重定向见 [url.lua](examples/url.lua)。
+
+| URL 迁移需求 | 核对结果 |
+| --- | --- |
+| `actor_urls.rs`、`operations/tasks.rs` 的组件检查和规范化 | scheme/host/port/userinfo/path/fragment 访问、不可变修改与清除；站点白名单、路径模板和编号校验仍由应用组织 |
+| `scraper/model.rs` 的资源地址补全 | 标准 parse/join，支持层级、点段、协议相对、query/fragment 与绝对引用；结果逐项对照 Rust url 通过 |
+| `scraper/filters.rs` 的分页/筛选查询 | 有序重复键、空值、query_pairs、整组重建和保留既有查询字节的追加；表单加号规则与 URI 百分号编码区分 |
+| `verification.rs` / WebSocket 地址处理 | 标准 origin 比较、主机与端口重写、IDNA 和 IPv4/IPv6；不增加 CDP 或业务 URL 规则 |
+| HTTP 集成与资源 | 删除手写重定向拼接；真实多跳点段/query/fragment/协议相对跳转、跨源凭证剥离、拒绝隐式 userinfo、64 KiB/1024 项边界、GC 后持有及错误恢复通过 |
+
+本批已覆盖原后端使用的 URL 基础能力，并在两种 Runtime 和默认/full/无插件 CLI 上验证。解析沿用 WHATWG 规范化和非规范百分号处理，不提供站点验证策略；URL 与组件长度最多 64 KiB，列表最多 1024 项。HTTP 只接受 http/https，不发送 fragment，不把 userinfo 自动变为认证头。代理和日期日历仍待后续用户指令，本批完成后停下供检查。
 
 ### 6. 数据库、服务生命周期与日志
 

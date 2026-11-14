@@ -152,6 +152,7 @@ pub(crate) fn register(machine: &mut cosmos::Machine) {
 
     machine.register::<Body>();
     machine.register::<HttpFile>();
+    machine.register::<crate::http::url::HttpUrl>();
     machine.register::<HttpClient>();
     machine.register::<HttpServer>();
     machine.register::<HttpServerHandle>();
@@ -159,4 +160,64 @@ pub(crate) fn register(machine: &mut cosmos::Machine) {
 
     machine.register::<Ws>();
     machine.register::<WsConn>();
+}
+
+// ---------------------------------------------------------------------------
+// URL：有序列表保留重复查询键，拒绝稀疏/循环输入，不保存字段视图。
+// ---------------------------------------------------------------------------
+pub(crate) trait UrlItemSize {
+    fn url_bytes(&self) -> usize;
+}
+impl UrlItemSize for cosmos::userdata::LuaBytes {
+    fn url_bytes(&self) -> usize {
+        self.len()
+    }
+}
+pub(crate) struct UrlItems<T>(pub(crate) Result<Vec<T>, String>);
+pub(crate) struct UrlList<T>(pub(crate) Vec<T>);
+impl<'lua, T: FromLua<'lua> + UrlItemSize> FromLua<'lua> for UrlItems<T> {
+    unsafe fn from_lua(value: Value<'lua>) -> Result<Self, String> {
+        use crate::http::url::{MAX_URL_BYTES, MAX_URL_ITEMS};
+        use cosmos::userdata::ValueKind;
+        let parsed = (|| {
+            let mut items = std::collections::BTreeMap::new();
+            let mut bytes = 0usize;
+            value.table()?.entries(|key, value| {
+                if items.len() == MAX_URL_ITEMS {
+                    return Err("URL sequence exceeds 1024 items".into());
+                }
+                if key.kind() != ValueKind::Number {
+                    return Err("URL sequence requires consecutive integer keys".into());
+                }
+                let index = key.read::<f64>()?;
+                if !index.is_finite()
+                    || index.fract() != 0.0
+                    || !(1.0..=MAX_URL_ITEMS as f64).contains(&index)
+                {
+                    return Err("URL sequence requires consecutive integer keys".into());
+                }
+                let item = value.read::<T>()?;
+                bytes = bytes.saturating_add(item.url_bytes());
+                if bytes > MAX_URL_BYTES {
+                    return Err("URL sequence input exceeds 64 KiB".into());
+                }
+                items.insert(index as usize, item);
+                Ok(())
+            })?;
+            if items.keys().copied().ne(1..=items.len()) {
+                return Err("URL sequence must not contain holes".into());
+            }
+            Ok(items.into_values().collect())
+        })();
+        Ok(Self(parsed))
+    }
+}
+impl<T: PushLua> PushLua for UrlList<T> {
+    unsafe fn push_lua(self, output: &mut Output<'_>) -> i32 {
+        let mut table = output.array(self.0.len());
+        for (index, value) in self.0.into_iter().enumerate() {
+            table.index(index + 1, value);
+        }
+        table.finish()
+    }
 }

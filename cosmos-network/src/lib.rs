@@ -1,4 +1,4 @@
-//! cosmos-network：基于 cosmos 运行时的网络库（tcp / udp / tls / http / websocket）
+//! cosmos-network：基于 cosmos 运行时的网络库（tcp / udp / tls / http / websocket / url）
 //!
 //! 分层：功能模块（tcp / udp / tls / http / websocket）只描述协议与状态机；
 //! bridge 仅组合 cosmos 的受控转换协议；本 crate 不接触 Lua C API 或状态指针。

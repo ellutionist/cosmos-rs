@@ -263,6 +263,9 @@ fn network_registration_follows_feature() {
         local HttpClient = require("cosmos.network.http.client")
         assert(HttpClient == cosmos.network.http.client)
         assert(HttpClient.new())
+        local Url = require("cosmos.network.http.url")
+        assert(Url == cosmos.network.http.url)
+        assert(Url.parse("https://example.com/a/b"):join("../c"):path() == "/c")
         local Udp = require("cosmos.network.udp")
         assert(Udp == cosmos.network.udp)
         local socket = assert(Udp.bind("127.0.0.1", 0, 1000))
@@ -273,6 +276,7 @@ fn network_registration_follows_feature() {
         assert(cosmos.network == nil)
         assert(not pcall(require, "cosmos.network.http.client"))
         assert(not pcall(require, "cosmos.network.udp"))
+        assert(not pcall(require, "cosmos.network.http.url"))
         "#
     };
     let result = stdin(&["-"], source);

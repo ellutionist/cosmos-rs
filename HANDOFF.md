@@ -12,7 +12,7 @@
 - HTTP/WebSocket 回调已改用 `LuaFunction::call<A, R>`；userdata 借用失败只返回 Err，最外层 trampoline 统一抛 Lua 错误。
 - 外部嵌入使用 `Machine::new(tokio_handle)`，插件实现 `Module` 并通过 add_module 注入；插件包括 `Network`、`Encoding`、`Encryption`、`Database`、`Image`、`Text`，CLI 默认仅启用 network；encoding/encryption/database/image/text 默认关闭，full 开启全部插件。
 - 通用生态顺序见 `ROADMAP.md`；FS 与 datetime 按用户要求属于 builtin，当前首批已完成迁移核对并按用户要求提交。目录统一为 `builtin/fs/mod.rs` 与 `builtin/time/mod.rs`，不保留同名入口 .rs 与子目录并存的布局；接口见 `cosmos/fs.md`、`cosmos/time.md`。
-- 用户新增交付节奏：每完成一个 module，逐项核对迁移/功能需求、验证并记录后停下供用户检查，再等待提交指令；不自动连做下一模块。FS/time 已提交；用户随后授权的 HTTP 流式模块已完成需求核对与验证，已获用户确认提交；随后授权的密码与随机数模块已获用户确认提交；随后授权的 XML 已获用户确认提交；独立图片模块及 CLI 默认/ full 调整已获用户确认提交；文本模块已完成迁移核对与验证，本轮获用户确认提交，并授权开始 URL 模块。文本接口见 `cosmos-text/README.md`；URL 完成后仍须停下供检查。纳秒时间戳用整数字符串保存；文件根目录检查使用组件级路径 API，见对应文档。
+- 用户新增交付节奏：每完成一个 module，逐项核对迁移/功能需求、验证并记录后停下供用户检查，再等待提交指令；不自动连做下一模块。FS/time 已提交；用户随后授权的 HTTP 流式模块已完成需求核对与验证，已获用户确认提交；随后授权的密码与随机数模块已获用户确认提交；随后授权的 XML 已获用户确认提交；独立图片模块及 CLI 默认/ full 调整已获用户确认提交；文本模块已提交为 e2fa04b；用户随后授权的 URL 模块已完成迁移核对和验证，本轮获用户确认提交并授权开始 HTTP/SOCKS 代理。接口见 `cosmos-text/README.md`、`cosmos-network/url.md`；不自动继续代理。纳秒时间戳用整数字符串保存；文件根目录检查使用组件级路径 API，见对应文档。
 - WebSocket 已改成独立读写：后台完整解析帧，接收超时/取消不丢半帧，写入开始后取消会关闭连接；最后一个句柄或 Machine 销毁时取消读任务。并发与取消回归见 `examples/websocket_concurrent.lua`。
 - 用户已撤销 CDP/browser 插件，浏览器控制逻辑留给应用层通过现有 WebSocket、JSON 和协程能力组合；不再增加通用库中的浏览器高层 API。
 - UDP 已作为 `cosmos.network.udp` 接入 Network，支持 IPv4 / IPv6、报文边界、二进制、域名、并发收发、超时/取消与关闭唤醒；不再属于待做。
@@ -80,13 +80,22 @@ cosmos-rs/
 
 ## 4. 最近完成的工作
 
+### URL（2026-11-14，已确认提交）
+
+- 新增 cosmos.network.http.url，随 Network 安装，不新增插件/CLI feature；Rust 公开面保持只有 Network。借助原生 Rust url 提供拥有型不可变句柄、组件/路径段、parse/join、origin 与顺序重复查询参数；表输入只读取实际连续键和值，零裸 Lua FFI。
+- HTTP 初始请求和重定向复用同一解析/合并规则，移除旧手写 resolve/origin；点段、query/fragment、协议相对引用与默认端口语义正确。fragment 不发包，HTTP userinfo 返回错误，跨源继续剥离凭证头；字符串请求 API、整体超时、流式 body/重放限制保留。
+- 原始 query/path 保留编码；query_pairs 按表单规则（+ 为空格），with_query_pairs 重建整组，append_query_pair 只编码新参数并保留旧字节。path_segments 输出已编码片段，with_path_segments 接收原始数据，不能直接无脑往返。
+- 文本/组件及序列化 URL 上限 64 KiB，输入序列总字符串 64 KiB，数组最多 1024 项；URL 计算同步有界，未引入工作线程或保留 Lua 字段视图。WHATWG 解析不是严格输入验证或站点策略，详见 url.md。
+- 新增 3 项回归和 examples/url.lua，覆盖两种 Runtime、原生 parse/join/query 对照、实际 HTTP 重定向、稀疏/循环/资源/GC 边界。工作区 103 项常规测试和 5 项编译失败文档测试、全 feature 严格 Clippy 通过；CLI 默认/full 各 10 项、无插件 9 项，实际 URL 与 HTTP 示例通过，默认构建已恢复。
+- 已逐项核对原后端 URL 用法并更新 ROADMAP；本轮用户明确要求提交并继续 HTTP/SOCKS 代理，不 push。代理完成后停下供检查。
+
 ### 文本（2026-11-14，已确认提交）
 
 - 新增 cosmos-text / Text 插件，只有插件入口公开。正则、Unicode、繁简转换分别注册在 cosmos.text.regex / unicode / chinese，父表自动生成；CLI 的 text 默认关闭并纳入 full，默认仍仅 network。
 - 正则覆盖编译、搜索、捕获与原文范围、集合、模板/可挂起回调替换、分段和转义；匹配拥有共享 Rust 原文。Unicode 覆盖四种规范化、上下文相关大小写、空白、scalar 计数和截断；繁简使用与原后端相同的 ferrous-opencc 0.4 / t2s / s2t 内嵌词典与惰性缓存。
 - 零裸 Lua FFI；原生输入在宿主准备，工作线程不持有 Lua。跨 Machine/Runtime 的 2 个运行/16 个已接纳作业预算，取消不提前释放运行额度；搜索步之间协作取消，单次搜索/OpenCC 不强制中断。输入、输出、模式、编译、捕获和分段均有限制，详见 cosmos-text/README.md。
 - 新增 6 项测试及 examples/text.lua；对照原后端实际模式、Rust 捕获范围/模板与 OpenCC 歧义字，迁移核对通过。工作区 100 项常规测试、5 项编译失败文档测试和严格 Clippy 通过；text-only/无插件 CLI 各 9 项，默认/full 各 10 项，实际文本/XML/HTTP 图片/HTTP 示例通过；默认构建已恢复。
-- 用户已明确要求提交文本模块并继续 URL；本轮提交信息使用英文，不 push。URL 完成后等待检查，不连续实现代理。
+- 用户已明确要求提交文本模块并继续 URL；文本提交号 e2fa04b，未 push。后续 URL 完成后等待检查，不连续实现代理。
 
 ### 图片（2026-11-14，已确认提交）
 

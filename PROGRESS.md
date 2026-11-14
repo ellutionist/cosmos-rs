@@ -1126,3 +1126,23 @@
 - 按用户明确授权提交 cosmos-text、CLI text/full 开关、示例与文档；提交信息使用英文，不 push。
 - 提交前核对差异、格式和新增文件，沿用上一轮工作区 100 项测试、5 项编译失败检查、严格 Clippy、实际示例、Runtime/feature 组合等验证；本轮提交前只更新交付记录，无新行为修改。
 - 用户已授权继续下一个 URL 模块；本批完成后再次核对需求并停下供检查，不自动推进代理模块。
+
+
+## 2026-11-14 URL 模块（等待用户检查）
+
+- 文本批次已按用户要求提交为 e2fa04b，未 push；本轮继续用户明确授权的下一 URL 模块，不推进 HTTP/SOCKS 代理。
+- 新增 cosmos.network.http.url，随 Network 自动安装，不新建插件/feature；公开 Rust 面仍只有 Network。使用既有 Rust url 依赖，提供拥有型不可变 URL、组件访问/修改、相对引用合并、origin 比较、有序重复查询参数和安全路径段构造。所有修改返回新值，失败不改变原句柄；请求仍显式接收 string()。
+- HTTP 客户端删除手工 resolve/origin，实现初始 URL 与重定向共同使用标准解析/合并；正确处理点段、仅 query/fragment、空引用、协议相对地址和默认端口/主机标准化。发包不含 fragment，userinfo 不隐式解释为认证，跨源继续剥离 Authorization/Cookie/Proxy-Authorization。
+- 桥接只补本 crate 内的有界顺序数组适配，用于查询对和路径段两处；通过受控 Value/Output 组合，不接触裸 Lua 栈。字段使用 LuaBytes 独立锚点，转换后只保留原生 URL，不保存表字段视图；有序输入检查实际键、洞、项数和字节数。文本/组件及最终 URL 各限 64 KiB，数组最多 1024 项，输入字符串合计 64 KiB；同步执行有界 URL 计算，不分配网络任务或工作队列。
+- 踩坑：query_pairs 使用表单编码（空格变 +），不能按 URI 百分号规则判断；append_query_pair 保留旧查询原始字节，只编码新参数。path_segments 返回已编码片段，with_path_segments 接收原始片段。服务端 path() 不含 query，重定向验收需读 target()；derive 表读取走实际字段而非 __index，不能用元表伪造必填字段。userdata 宏当前不替换参数位置的 Self，本模块参数明确写 HttpUrl，不扩展本轮宏改造范围。
+- 原生对照与两种 Runtime 的实际 URL/HTTP 示例已通过，覆盖 Unicode/IDNA、IPv4/IPv6、opaque URL、重复/空查询、UTF-8/NUL/非规范百分号、GC 后独立持有、稀疏/循环/超量输入、错误后恢复，以及 fragment 和跨源凭证；工作区 103 项测试与 5 项编译失败文档检查、全 feature 严格 Clippy、CLI 默认/full 各 10 项和无插件 9 项通过；实际默认 CLI 运行 url.lua、http.lua 通过，默认仅 network 构建已恢复。
+- 本模块完成后核对迁移要求并停下供用户检查，等待提交指令；不自动提交本批或继续代理模块。
+
+- 收尾迁移核对覆盖 actor_urls、operations/tasks、scraper/model、scraper/filters、verification 与 WebSocket 地址组件重写，需求均可由通用 API 组合；ROADMAP/HANDOFF、Network/HTTP/根 README 和独立 URL 文档同步更新。UTF-8/非规范百分号、opaque origin、IDNA 和默认端口规则已披露。格式、差异、文档链接和语言扫描见最终检查；本批未提交。
+
+
+## 2026-11-14 提交 URL 模块
+
+- 按用户明确授权提交 URL、HTTP 标准合并、示例/测试和文档，提交信息使用英文，不 push。
+- 提交前核对差异和新增文件，沿用上一轮已通过的工作区 103 项测试、5 项编译失败检查、严格 Clippy、两种 Runtime、CLI feature 组合及实际 URL/HTTP 示例；本轮提交前仅更新交付记录。
+- 用户授权继续下一个 HTTP/SOCKS 代理模块；完成后核对迁移需求并停下供检查，不连续推进日期日历。
