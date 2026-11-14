@@ -115,7 +115,7 @@ XML 本阶段扩展 Encoding 插件，接口见 [XML 文档](cosmos-encoding/xml
 - [x] 编译型正则、Unicode normalization 与大小写、繁简转换（迁移核对通过）。
 - [x] URL 解析、合并、查询参数，与已有 URI 百分号编码区分职责（迁移核对通过）。
 - [x] HTTP(S) / SOCKS5 / SOCKS5H 代理能力；直连规则由应用配置（迁移核对通过）。
-- [ ] 补齐日期日历运算和按需扩展的格式支持；继续放在 builtin time。
+- [x] 日期年月/周/日运算、期间起点、ISO 周与 RFC2822；继续放在 builtin time（迁移核对通过）。
 
 文本部分作为独立 `cosmos-text` 插件交付，接口见 [Text 文档](cosmos-text/README.md)，实际用法见 [text.lua](examples/text.lua)。CLI 的 text 默认关闭，单独启用或通过 full 启用，无其他插件依赖。
 
@@ -142,6 +142,8 @@ URL 本批扩展 Network，不新增插件或 feature。接口见 [URL 文档](c
 本批已覆盖原后端使用的 URL 基础能力，并在两种 Runtime 和默认/full/无插件 CLI 上验证。解析沿用 WHATWG 规范化和非规范百分号处理，不提供站点验证策略；URL 与组件长度最多 64 KiB，列表最多 1024 项。HTTP 只接受 http/https，不发送 fragment，不把 userinfo 自动变为认证头。代理由后续批次补齐；日期日历继续按本轮连续授权推进。
 
 代理作为 Network 的一部分，接口见 [proxy.md](cosmos-network/proxy.md)、实际用例见 [proxy.lua](examples/proxy.lua)。已对照原后端 archiver/network.rs、settings.rs、images.rs 和云端翻译请求：四种代理协议、HTTP Basic/SOCKS 用户名密码、本地/远端 DNS、独立代理/来源 TLS、逐跳直连回调、client 路由池隔离、流式和 HTTP/2 均覆盖；私网/LAN/LLM 是否绕过由应用回调实现，不移入库。WebSocket 复用代理隧道；错误响应、预读字节、边界、超时、Machine 销毁及两种 Runtime 验证通过。
+
+日期日历继续属于 builtin time。已对照归档日志的按日窗口、重试时刻及 NFO 日期格式：既有 RFC3339/strftime 覆盖原格式，新增日历偏移与期间起点、ISO 周及 RFC2822；月末/闰年、正负移动、纳秒保持、23/25 小时 DST、重叠显式选择、缺失日期拒绝和两种 Runtime 验证通过。文档见 [time.md](cosmos/time.md)，实际用例见 [datetime.lua](examples/datetime.lua)，不加入节假日或业务到期策略。
 
 ### 6. 数据库、服务生命周期与日志
 

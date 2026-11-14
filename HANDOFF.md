@@ -81,6 +81,12 @@ cosmos-rs/
 
 ## 4. 最近完成的工作
 
+### builtin 日期日历（2026-11-14，按连续授权提交）
+
+- 代理已提交为 7e9ae82。本批新增 add_calendar 年月/周日、月末 clamp/reject、DST reject/earliest/latest、start_of 期间、ISO 周和月份天数、RFC2822；原 now/add_ms 语义不变。保留纳秒，拒绝缺失当地日期，净位移为零保留原时刻。
+- examples/datetime.lua 实际运行且在两种 Runtime builtin 回归中覆盖月末/闰年、23/25 小时 DST、Samoa 跳日、ISO 周与边界；工作区 107 项测试和 5 项编译失败文档检查、严格 Clippy、格式/差异及非注释中文 0 扫描通过。接口更新 cosmos/time.md、ROADMAP。
+- 按连续授权提交后继续数据库资源/预编译；不等待检查、不 push。
+
 ### 代理（2026-11-14，按连续授权提交）
 
 - URL 已提交为 4adb589。本批 Network 新增 Proxy，四种协议、HTTP/SOCKS 认证、HTTP 逐跳异步路由与独立路由池、HTTPS 嵌套 TLS、SOCKS DNS 和 WebSocket 隧道均实现，策略仍在 Lua 应用；不自动读取环境代理。

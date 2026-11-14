@@ -58,6 +58,12 @@ impl Zone {
         }
     }
     fn local(self, value: NaiveDateTime) -> Result<DateTime<Utc>, String> {
+        self.resolve(value, "reject")
+    }
+    fn resolve(self, value: NaiveDateTime, ambiguity: &str) -> Result<DateTime<Utc>, String> {
+        if !matches!(ambiguity, "reject" | "earliest" | "latest") {
+            return Err("datetime ambiguity must be reject, earliest or latest".into());
+        }
         let result = match self {
             Self::Fixed(zone) => zone
                 .from_local_datetime(&value)
@@ -68,9 +74,14 @@ impl Zone {
         };
         match result {
             LocalResult::Single(value) => Ok(value),
-            LocalResult::Ambiguous(_, _) => {
-                Err("ambiguous local datetime; supply an explicit UTC offset".into())
-            }
+            LocalResult::Ambiguous(first, second) => match ambiguity {
+                "earliest" => Ok(first.min(second)),
+                "latest" => Ok(first.max(second)),
+                _ => Err(
+                    "ambiguous local datetime; supply an explicit UTC offset or ambiguity policy"
+                        .into(),
+                ),
+            },
             LocalResult::None => Err("nonexistent or out-of-range local datetime".into()),
         }
     }
@@ -129,6 +140,9 @@ struct Parts {
     nanosecond: i64,
     weekday: i64,
     ordinal: i64,
+    iso_year: i64,
+    iso_week: i64,
+    days_in_month: i64,
     offset_seconds: i64,
     timezone: String,
 }
@@ -137,6 +151,28 @@ fn integer(value: f64, min: f64, max: f64, name: &str) -> Result<i64, String> {
         return Err(format!("invalid datetime {name}"));
     }
     Ok(value as i64)
+}
+#[derive(Default, crate::FromLua)]
+#[lua(default)]
+struct Calendar {
+    years: f64,
+    months: f64,
+    weeks: f64,
+    days: f64,
+    overflow: Option<String>,
+    ambiguity: Option<String>,
+}
+fn month_days(year: i32, month: u32) -> u32 {
+    let (next_year, next_month) = if month == 12 {
+        (year + 1, 1)
+    } else {
+        (year, month + 1)
+    };
+    NaiveDate::from_ymd_opt(next_year, next_month, 1)
+        .unwrap()
+        .pred_opt()
+        .unwrap()
+        .day()
 }
 #[crate::userdata(name = "time.datetime")]
 impl Datetime {
@@ -299,6 +335,9 @@ impl Datetime {
             nanosecond: value.timestamp_subsec_nanos() as i64,
             weekday: value.weekday().number_from_monday() as i64,
             ordinal: value.ordinal() as i64,
+            iso_year: value.iso_week().year() as i64,
+            iso_week: value.iso_week().week() as i64,
+            days_in_month: month_days(value.year(), value.month()) as i64,
             offset_seconds: value.offset().fix().local_minus_utc() as i64,
             timezone: self.zone.name(),
         }
@@ -311,6 +350,81 @@ impl Datetime {
             .checked_add_signed(chrono::TimeDelta::milliseconds(millis))
             .ok_or("datetime is out of range")?;
         Self::checked(utc, self.zone)
+    }
+    /// 先合并年月，再按当地日历加周/日，保留本地时分秒与纳秒。
+    fn add_calendar(&self, delta: Calendar) -> Result<Self, String> {
+        let years = integer(delta.years, -9999.0, 9999.0, "calendar years")?;
+        let months = integer(delta.months, -119988.0, 119988.0, "calendar months")?;
+        let weeks = integer(delta.weeks, -521722.0, 521722.0, "calendar weeks")?;
+        let days = integer(delta.days, -3652058.0, 3652058.0, "calendar days")?;
+        let overflow = delta.overflow.as_deref().unwrap_or("clamp");
+        if !matches!(overflow, "clamp" | "reject") {
+            return Err("calendar overflow must be clamp or reject".into());
+        }
+        let displayed = self.zone.at(self.utc);
+        let original = displayed.date_naive();
+        let total = original.year() as i64 * 12 + original.month0() as i64 + years * 12 + months;
+        let year = total.div_euclid(12);
+        let month = (total.rem_euclid(12) + 1) as u32;
+        if !(1..=9999).contains(&year) {
+            return Err("calendar year must be in 1..=9999".into());
+        }
+        let last = month_days(year as i32, month);
+        let day = if overflow == "clamp" {
+            original.day().min(last)
+        } else {
+            original.day()
+        };
+        let date = NaiveDate::from_ymd_opt(year as i32, month, day)
+            .ok_or("calendar month has no requested day")?
+            .checked_add_signed(chrono::TimeDelta::days(days + weeks * 7))
+            .ok_or("calendar date is out of range")?;
+        let local = date.and_time(displayed.time());
+        let ambiguity = delta.ambiguity.as_deref().unwrap_or("reject");
+        if local == displayed.naive_local() && ambiguity == "reject" {
+            return Ok(self.clone());
+        }
+        Self::checked(
+            self.zone
+                .resolve(local, delta.ambiguity.as_deref().unwrap_or("reject"))?,
+            self.zone,
+        )
+    }
+    fn start_of(&self, unit: &str, ambiguity: Option<String>) -> Result<Self, String> {
+        let original = self.zone.at(self.utc).date_naive();
+        let date = match unit {
+            "day" => Some(original),
+            "week" => original.checked_sub_signed(chrono::TimeDelta::days(
+                original.weekday().num_days_from_monday() as i64,
+            )),
+            "month" => original.with_day(1),
+            "year" => NaiveDate::from_ymd_opt(original.year(), 1, 1),
+            _ => return Err("datetime period must be day, week, month or year".into()),
+        }
+        .ok_or("datetime period is out of range")?;
+        Self::checked(
+            self.zone.resolve(
+                date.and_hms_opt(0, 0, 0).unwrap(),
+                ambiguity.as_deref().unwrap_or("reject"),
+            )?,
+            self.zone,
+        )
+    }
+    fn parse_rfc2822(text: &str, timezone: Option<String>) -> Result<Self, String> {
+        if text.len() > 4096 {
+            return Err("datetime input exceeds limit".into());
+        }
+        let value = DateTime::parse_from_rfc2822(text)
+            .map_err(|err| format!("invalid RFC2822 datetime: {err}"))?;
+        let zone = timezone
+            .as_deref()
+            .map(|name| Zone::parse(Some(name)))
+            .transpose()?
+            .unwrap_or(Zone::Fixed(*value.offset()));
+        Self::checked(value.with_timezone(&Utc), zone)
+    }
+    fn to_rfc2822(&self) -> String {
+        self.zone.at(self.utc).to_rfc2822()
     }
     fn diff_ms(&self, earlier: Datetime) -> f64 {
         (self.utc - earlier.utc).num_milliseconds() as f64

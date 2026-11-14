@@ -1163,3 +1163,13 @@
 - 核对 archiver/network/settings/images/translation 的四种代理与应用直连策略，回调满足逐跳决策，未内置私网/业务规则。新代理/HTTP/WebSocket、两种 Runtime、TLS 嵌套、DNS、流式、池隔离、损坏协议、超时/VM 销毁和预读/上限测试通过；最终工作区/Clippy/实际示例与 feature 验证收尾后按授权单独提交，继续日期日历。
 
 - 收尾验证：工作区 107 项测试、5 项编译失败文档检查、严格 Clippy，CLI full 10 项/无插件 9 项通过；实际 proxy.lua、http.lua、websocket.lua 通过。feature 构建与 CLI 示例已改为串行执行，避免测试期间覆盖同名二进制；默认仅 network 构建恢复。非注释中文扫描 0 处，差异与格式检查通过。按连续授权提交本模块并继续日期日历，不 push。
+
+
+## 2026-11-14 builtin 日期日历
+
+- 代理已提交为 7e9ae82。本批继续 builtin time，新增 add_calendar 的合并年月及周/日移动、月末 clamp/reject、DST reject/earliest/latest、start_of 日/周/月/年、ISO 周与月份天数、RFC2822 解析/输出；不修改真实 now 或经过时间 add_ms。
+- 保留时分秒和纳秒，输入/年份边界受控。净日历位移为零时保留原有已知偏移，避免重叠小时中的已知时刻被误判；缺失当地时间仍报错，不静默跳到其他日期。月份运算先合并再按日移动，截断不承诺可逆。
+- 对照原后端日志日窗口、重试/到期和 NFO 日期格式，原 RFC3339/strftime 已覆盖；新增通用日历能力支持按当地日期组合，不引入工作日或业务策略。两种 Runtime 的 builtin 回归及实际 datetime.lua 通过，补充闰年/月末、ISO 跨年周、正负/零移动、23/25 小时 DST、Samoa 缺失日期、错误恢复与纳秒往返。
+- 按连续授权在工作区/严格 Clippy 等收尾通过后单独提交，接着处理数据库资源与预编译，不 push。
+
+- 收尾通过：工作区 107 项常规测试、5 项编译失败文档检查、全 feature 严格 Clippy、实际 datetime.lua、格式/差异检查和非注释中文 0 扫描。按用户连续授权单独提交 builtin 日期日历；下一批数据库资源和服务器预编译。

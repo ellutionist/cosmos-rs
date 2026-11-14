@@ -41,4 +41,15 @@
 
 句柄不可变。UTC 与显示时区的年份都限制在 1–9999，非法日期、未知时区、越界偏移和闰秒明确报错。输入/格式上限 4096 字节，格式化输出上限 64 KiB。普通错误返回 `nil, err`，参数类型错误抛 Lua 错误，文案为英文。
 
-`add_ms(86400000)` 表示经过 24 小时，DST 边界处不一定是当地日历的下一天。月份/日历日运算按 [路线图](../ROADMAP.md) 后续补充，不混入经过时间 API。
+`add_ms(86400000)` 表示经过 24 小时，DST 边界处不一定是当地日历的下一天。日历运算使用独立的 add_calendar，不混入经过时间 API。
+
+
+## 日历运算与格式
+
+`value:add_calendar({years=0, months=0, weeks=0, days=0, overflow="clamp", ambiguity="reject"})` 先合并年月，再移动当地日历的周/日，保留当地时分秒与纳秒；各数量必须是有界整数，可以为负。月末默认截断到目标月最后一天（例如 1 月 31 日加一个月得到 2 月 28/29 日），overflow="reject" 时不存在的日期报错。两步运算不保证可逆，年份仍限制为 1..9999。
+
+日历日跨 DST 可能只经过 23/25 小时；不存在的当地时间始终报错，重叠时间默认报错，可用 ambiguity="earliest"/"latest" 显式选择。净移动为零且未指定歧义选择时保留已知的原时刻，不重新解释已有偏移。
+
+`:start_of(unit[, ambiguity])` 返回当地 day/week/month/year 的起点，周一为一周起点；午夜不存在/重叠时遵守相同规则。`:parts()` 另提供 iso_year、iso_week、days_in_month。`datetime.parse_rfc2822(text[, timezone])` 和 `:to_rfc2822()` 提供带偏移的邮件日期格式；RFC3339 与已有 strftime 自定义格式继续有效，所有时钟 now API 仍返回真实当前时间。
+
+实际月末、闰年、DST、跨年 ISO 周、Samoa 跳日及格式验收见 [datetime.lua](../examples/datetime.lua)。没有隐含的节假日、工作日或业务到期规则。
