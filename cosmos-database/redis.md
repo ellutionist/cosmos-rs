@@ -42,7 +42,7 @@
 
 ## 连接池
 
-每个 `redis.client` 独立持有空闲池，`pool_size` 默认 10，仅限制空闲数量；`idle_timeout` 默认 60000 毫秒，0 表示不过期。不提供命名全局池、backlog 或 tcp_keepalive 选项。
+每个 `redis.client` 独立持有空闲池，`pool_size` 默认 10 限制空闲数量，另有下文的 max_connections/max_waiters/acquire_timeout 预算；`idle_timeout` 默认 60000 毫秒，0 表示不过期。不提供命名全局池、backlog 或 tcp_keepalive 选项。
 
 租借前用 PING 检查连接，失效则重新建立。归还后旧句柄失效。未收完 pipeline、仍在订阅 / MULTI / WATCH 状态、收发失败或取消的连接不能回池；公开调用 AUTH、SELECT 等改变会话的命令后，也会保守地禁止归还。使用完应关闭该连接，再从 client 租借新的连接。
 
@@ -55,3 +55,11 @@ COSMOS_REDIS_URL='redis://127.0.0.1:6379/0' ./target/debug/cosmos-cli examples/r
 ```
 
 离线测试覆盖异常 RESP、二进制与嵌套错误、整数精度、资源上限、未读完 pipeline / PubSub 的超时关闭，以及校验证书的 TLS 和 Unix socket。
+
+## 资源作用域
+
+两种数据库共享有界租借预算：max_connections 默认 pool_size（10），max_waiters 默认 min(4*max_connections,65536)，acquire_timeout 默认 5000 毫秒、0 只尝试立即获取。max_connections 限制租借/建连，pool_size 继续限制空闲数量；获取前先占有界等待名额，超过队列直接报错。stats() 返回 in_use/waiting/idle/max_connections/max_waiters/closed，空闲过期使用单调时钟。
+
+`client:with_connection(callback, ...)` 成功归还并保留回调返回值；抛错或返回 `nil/false, err` 时关闭连接并返回错误。`client:transaction(callback, ...)` 在同一租借上 MULTI，回调成功后 EXEC，并返回 EXEC 的结果数组；失败时 DISCARD/关闭。EXEC 内逐条 Redis 错误按原协议返回，不承诺 SQL 式回滚；WATCH/乐观重试由应用自行组合，不自动重试事务。
+
+client.close 会关闭空闲池并唤醒等待者，已借出的连接结束后关闭，不重新入池。取消中的 socket I/O 立即释放，Lua 不执行被取消作用域的 finally；不可达租借配额在 GC 时归还。kill 是请求，join 后才完成执行清理；调用方手动保留租借时应主动 close。具体预算、取消、排队超时和事务验证见 [database_resources.lua](../examples/database_resources.lua)。

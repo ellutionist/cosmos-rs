@@ -1,6 +1,7 @@
 -- Copyright (C) Yichun Zhang (agentzh)
 
 local bit = require "bit"
+local Pool = require "cosmos.database._pool"
 -- 基于 lua-resty-mysql 0.29 移植；版权和完整 BSD 条款见 THIRD_PARTY_NOTICES.md。
 local Socket = require "cosmos.network.socket"
 local TlsContext = require "cosmos.network.tcp.tls.context"
@@ -32,6 +33,8 @@ if not ok then
 end
 
 local _M = require "cosmos.database.mysql"
+if rawget(_M,"_cosmos_loaded") then return _M end
+_M._cosmos_loaded=true
 _M._VERSION = "0.29-cosmos"
 _M.null = null
 
@@ -43,7 +46,7 @@ local COM_PING = 0x0e
 local COM_QUERY = 0x03
 
 -- 不声明 LOCAL INFILE 能力，文件上传不属于该客户端接口。
-local DEFAULT_CLIENT_FLAGS = 0x3f74f
+local DEFAULT_CLIENT_FLAGS = 0x7f74f
 local CLIENT_SSL = 0x00000800
 local CLIENT_PLUGIN_AUTH = 0x00080000
 local CLIENT_PLUGIN_AUTH_LENENC_CLIENT_DATA = 0x00200000
@@ -358,6 +361,7 @@ local function _parse_result_set_header_packet(packet)
 end
 
 local function _parse_field_packet(data)
+    if #data>65536 then error("MySQL column metadata exceeds 64 KiB") end
     local col = new_tab(0, 2)
     local catalog, db, table, orig_table, orig_name, charsetnr, length
     local pos
@@ -367,6 +371,7 @@ local function _parse_field_packet(data)
     table, pos = _from_length_coded_str(data, pos)
     orig_table, pos = _from_length_coded_str(data, pos)
     col.name, pos = _from_length_coded_str(data, pos)
+    if type(col.name)~="string" or #col.name>4096 then error("invalid or oversized MySQL column name") end
 
     orig_name, pos = _from_length_coded_str(data, pos)
 
@@ -391,6 +396,26 @@ local function _parse_field_packet(data)
     end
 
     return col
+end
+
+local function _parse_binary_row(data,cols,compact)
+    if strbyte(data,1)~=0 then error("invalid MySQL binary row header") end
+    local bitmap=math.floor((#cols+9)/8);local pos=2+bitmap
+    if #data<1+bitmap then error("truncated MySQL binary null bitmap") end
+    local row={}
+    for i,col in ipairs(cols) do
+        local byte=strbyte(data,2+math.floor((i+1)/8))
+        local value
+        if band(byte,lshift(1,(i+1)%8))~=0 then value=null
+        else
+            local nextpos;value,nextpos=_M._decode_binary(data,col.type,col.flags,pos)
+            if value==nil then error(nextpos) end
+            pos=nextpos
+        end
+        row[compact and i or col.name]=value
+    end
+    if pos~=#data+1 then error("unexpected trailing binary row data") end
+    return row
 end
 
 local function _parse_row_data_packet(data, cols, compact)
@@ -524,6 +549,14 @@ local function _read_hand_shake_packet(self)
     end
 
     return scramble .. scramble_part2, plugin
+end
+
+local function _lenenc_string(data)
+    local n=#data
+    if n<=250 then return strchar(n)..data end
+    if n<=0xffff then return "\xfc".._set_byte2(n)..data end
+    if n<=0xffffff then return "\xfd".._set_byte3(n)..data end
+    return "\xfe".._set_byte4(n).._set_byte4(0)..data
 end
 
 local function _append_auth_length(self, data)
@@ -969,6 +1002,7 @@ function _M.server_ver(self)
 end
 
 local function send_query(self, query)
+    self._binary=nil
     if self.state ~= STATE_CONNECTED then
         return nil, "cannot send query in the current context: "
                     .. (self.state or "nil")
@@ -990,6 +1024,7 @@ end
 _M.send_query = send_query
 
 local function read_result(self, est_nrows)
+    if est_nrows~=nil and (type(est_nrows)~="number" or est_nrows<0 or est_nrows>100000 or est_nrows~=math.floor(est_nrows)) then return nil,"invalid estimated row count" end
     if self.state ~= STATE_COMMAND_SENT then
         return nil, "cannot read result in the current context: "
                     .. (self.state or "nil")
@@ -1030,6 +1065,7 @@ local function read_result(self, est_nrows)
 
     local field_count, extra = _parse_result_set_header_packet(packet)
 
+    if type(field_count)~="number" or field_count<1 or field_count>1024 or field_count~=math.floor(field_count) then return nil,"MySQL result exceeds 1024 columns" end
     local cols = new_tab(field_count, 0)
     for i = 1, field_count do
         local col, err, errno, sqlstate = _recv_field_packet(self)
@@ -1053,7 +1089,7 @@ local function read_result(self, est_nrows)
     local compact = self.compact
 
     local rows = new_tab(est_nrows or 4, 0)
-    local i = 0
+    local i,total = 0,0
     while true do
 
         packet, typ, err = _recv_packet(self)
@@ -1078,7 +1114,9 @@ local function read_result(self, est_nrows)
             return nil, msg, errno, sqlstate
         end
 
-        local row = _parse_row_data_packet(packet, cols, compact)
+        total=total+#packet
+        if i>=100000 or total>64*1024*1024 then return nil,"MySQL result exceeds row or byte limit" end
+        local row = (self._binary and _parse_binary_row or _parse_row_data_packet)(packet, cols, compact)
         i = i + 1
         rows[i] = row
     end
@@ -1116,8 +1154,82 @@ local function discard(self)
         local ok = pcall(self.sock.abort, self.sock)
         if not ok then return nil, "connection is busy" end
     end
+    Pool.finish(self._lease);self._lease=nil
+    self._prepared_ids=nil
     self.sock, self.state, self._busy, self._owner = nil, nil, false, nil
     return 1
+end
+
+local Statement = {};Statement.__index=Statement
+local function close_statement(self,stmt)
+    if self.state~=STATE_CONNECTED then return nil,'connection is not ready' end
+    if stmt._closed or not self._prepared_ids or not self._prepared_ids[stmt._id] then return nil,'statement is closed' end
+    self.state=STATE_COMMAND_SENT;self.packet_no=-1
+    local payload=strchar(0x19).._set_byte4(stmt._id)
+    local sent,err=_send_packet(self,payload,#payload);if not sent then return nil,err end
+    self.state=STATE_CONNECTED;self._prepared_ids[stmt._id]=nil;stmt._closed=true;return 1
+end
+function _M.prepare(self,sql)
+    if self.state~=STATE_CONNECTED then return nil,'connection is not ready' end
+    if type(sql)~='string' then return nil,'expected SQL string' end
+    if #sql+1>self._max_packet_size then return nil,'prepared SQL exceeds packet limit' end
+    local count=0;for _ in pairs(self._prepared_ids or {}) do count=count+1 end
+    if count>=128 then return nil,'connection exceeds 128 open prepared statements' end
+    self.state=STATE_COMMAND_SENT;self.packet_no=-1
+    local sent,err=_send_packet(self,strchar(0x16)..sql,#sql+1);if not sent then return nil,err end
+    local packet,typ,read_error=_recv_packet(self);if not packet then return nil,read_error end
+    if typ==RESP_ERR then self.state=STATE_CONNECTED;local errno,msg,sqlstate=_parse_err_packet(packet);return nil,msg,errno,sqlstate end
+    if typ~=RESP_OK or (#packet~=10 and #packet~=12) or strbyte(packet,10)~=0 then return nil,'invalid MySQL prepare response' end
+    local id=_get_byte4(packet,2);local columns=_get_byte2(packet,6);local params=_get_byte2(packet,8)
+    if columns>1024 or params>1024 then return nil,'prepared statement exceeds 1024 columns or parameters' end
+    for _,number in ipairs({params,columns}) do
+        for _=1,number do local col,error_message=_recv_field_packet(self);if not col then return nil,error_message end end
+        if number>0 then local eof,eof_type,eof_error=_recv_packet(self);if not eof then return nil,eof_error end;if eof_type~=RESP_EOF then return nil,'missing prepared metadata EOF' end end
+    end
+    self._prepared_ids=self._prepared_ids or {};self._prepared_ids[id]=true;self.state=STATE_CONNECTED
+    return setmetatable({_connection=self,_id=id,_parameters=params},Statement)
+end
+function _M._execute_stmt(self,stmt,params,est_nrows)
+    if self.state~=STATE_CONNECTED then return nil,'connection is not ready' end
+    if stmt._closed or not self._prepared_ids or not self._prepared_ids[stmt._id] then return nil,'statement is closed' end
+    params=params or {}
+    if type(params)~='table' then return nil,'expected parameter array' end
+    local count=0;for key in pairs(params) do if type(key)~='number' or key<1 or key>stmt._parameters or key~=math.floor(key) then return nil,'invalid parameter array index' end;count=count+1 end
+    if count~=stmt._parameters then return nil,'parameter count mismatch; use cosmos.null instead of nil' end
+    local bitmap={};for i=1,math.floor((stmt._parameters+7)/8) do bitmap[i]=0 end
+    local types,values={},{}
+    local total=11+#bitmap+2*stmt._parameters
+    for i=1,stmt._parameters do
+        local value=rawget(params,i);local kind=type(value)
+        local n=kind=="string" and #value or 0
+        total=total+(kind=="number" and 8 or kind=="boolean" and 1 or kind=="string" and n+(n<=250 and 1 or n<=65535 and 3 or n<=16777215 and 4 or 9) or 0)
+        if total>self._max_packet_size then return nil,"prepared parameter payload exceeds packet limit" end
+        if value==null then local index=math.floor((i-1)/8)+1;bitmap[index]=bor(bitmap[index],lshift(1,(i-1)%8));types[i]=strchar(6,0)
+        elseif kind=='boolean' then types[i]=strchar(1,0);values[#values+1]=value and '\1' or '\0'
+        elseif kind=='number' then local numeric_type,encoded=_M._encode_number(value);if not numeric_type then return nil,encoded end;types[i]=strchar(numeric_type,0);values[#values+1]=encoded
+        elseif kind=='string' then types[i]=strchar(253,0);values[#values+1]=_lenenc_string(value)
+        else return nil,'unsupported MySQL parameter type' end
+    end
+    local payload=strchar(0x17).._set_byte4(stmt._id)..'\0'.._set_byte4(1)
+    if stmt._parameters>0 then
+        for i=1,#bitmap do bitmap[i]=strchar(bitmap[i]) end
+        payload=payload..concat(bitmap)..'\1'..concat(types)..concat(values)
+    end
+    self.state=STATE_COMMAND_SENT;self.packet_no=-1;self._binary=true
+    local sent,err=_send_packet(self,payload,#payload);if not sent then return nil,err end
+    return read_result(self,est_nrows)
+end
+_M._close_stmt=close_statement
+function _M._close_statements(self)
+    if self.state~=STATE_CONNECTED then return nil,'connection is not ready' end
+    for id in pairs(self._prepared_ids or {}) do local ok,err=close_statement(self,{_id=id});if not ok then return nil,err end end
+    return 1
+end
+function Statement:param_count() return self._parameters end
+function Statement:execute(params,est_nrows) return self._connection:_execute_stmt(self,params,est_nrows) end
+function Statement:close()
+    if self._closed then return 1 end
+    return self._connection:_close_stmt(self)
 end
 
 local function pack(...) return { n = select("#", ...), ... } end
@@ -1135,7 +1247,7 @@ local function invoke(self, operation, ...)
     return unpack(result, 2, result.n)
 end
 
-for _, name in ipairs({"connect", "send_query", "read_result", "query", "ping"}) do
+for _, name in ipairs({"connect", "send_query", "read_result", "query", "ping", "prepare", "_execute_stmt", "_close_stmt", "_close_statements"}) do
     local operation = _M[name]
     _M[name] = function(self, ...) return invoke(self, operation, ...) end
 end
@@ -1169,39 +1281,43 @@ function _M.client(value)
        or idle_timeout ~= idle_timeout then
         return nil, "invalid idle_timeout"
     end
-    return setmetatable({ _options = opts, _size = size, _idle_timeout = idle_timeout,
-                          _idle = {}, _closed = false }, Client)
+    return Pool.attach(setmetatable({ _options = opts, _size = size, _idle_timeout = idle_timeout,
+                          _idle = {}, _closed = false }, Client),opts)
 end
 
 function Client:connect()
-    if self._closed then return nil, "client is closed" end
-    local now = cosmos.time.now_ms()
+    local lease,acquire_error=Pool.acquire(self)
+    if not lease then return nil,acquire_error end
     while #self._idle > 0 do
         local idle = table.remove(self._idle)
         local conn = idle.connection
-        if (self._idle_timeout == 0 or now - idle.since < self._idle_timeout)
+        if (self._idle_timeout == 0 or idle.since:elapsed_ms() < self._idle_timeout)
            and conn.sock:state() == 0 then
             conn:set_timeout(self._options.timeout or 5000)
             conn.compact = self._options.compact_arrays or false
             local ok = conn:ping()
             if ok then
-                if self._closed then discard(conn); return nil, "client is closed" end
+                if self._closed then discard(conn);Pool.finish(lease); return nil, "client is closed" end
                 conn._owner = self
+                conn._lease = lease
                 conn._reused = conn._reused + 1
                 return conn
             end
         end
         discard(conn)
     end
+    if self._closed then Pool.finish(lease);return nil,"client is closed" end
     local conn = _M.new()
+    conn._lease=lease
     local ok, err, errno, sqlstate = conn:connect(self._options)
-    if not ok then return nil, err, errno, sqlstate end
-    if self._closed then discard(conn); return nil, "client is closed" end
+    if not ok then discard(conn);Pool.finish(lease);return nil, err, errno, sqlstate end
+    if self._closed then discard(conn);Pool.finish(lease); return nil, "client is closed" end
     conn._owner = self
     return conn
 end
 
 function Client:release(conn)
+    if type(conn)=="table" and conn._scope then return nil,"connection belongs to an active scope" end
     if getmetatable(conn) ~= mt or conn._owner ~= self then return nil, "connection belongs to another client" end
     if conn._busy or conn.state ~= STATE_CONNECTED then return nil, "connection has unread results or is busy" end
     if not conn.sock or conn.sock:state() ~= 0 then discard(conn); return nil, "closed" end
@@ -1209,13 +1325,16 @@ function Client:release(conn)
         return nil, "transaction must be completed before pooling"
     end
     if self._closed then discard(conn); return nil, "client is closed" end
+    local closed,close_error=conn:_close_statements();if not closed then discard(conn);return nil,close_error end
+    if self._closed then discard(conn);return nil,"client is closed" end
     if #self._idle >= self._size then discard(conn); return 1 end
     -- 转移到一张从未交给调用方的表，旧句柄立即失效，避免归还后的别名操作新租借。
     local parked = {}
     for key, item in pairs(conn) do parked[key] = item end
-    parked._owner = nil
+    parked._owner,parked._lease = nil,nil
+    Pool.finish(conn._lease);conn._lease=nil
     conn.sock, conn.state, conn._owner = nil, nil, nil
-    self._idle[#self._idle + 1] = {connection = setmetatable(parked, mt), since = cosmos.time.now_ms()}
+    self._idle[#self._idle + 1] = {connection = setmetatable(parked, mt), since = cosmos.time.instant.now()}
     return 1
 end
 
@@ -1227,8 +1346,18 @@ end
 function Client:close()
     if self._closed then return end
     self._closed = true
+    Pool.close(self)
     for _, idle in ipairs(self._idle) do discard(idle.connection) end
     self._idle = {}
 end
 
+function Client:stats() return Pool.stats(self) end
+function Client:with_connection(callback,...) return Pool.scope(self,callback,nil,...) end
+function Client:transaction(callback,...)
+    return Pool.scope(self,callback,{
+        begin=function(c)return c:query("START TRANSACTION") end,
+        commit=function(c)return c:query("COMMIT") end,
+        rollback=function(c)return c:query("ROLLBACK") end,
+    },...)
+end
 return _M

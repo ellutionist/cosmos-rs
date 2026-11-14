@@ -1,5 +1,6 @@
 -- Copyright (C) Yichun Zhang (agentzh)
 -- 基于 lua-resty-redis 0.34 适配；原始版权与 BSD 条款见 THIRD_PARTY_NOTICES.md。
+local Pool = require "cosmos.database._pool"
 local Socket = require "cosmos.network.socket"
 local TlsContext = require "cosmos.network.tcp.tls.context"
 local _M = require "cosmos.database.redis"
@@ -26,6 +27,7 @@ end
 local function discard(self)
     local sock = rawget(self, "_sock")
     if sock and not pcall(sock.abort, sock) then return nil, "connection is busy" end
+    Pool.finish(self._lease);self._lease=nil
     self._sock, self._connected, self._busy, self._owner = nil, false, false, nil
     self._pending, self._reqs, self._buffered_msg, self._buffered_bytes = 0, nil, nil, 0
     return 1
@@ -349,7 +351,7 @@ local function connect(self, opts)
     local connected, err
     if opts.path then connected, err = self._sock:connect_unix(opts.path)
     else connected, err = self._sock:connect(opts.host or "127.0.0.1", tonumber(opts.port or 6379)) end
-    if not connected then return nil, err end
+    if not connected then discard(conn);return nil, err end
     if opts.ssl or opts.ctx then
         local ctx = opts.ctx
         if not ctx then ctx = TlsContext.new(); if opts.ssl_verify == false then ctx:verify_none() end end
@@ -469,44 +471,48 @@ function _M.client(value, ...)
     local size, timeout = opts.pool_size or 10, opts.idle_timeout or 60000
     if type(size) ~= "number" or size < 1 or size > 65536 or size ~= math.floor(size) then return nil, "invalid pool_size" end
     if type(timeout) ~= "number" or timeout < 0 or timeout > 1e12 or timeout ~= timeout then return nil, "invalid idle_timeout" end
-    return setmetatable({_options=opts, _idle={}, _size=size, _idle_timeout=timeout, _closed=false}, Client)
+    return Pool.attach(setmetatable({_options=opts, _idle={}, _size=size, _idle_timeout=timeout, _closed=false}, Client),opts)
 end
 function Client:connect()
-    if self._closed then return nil, "client is closed" end
-    local now = cosmos.time.now_ms()
+    local lease,acquire_error=Pool.acquire(self)
+    if not lease then return nil,acquire_error end
     while #self._idle > 0 do
         local item = table.remove(self._idle)
         local conn = item.connection
-        if (self._idle_timeout == 0 or now-item.since < self._idle_timeout) and conn._sock:state() == 0 then
+        if (self._idle_timeout == 0 or item.since:elapsed_ms() < self._idle_timeout) and conn._sock:state() == 0 then
             local opts = self._options
             conn:set_timeouts(opts.connect_timeout or opts.timeout or 5000, opts.send_timeout or opts.timeout or 5000, opts.read_timeout or opts.timeout or 5000)
             if conn:ping() == "PONG" then
-                if self._closed then discard(conn); return nil, "client is closed" end
-                conn._owner, conn._reused = self, conn._reused+1
+                if self._closed then discard(conn);Pool.finish(lease);return nil, "client is closed" end
+                conn._owner, conn._reused,conn._lease = self, conn._reused+1,lease
                 return conn
             end
         end
         discard(conn)
     end
+    if self._closed then Pool.finish(lease);return nil,"client is closed" end
     local conn = _M.new()
+    conn._lease=lease
     local connected, err = conn:connect(self._options)
-    if not connected then return nil, err end
-    if self._closed then discard(conn); return nil, "client is closed" end
+    if not connected then discard(conn);Pool.finish(lease);return nil, err end
+    if self._closed then discard(conn);Pool.finish(lease);return nil, "client is closed" end
     conn._owner = self
     return conn
 end
 function Client:release(conn)
+    if type(conn)=="table" and conn._scope then return nil,"connection belongs to an active scope" end
     if getmetatable(conn) ~= mt or conn._owner ~= self then return nil, "connection belongs to another client" end
     if conn._busy or conn._pending > 0 or conn._reqs then return nil, "connection has pending operations" end
     if not conn._connected or not conn._sock or conn._sock:state() ~= 0 then discard(conn); return nil, "closed" end
     if conn._subscribed or conn._in_multi or conn._watched or conn._session_dirty then return nil, "connection has subscription, transaction or changed session state" end
-    if self._closed then discard(conn); return nil, "client is closed" end
+    if self._closed then discard(conn);return nil, "client is closed" end
     if #self._idle >= self._size then discard(conn); return 1 end
     local parked = {}
     for key, value in pairs(conn) do parked[key] = value end
-    parked._owner = nil
+    parked._owner,parked._lease = nil,nil
+    Pool.finish(conn._lease);conn._lease=nil
     conn._sock, conn._connected, conn._owner = nil, false, nil
-    self._idle[#self._idle+1] = {connection=setmetatable(parked, mt), since=cosmos.time.now_ms()}
+    self._idle[#self._idle+1] = {connection=setmetatable(parked, mt), since=cosmos.time.instant.now()}
     return 1
 end
 function _M.set_keepalive(self)
@@ -515,8 +521,20 @@ function _M.set_keepalive(self)
 end
 function Client:close()
     self._closed = true
+    Pool.close(self)
     for _, item in ipairs(self._idle) do discard(item.connection) end
     self._idle = {}
+end
+
+function Client:stats() return Pool.stats(self) end
+function Client:with_connection(callback,...) return Pool.scope(self,callback,nil,...) end
+function Client:transaction(callback,...)
+    return Pool.scope(self,callback,{
+        begin=function(c)return c:multi() end,
+        commit=function(c)return c:exec() end,
+        rollback=function(c)return c:discard() end,
+        return_commit=true,
+    },...)
 end
 
 setmetatable(_M, {__index=function(_, cmd)

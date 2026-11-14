@@ -3,6 +3,8 @@
 
 #[cfg(feature = "mysql")]
 mod mysql;
+#[cfg(feature = "mysql")]
+mod mysql_binary;
 #[cfg(any(feature = "mysql", feature = "redis"))]
 mod options;
 #[cfg(feature = "redis")]
@@ -15,6 +17,8 @@ impl cosmos::Module for Database {
     fn register(&self, _machine: &mut cosmos::Machine) -> Result<(), String> {
         #[cfg(any(feature = "mysql", feature = "redis"))]
         let machine = _machine;
+        #[cfg(any(feature = "mysql", feature = "redis"))]
+        machine.load("cosmos.database.pool.init", include_str!("../lua/pool.lua"))?;
         #[cfg(any(feature = "mysql", feature = "redis"))]
         machine.add_module(cosmos_network::Network)?;
         #[cfg(feature = "mysql")]

@@ -316,3 +316,89 @@ fn full_size_requests_and_binary_rows_span_physical_packets() {
         },
     );
 }
+
+fn prepared_column(name: &str, kind: u8, flags: u16) -> Vec<u8> {
+    let mut bytes = b"\x03def\x00\x00\x00".to_vec();
+    bytes.push(name.len() as u8);
+    bytes.extend(name.as_bytes());
+    bytes.extend(b"\x00\x0c");
+    bytes.extend(63u16.to_le_bytes());
+    bytes.extend(128u32.to_le_bytes());
+    bytes.push(kind);
+    bytes.extend(flags.to_le_bytes());
+    bytes.extend([0, 0, 0]);
+    bytes
+}
+#[test]
+fn prepared_statements_bind_typed_values_and_decode_binary_rows() {
+    run_server_case(
+        async move |mut stream| {
+            greeting(&mut stream, "mysql_native_password").await;
+            send(&mut stream, 2, OK).await;
+            let (seq, prepare) = frame(&mut stream).await;
+            assert_eq!(seq, 0);
+            assert_eq!(prepare[0], 0x16);
+            let mut ack = vec![0];
+            ack.extend(7u32.to_le_bytes());
+            ack.extend(3u16.to_le_bytes());
+            ack.extend(4u16.to_le_bytes());
+            ack.extend([0, 0, 0]);
+            let mut seq = send(&mut stream, 1, &ack).await;
+            for _ in 0..4 {
+                seq = send(&mut stream, seq, &prepared_column("param", 253, 0)).await;
+            }
+            seq = send(&mut stream, seq, EOF).await;
+            let columns = [
+                prepared_column("id", 8, 32),
+                prepared_column("value", 253, 0),
+                prepared_column("missing", 6, 0),
+            ];
+            for col in &columns {
+                seq = send(&mut stream, seq, col).await;
+            }
+            send(&mut stream, seq, EOF).await;
+            let (seq, execute) = frame(&mut stream).await;
+            assert_eq!(seq, 0);
+            let mut expected = vec![0x17];
+            expected.extend(7u32.to_le_bytes());
+            expected.push(0);
+            expected.extend(1u32.to_le_bytes());
+            expected.extend([8, 1, 1, 0, 5, 0, 253, 0, 6, 0, 1]);
+            expected.extend(1.25f64.to_le_bytes());
+            expected.extend(b"\x03a\0b");
+            assert_eq!(execute, expected);
+            let mut seq = send(&mut stream, 1, &[3]).await;
+            for col in &columns {
+                seq = send(&mut stream, seq, col).await;
+            }
+            seq = send(&mut stream, seq, EOF).await;
+            let mut row = vec![0, 16];
+            row.extend(u64::MAX.to_le_bytes());
+            row.extend(b"\x03a\0b");
+            seq = send(&mut stream, seq, &row).await;
+            send(&mut stream, seq, EOF).await;
+            let (seq, close) = frame(&mut stream).await;
+            assert_eq!(seq, 0);
+            assert_eq!(close, [0x19, 7, 0, 0, 0]);
+            let (seq, ping) = frame(&mut stream).await;
+            assert_eq!(seq, 0);
+            assert_eq!(ping, [0x0e]);
+            send(&mut stream, 1, OK).await;
+            let (_, quit) = frame(&mut stream).await;
+            assert_eq!(quit, [1]);
+        },
+        |port| {
+            format!(
+                r#"
+        local c=cosmos.database.mysql.new();assert(c:connect({{host='127.0.0.1',port={port},user='user',password='pass'}}))
+        local stmt=assert(c:prepare('SELECT ?,?,?,?'));assert(stmt:param_count()==4)
+        assert(stmt:execute({{true,1.25,'a'}})==nil)
+        assert(stmt:execute({{true,0/0,'a',cosmos.null}})==nil)
+        local row=assert(stmt:execute({{true,1.25,'a\0b',cosmos.null}}))[1]
+        assert(row.id=='18446744073709551615' and row.value=='a\0b' and row.missing==cosmos.null)
+        assert(stmt:close() and stmt:close());assert(c:ping());c:close()
+    "#
+            )
+        },
+    );
+}

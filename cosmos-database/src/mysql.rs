@@ -18,6 +18,25 @@ struct Options {
 
 #[cosmos::userdata(name = "database.mysql")]
 impl Mysql {
+    fn _encode_number(value: f64) -> Result<(u16, Vec<u8>), String> {
+        if !value.is_finite() {
+            return Err("MySQL parameter must be finite".into());
+        }
+        if value.fract() == 0.0 && value.abs() <= 9_007_199_254_740_991.0 {
+            Ok((8, (value as i64).to_le_bytes().to_vec()))
+        } else {
+            Ok((5, value.to_le_bytes().to_vec()))
+        }
+    }
+    fn _decode_binary(
+        bytes: cosmos::userdata::LuaBytes,
+        kind: f64,
+        flags: f64,
+        position: f64,
+    ) -> Result<(super::mysql_binary::Cell, u32), String> {
+        super::mysql_binary::decode(bytes, kind, flags, position)
+    }
+
     fn parse_url(value: &str) -> Result<Options, String> {
         // 错误不携带原始 URL，避免密码进入日志。
         let url = Url::parse(value).map_err(|_| "invalid MySQL URL")?;

@@ -17,7 +17,7 @@
 - WebSocket 已改成独立读写：后台完整解析帧，接收超时/取消不丢半帧，写入开始后取消会关闭连接；最后一个句柄或 Machine 销毁时取消读任务。并发与取消回归见 `examples/websocket_concurrent.lua`。
 - 用户已撤销 CDP/browser 插件，浏览器控制逻辑留给应用层通过现有 WebSocket、JSON 和协程能力组合；不再增加通用库中的浏览器高层 API。
 - UDP 已作为 `cosmos.network.udp` 接入 Network，支持 IPv4 / IPv6、报文边界、二进制、域名、并发收发、超时/取消与关闭唤醒；不再属于待做。
-- `cosmos.database.mysql` 已完成 lua-resty-mysql 适配与按 client 隔离的空闲连接池；真实 MySQL 8.4.5 的明文 TCP / TLS 回归通过。认证异常与大包另有离线协议测试；尚未用真实 MariaDB 验证，不支持服务端预编译语句。
+- `cosmos.database.mysql` 已完成 lua-resty-mysql 适配与按 client 隔离的空闲连接池；真实 MySQL 8.4.5 的明文 TCP / TLS 回归通过。认证异常与大包另有离线协议测试；尚未用真实 MariaDB 验证，支持服务端预编译、二进制行和参数绑定；资源管理见最近数据库批次。
 - `cosmos.database.redis` 已适配 lua-resty-redis 0.34，提供 RESP2、pipeline、事务、Pub/Sub 与 client 池。数据库 crate 的 `mysql` / `redis` feature 默认全开；CLI 的 `database` 是两者合集，默认关闭，可单独选择或通过 full 启用，依赖随数据库关闭。Redis 8.10.3 的真实回归通过，配置用 COSMOS_REDIS_URL。
 - Lua / C 模块路径分别沿用 LuaJIT 的 `LUA_PATH` / `LUA_CPATH` 与原生默认值（`;;` 展开默认路径）；CLI 可重复传入 `--path` / `--cpath` 前置模板，宿主使用 `Machine::prepend_path` / `prepend_cpath`，不修改进程环境变量。
 - CLI 的 build.rs 为 macOS / Linux 最终二进制保留并导出 Lua C API；该链接参数不会传播给外部 Machine 宿主。宿主需自行配置，见 README 的 C 扩展节；cosmos 的 Rust ffi 仍私有。
@@ -80,6 +80,14 @@ cosmos-rs/
 - HTTP client 已改为实例独占连接池，构造时固定 TLS 配置，调用迁移为 new + 冒号 request。
 
 ## 4. 最近完成的工作
+
+### 数据库资源与预编译（2026-11-14，按连续授权提交）
+
+- 日期日历已提交为 27dfb81。本批 MySQL 提供 COM_STMT_PREPARE/EXECUTE/CLOSE、typed bind、二进制行、CALL 多结果、NULL、微秒/负 TIME，Rust 仅叶子编解码。普通整数按 LONGLONG 绑定，BIGINT/预编译 DECIMAL 返回精确字符串；公开 Rust API 仍仅 Database。
+- MySQL/Redis 共用内部 pool helper 和 builtin semaphore：max_connections/max_waiters/acquire_timeout/stats、有界公平等待、连接/事务作用域；闲置时钟单调，client 池继续隔离。归还 MySQL 租借关闭所有 statement，旧句柄失效；错误不回池。
+- kill 仅请求取消，需 join 后再观察清理；Lua 不执行被取消作用域 finally，当前 I/O 会关闭，不可达 lease 配额在 GC 后回收，保留手动句柄必须 close。SQL 已发送后的服务端效果不能宣称撤销。
+- 真实用户指定 MySQL 8.4.5 / Redis 的资源、prepared/binary/LIMIT/CALL、事务提交回滚、队列/超时/取消、旧 mysql.lua/redis.lua 回归通过，测试对象清理；离线精确协议帧与单库 feature 通过。工作区 109 项测试和 5 项编译失败文档检查、严格 Clippy 通过。文档见 database/mysql.md、redis.md，示例 examples/database_resources.lua。
+- 按连续授权提交后继续显式信号/进程与 HTTP 服务排空，不 push。
 
 ### builtin 日期日历（2026-11-14，按连续授权提交）
 

@@ -2,7 +2,7 @@
 
 cosmos 的异步数据库插件，提供 [MySQL](mysql.md) 和 [Redis](redis.md)。协议使用内嵌 Lua，传输、TLS 和基础转换复用 cosmos 的 Rust 能力，不依赖 OpenResty 或数据库 C 客户端库。上游来源与原始许可见 [第三方声明](THIRD_PARTY_NOTICES.md)。
 
-Rust 宿主通过 `machine.add_module(cosmos_database::Database)?` 注入，插件自动加载所启用数据库的依赖。Lua 入口为 `cosmos.database.mysql`、`cosmos.database.redis`；对应的 `require` 返回同一张模块表。两种数据库都提供独立连接和按 client 实例隔离的空闲连接池。
+Rust 宿主通过 `machine.add_module(cosmos_database::Database)?` 注入，插件自动加载所启用数据库的依赖。Lua 入口为 `cosmos.database.mysql`、`cosmos.database.redis`；对应的 `require` 返回同一张模块表。两种数据库都提供独立连接和按 client 实例隔离的有界连接池、租借/事务作用域；MySQL 还支持服务端预编译和类型参数绑定。
 
 ## Feature
 
@@ -32,6 +32,7 @@ CLI 的其他插件仍可按需通过 feature 组合。运行方式与 `Machine`
 
 ## 示例与验证
 
+- [database_resources.lua](../examples/database_resources.lua)：MySQL 预编译/二进制、两种数据库的预算、排队、取消及事务作用域，测试对象会清理。
 - [mysql.lua](../examples/mysql.lua)：认证、查询、多结果集、事务与连接池，连接配置使用 `COSMOS_MYSQL_URL`。
 - [redis.lua](../examples/redis.lua)：二进制、pipeline、事务、发布订阅、ACL 与连接池，连接配置使用 `COSMOS_REDIS_URL`。
 

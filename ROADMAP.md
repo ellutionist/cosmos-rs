@@ -147,10 +147,12 @@ URL 本批扩展 Network，不新增插件或 feature。接口见 [URL 文档](c
 
 ### 6. 数据库、服务生命周期与日志
 
-- [ ] MySQL 参数绑定/预编译、活跃连接上限、等待队列、获取超时与事务作用域。
+- [x] MySQL 服务端预编译/类型参数绑定、MySQL/Redis 有界租借与队列/获取超时、连接/事务作用域（迁移核对通过）。
 - [ ] 显式信号订阅，HTTP 停止接收与排空，应用组织任务停止顺序。
 - [ ] 结构化日志、输出轮转、flush；不抢占宿主 Runtime 或全局日志配置。
 - [ ] 迁移、路由和请求校验优先作为 Lua 工具层按实际复用需求补充，不引入 ORM 或业务服务框架。
+
+数据库批次已对照原后端 SQLx 的绑定查询、连接获取和事务操作核对：MySQL 支持真实服务端 prepare/typed execute/CALL 多结果，BIGINT/预编译 DECIMAL 保留精度；MySQL/Redis 有界等待、超时、作用域、client 隔离、单调闲置时钟、取消及失效重连均覆盖。接口见 [MySQL](cosmos-database/mysql.md)、[Redis](cosmos-database/redis.md)，实机验收见 [database_resources.lua](examples/database_resources.lua)。不引入 ORM、业务重试、自动 schema 或 session 策略；Lua 取消不执行 finally，已发送 SQL 的服务端效果不能保证撤销。
 
 ## 每阶段验收
 

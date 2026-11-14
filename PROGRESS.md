@@ -1173,3 +1173,14 @@
 - 按连续授权在工作区/严格 Clippy 等收尾通过后单独提交，接着处理数据库资源与预编译，不 push。
 
 - 收尾通过：工作区 107 项常规测试、5 项编译失败文档检查、全 feature 严格 Clippy、实际 datetime.lua、格式/差异检查和非注释中文 0 扫描。按用户连续授权单独提交 builtin 日期日历；下一批数据库资源和服务器预编译。
+
+
+## 2026-11-14 数据库预编译与资源管理
+
+- 日期日历已提交为 27dfb81。本批保留 Lua 协议，MySQL 新增真实 COM_STMT_PREPARE/EXECUTE/CLOSE 与 NULL bitmap、typed bind、二进制行、日期/负 TIME/微秒、多结果集。Rust 只补数值 little-endian 与有界叶子解码，不引入数据库 C 库或 Lua FFI；BIGINT/预编译 DECIMAL 保持文本精度，整数绑定可用于 LIMIT，字符串不经 SQL 拼接。
+- MySQL/Redis 共用内部 Lua pool helper，使用 builtin semaphore/permit 约束 active+waiting，支持 max_connections/max_waiters/acquire_timeout/stats、连接和事务作用域；保留独立 client 池，闲置计时改用单调时钟。旧租借归还失效，MySQL 归还时关闭所有服务端 statement。
+- 加固 prepared 请求预算、1024 个字段/参数、128 个 open statement、100000 行/64 MiB 结果、元数据/名称上限。取消关闭当前挂起 I/O，Lua lease 由 permit GC 最终回收；手动保留的借用须主动关闭，不能宣称 kill 执行 Lua finally。
+- 踩坑：kill 是请求，必须 join 后 GC 才能验证不可达租借已释放；最初提前 GC 看到的占用来自尚未完成取消。复用 auth length-encoding 会依赖认证 capability，prepared 字符串改为独立 length-coded 值。Lua number 的整数按 BIGINT 编码保证 LIMIT 可用，FLOAT 不冒充整数；computed boolean 可能由 MySQL 报为 BIGINT，按 metadata 返回字符串。重复注入 MySQL 定义新增幂等保护，避免旧 client 的 metatable 失配。
+- 已在用户指定真实 MySQL/Redis 上运行 database_resources.lua，验证绑定/NUL/高精度/日期/微秒/LIMIT、队列超时/满载、提交/回滚、Redis MULTI/EXEC、取消/关闭唤醒及清理；原生协议服务端验证精确 COM 字节序列和二进制 NULL bitmap。进一步执行工作区/feature/原示例后按连续授权提交并继续生命周期。
+
+- 收尾通过：工作区 109 项常规测试和 5 项编译失败文档检查、严格 Clippy、MySQL-only/Redis-only feature，真实 MySQL 8.4.5 / Redis 的新资源示例与旧 mysql.lua/redis.lua 均通过并清理。补充按服务端能力协商 PS_MULTI_RESULTS，真实 CALL 的两组二进制结果和最终 OK 验证通过；准备响应兼容 10/12 字节格式。按连续授权单独提交，继续生命周期。
