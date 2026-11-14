@@ -5,7 +5,7 @@
 ## 0. TL;DR
 
 - 项目：LuaJIT + Rust 重写版网络框架，路径 `/Users/ellutionist/code/ellutionist/cosmos-rs`。
-- WebSocket、桥接分层重构和 VM 生命周期修复已提交为 `e004c8e`。
+- WebSocket、桥接分层重构和 VM 生命周期修复已提交为 `c030f5d`。
 - 已按用户要求将统一返回值桥接、分层修复和冗余清理纳入本次本地提交；最新验证与踩坑见 `PROGRESS.md`。
 - 异步边界采用 `PendingOp::poll_push`，只保留 `PushLua` 转换协议；不采用返回值闭包装箱方案（见 §5）。
 - HTTP/WebSocket 回调已改用 `LuaFunction::call<A, R>`；userdata 借用失败只返回 Err，最外层 trampoline 统一抛 Lua 错误。
@@ -36,7 +36,7 @@ cosmos-rs/
 - LuaJIT 2.1（Lua 5.1 C API），Tokio >= 1.49；宿主可注入单线程或多线程 Runtime 的 Handle，
   Machine 的 LocalSet 始终在宿主线程驱动 Lua 协程，Machine 与 Lua 协程均为 `!Send`。
 - 依赖：hyper 1 + hyper-util（client/server，h2 走 ALPN）、rustls+ring、fastwebsockets（upgrade feature）。
-- 重构前基线：`e004c8e feat: 新增 WebSocket 支持并重构 Lua 桥接分层`；最新提交号通过 `git log -1` 查询。
+- 重构前基线：`c030f5d feat: add WebSocket support and refactor Lua bridge layers`；最新提交号通过 `git log -1` 查询。
 
 ## 2. 硬性约定（详见 `AGENTS.md`）
 
@@ -55,9 +55,9 @@ cosmos-rs/
   时间函数不再放在 cosmos 根表，examples 与类型化回调测试已同步迁移。
 - `cosmos.sync` 已实现：有界 channel、通知、信号量和 mutex，见下文接口与回收语义。
 - 模块注册已按 userdata 声明路径自动组装父表；手写 Sync 与 TCP 聚合表已删除，sync 构造改为各类型的 `.new(...)`。
-- 上述 sync 与模块注册改动已提交为 `9a093b4`，未 push。网络文件已按模块层级整理为
+- 上述 sync 与模块注册改动已提交为 `b093478`，未 push。网络文件已按模块层级整理为
   `tcp/mod.rs`、`tcp/stream.rs`、`tcp/tls.rs` 及 `websocket/mod.rs`、`websocket/conn.rs`，
-  Rust 引用同步更新，Lua require 路径保持原样；目录整理已提交为 `6c0067a`。
+  Rust 引用同步更新，Lua require 路径保持原样；目录整理已提交为 `c4a907e`。
 
 - 本次命名整理提交：`Thread` → `LightThread`，`thread.rs` → `light_thread.rs`；当前统一类型为 `cosmos::LightThread`（实现模块 `light_thread` 为私有），Lua 类型表为 `cosmos.LightThread`。
 - Lua 状态指针（含宏生成代码）已从 `L` 改为 `lua_state`，未使用参数为 `_lua_state`。
@@ -67,7 +67,7 @@ cosmos-rs/
 - 本次提交范围：统一 `PushLua`、类型化 Lua 回调、枚举 `FromLua`、userdata fallible 借用、统一错误边界、冗余清理与回归记录。
 - 外部演示 crate 已移除，主程序构建不再依赖工作区外的源码目录。
 - Machine 管理 VM/LocalSet，Runtime 只注入 Handle；网络作为 Module 插件加载，CLI 已迁移。
-  外部演示删除改动一并提交为 `5a5ada0`。
+  外部演示删除改动一并提交为 `a9ce8a8`。
 - HTTP client 已改为实例独占连接池，构造时固定 TLS 配置，调用迁移为 new + 冒号 request。
 
 ## 4. 最近完成的工作

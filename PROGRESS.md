@@ -205,7 +205,7 @@
 
 ### 核心逻辑
 
-- 已先按用户要求提交命名整理：`738dfeb`（LightThread 与 lua_state），未 push。
+- 已先按用户要求提交命名整理：`7284734`（LightThread 与 lua_state），未 push。
 - 将操作公开 Lua 裸指针的 `PushLua::push_lua`、`PendingOp::poll_push`、`yield_with`、
   userdata 注册/压栈/trampoline/cleanup 标为 unsafe；derive 同步生成 unsafe 方法。
   调用方在原有运行时/桥接层履行安全契约，功能模块仍只构造普通值。
@@ -324,7 +324,7 @@
 
 ## 2026-11-13 按 TCP 模块层级整理网络文件
 
-- 已先提交同步原语与自动模块注册，提交号为 `9a093b4`，未 push。
+- 已先提交同步原语与自动模块注册，提交号为 `b093478`，未 push。
 - 将 `cosmos-network/src/tcp.rs` 移为 `tcp/stream.rs`，将原 `tls.rs` 移为 `tcp/tls.rs`，
   新建 `tcp/mod.rs` 声明 stream 与 tls，移除根层的 tls 模块声明。
 - 桥接、HTTP、WebSocket 的引用改为 crate::tcp::stream / crate::tcp::tls，TCP 子模块间使用 super 路径。
@@ -572,7 +572,7 @@
 
 ### 核心逻辑
 
-- 前一轮 LightThread 合并已按用户要求提交为 3bd7ea1，不 push；本轮可见性修改继续留在工作区，未自动提交。
+- 前一轮 LightThread 合并已按用户要求提交为 d9a6626，不 push；本轮可见性修改继续留在工作区，未自动提交。
 - cosmos 的 builtin/light_thread/stack 实现模块改为私有；libs 仅 cfg(test) 编译，正式加载入口保持 Machine::load。
   保留 Machine/Module、LightThread 句柄、userdata 桥接和最小 ffi 公开面。
 - VM 创建/关闭/恢复、registry 操作、userdata 初始化/清理/裸注册/push 收为 pub(crate)；
@@ -618,7 +618,7 @@
 
 ### 核心逻辑
 
-- 按用户要求先提交此前可见性及约束改动，提交为 af92e5f；本轮 FFI 改造未自动提交。
+- 按用户要求先提交此前可见性及约束改动，提交为 52a5773；本轮 FFI 改造未自动提交。
 - ffi 模块以及全部声明改为 crate 内可见，不再重导出 C API、状态类型、栈常量或 ABI。
   外部仅通过 userdata 的 Value/Output/Call、表读写器和类型转换协议组合功能。
 - FromLua<'lua> 接收 Value<'lua>，PushLua 接收 Output；TableReader 统一字符串键遍历、绝对索引、
@@ -659,7 +659,7 @@
 
 ### 核心逻辑
 
-- 前序可见性与 AGENTS.md 约束已按用户要求提交为 af92e5f；本轮 FFI 封装未自动 commit / push。
+- 前序可见性与 AGENTS.md 约束已按用户要求提交为 52a5773；本轮 FFI 封装未自动 commit / push。
 - FromLua<'lua> 改为读取不暴露状态/索引的 Value<'lua>，PushLua 改为写入 Output；
   同步字符串及表字段借用由生命周期约束，回调/执行结果要求高阶 FromLua，阻止临时协程借用逃逸。
 - Value/TableReader 封装类型选择、绝对索引、表遍历与失败恢复；Output/TableWriter 统一构造表字段，
@@ -874,3 +874,10 @@
 - 按用户明确要求，将 JSON 模块、受控表桥接能力、精确数字与资源限制、回归用例和文档一并提交，不 push。
 - 提交前核对全部改动与新增文件，差异检查通过；沿用已通过的工作区 60 项测试、5 项编译失败检查、严格 Clippy、CLI feature 组合及实际示例结果。本轮无行为修改，不重复执行完整回归。
 - ClickHouse 原生 TCP 仍在待做；后续优先根据真实 JSON 负载测量转换与编解码成本。
+
+## 2026-11-14 切换 master 并统一英文提交信息
+
+- 按用户要求将唯一的本地分支 main 改名为 master，通过交互式 root rebase 将 17 条中文提交信息改为英文，原有 16 条英文提交信息保持原文。仓库没有远程和标签，未执行 push。
+- 重写前将完整历史备份到 .git/english-history/before.bundle，旧新提交映射保存在同目录 mapping.json；逐一验证 33 条历史提交的代码树、作者信息与预期提交正文，全部一致，仅提交信息和相应历史标识更新。
+- 同步替换当前 HANDOFF / PROGRESS 中本仓库的旧提交引用；上游依赖仓库的提交号保持原样。按用户补充要求，在 AGENTS.md 明确提交标题与正文统一使用英文，其他交流、注释和文档仍使用中文。
+- 本轮只重写历史元数据、更新文档与工程约定，没有代码或行为修改，不重复运行代码测试；检查差异及提交信息后以英文提交本轮文档更新。后续在 master 上继续开发，ClickHouse 仍为待做。
