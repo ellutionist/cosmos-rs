@@ -1024,3 +1024,21 @@
 - 本阶段功能要求已覆盖，ROADMAP 与接口文档同步。仍未执行真实 NAS/SMB 联调，也不宣称 HTTP 流式、XML、图片等后续能力已完成。
 - 工作区 72 项普通测试、5 项编译失败文档检查与严格 Clippy 通过；全关 CLI 9 项测试及其 FS/datetime 实际示例通过，已恢复默认构建；默认 CLI 实际 FS、datetime、sleep、sync、WebSocket、HTTP 回归全部通过，格式与文档链接检查通过。
 - 按用户明确授权提交本批 builtin FS/time、路线图、工作节奏约定、文档和回归，提交信息使用英文，不 push；提交后停下，不自动开始下一 module。
+
+## 2026-11-14 HTTP 流式模块与逐模块需求核对
+
+- 按用户授权继续路线图第二阶段，并把每完成一个模块须逐项核对迁移/功能需求、完成验证后停下的约定补进 AGENTS/ROADMAP。本轮只交付 HTTP 流式模块，不开始密码与随机数，不提交或推送。
+- Network 增加 cosmos.network.http.body / file，自动复用父表及 require 入口。客户端 stream=true 在响应头就绪时返回 reader，服务端 stream_body=true 逐块消费请求；默认字符串接口继续兼容，输出同时接受字符串或一次性流。文件 offset/length、Lua 异步生产函数、网络输入统一组合，支持流式上传、下载落盘与双向转发。
+- Lua 源由 LocalSet 的生产任务读取，每次最多 64 KiB；容量 1 的 mpsc 向客户端 Send HTTP 驱动传字节帧，Lua/registry/文件视图不跨线程。先预约队列容量再读源，避免慢接收者触发持续预读；传输驱动丢弃时取消生产任务。输入保留到响应完成，支持输出回调延迟消费请求。
+- 核心只补受控 userdata::FileReader：从 builtin 文件值转换，隐藏原始描述符与内部状态，供上传和文件响应复用。与原文件共享生命周期与串行调度，Unix 按偏移读取；其他平台在原调度锁内保存并恢复游标。from_file 默认保留原句柄，file.response 默认接管关闭，跨派发取消继续沿用 FS 语义；本机未验证非 Unix 路径。
+- 文件响应提供 GET/HEAD、单 Range/206/416、Content-Length/Content-Range、条件请求优先级及 304/412；默认长度+纳秒 mtime 生成弱 ETag，可显式提供强 ETag。HEAD 和无体状态不调用生产函数；日期 If-Range 无法证明强验证，保守回退完整响应；多范围/无效语法回退完整响应。Last-Modified 不晚于响应产生时间。权限、MIME、下载文件名及缓存策略继续由应用决定。
+- body 支持逐块读取、受限收集、输入尾部字段、读取超时与显式关闭。客户端总截止时间在返回响应头后继续生效；大小超限、提前 EOF、空/超大回调块、活跃读取取消会关闭流并唤醒等待者。原请求失败/取消、未读响应释放或 VM 销毁连带取消上传。字符串保持原重定向规则，要求重放流式 body 的重定向返回明确错误，避免悄悄重复或空发请求。
+- examples/http_stream.lua 实际验证二进制未知/已知长度、请求直传与回调转发、文件游标/offset/length/所有权、单 Range/HEAD/缓存条件、80 MiB 文件上传下载、收集与总量限制、源错误/短体/文件变短、重定向、超时/取消/断开、背压与 HTTPS HTTP/2。Rust 集成测试在两种注入 Runtime 执行该例，另验证回调前后均在宿主线程、并发等待唤醒、原生 HTTP trailers/截断以及 VM 销毁后对端 EOF。
+- 迁移核对对照 Librarian storage.rs / updates.rs 的文件响应、archiver/images.rs / translation.rs 的逐块受限下载，所需基础能力已覆盖；核对表写入 ROADMAP。业务路由、播放票据、MIME 规则不进入通用库；代理和服务排空保持后续阶段，未进行真实 NAS/SMB 联调，也不宣称整个后端已可迁移。
+- 工作区 76 项普通测试、5 项编译失败文档检查与严格 Clippy 通过；最终 HTTP 4 项集成回归通过。全关/仅 network CLI 分别 9/10 项测试通过，实际运行全关 FS/datetime、仅 network 的 HTTP 流式示例后恢复默认构建。默认 CLI 的新流式、原 HTTP/WebSocket、FS/datetime 实际用例全部通过。格式、差异、链接与非注释中文扫描检查通过。接口、限制与示例入口同步到 Network/根 README、http.md、ROADMAP 和 HANDOFF；停止等待用户检查与提交指令。
+
+## 2026-11-14 提交 HTTP 流式模块
+
+- 按用户明确授权，提交 HTTP 流式传输、文件响应、受控文件桥接、需求核对、示例与回归；提交信息使用英文，不 push。
+- 提交前核对全部新增文件与差异，沿用上一轮已通过的工作区测试、严格 Clippy、feature 裁剪与真实示例验证，没有新增行为修改。
+- 用户同时授权继续路线图下一阶段：密码与随机数；完成后按约定核对需求并停下供用户检查，不自动提交新模块。

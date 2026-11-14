@@ -23,8 +23,6 @@ use std::sync::{Arc, OnceLock};
 use std::task::{Context, Poll};
 use std::time::Duration;
 
-use bytes::Bytes;
-use http_body_util::{BodyExt, Full, Limited};
 use hyper::header::{HeaderName, HeaderValue, ACCEPT_ENCODING};
 use hyper::{Method, Request, StatusCode, Uri};
 use hyper_util::client::legacy::Client;
@@ -33,13 +31,14 @@ use rustls::{ClientConfig, RootCertStore};
 use tokio::net::TcpStream;
 use tokio::time::Instant;
 
+use super::body::{Body, BodyCleanup, BodyValue, Outgoing};
 use super::{version_num, Conn, Headers, LuaBytes};
 use crate::deadline::{timeout_from_ms, with_deadline};
 use crate::error::classify_io;
 use crate::tcp::tls::{connect_tls_io, ClientCfg};
 
 type BoxErr = Box<dyn StdError + Send + Sync>;
-type HttpPool = Client<Connector, Full<Bytes>>;
+type HttpPool = Client<Connector, Outgoing>;
 
 fn default_alpn() -> Vec<Vec<u8>> {
     vec![b"h2".to_vec(), b"http/1.1".to_vec()]
@@ -119,23 +118,25 @@ struct ClientOptions {
 #[lua(default)]
 struct RequestOptions {
     headers: Headers,
-    body: LuaBytes,
+    body: BodyValue,
     timeout: Option<i64>,
     // 显式拒绝请求级 ctx，避免旧调用把 TLS 设置误当成已生效。
     ctx: Option<()>,
     redirects: i64,
     max_body: Option<i64>,
+    stream: bool,
 }
 
 impl Default for RequestOptions {
     fn default() -> Self {
         RequestOptions {
             headers: Headers::default(),
-            body: LuaBytes::default(),
+            body: BodyValue::default(),
             timeout: None,
             ctx: None,
             redirects: 5,
             max_body: None,
+            stream: false,
         }
     }
 }
@@ -146,7 +147,7 @@ struct ClientResponse {
     status: u16,
     version: i64,
     headers: Headers,
-    body: LuaBytes,
+    body: BodyValue,
 }
 
 /// 一个 client 对应一个连接池；拥有型句柄让并发请求不占用 userdata 借用。
@@ -191,7 +192,12 @@ impl HttpClient {
             .timeout
             .and_then(timeout_from_ms)
             .map(|d| Instant::now() + d);
-        match with_deadline(deadline, do_request(&self.pool, method, url, opts)).await {
+        match with_deadline(
+            deadline,
+            do_request(&self.pool, method, url, opts, deadline),
+        )
+        .await
+        {
             Ok(res) => res,
             Err(()) => Err("timeout".to_string()),
         }
@@ -203,6 +209,7 @@ async fn do_request(
     method: String,
     url: String,
     opts: RequestOptions,
+    deadline: Option<Instant>,
 ) -> Result<ClientResponse, String> {
     let mut method = Method::from_bytes(method.as_bytes())
         .map_err(|e| format!("invalid method '{method}': {e}"))?;
@@ -210,21 +217,24 @@ async fn do_request(
         .parse()
         .map_err(|e| format!("invalid url '{url}': {e}"))?;
     let mut headers = opts.headers;
-    let mut body = opts.body.0;
-    let max_redirects = opts.redirects.max(0);
+    let mut body = opts.body;
+    let max_body = opts.max_body.filter(|n| *n > 0).map(|n| n as u64);
     let mut redirects = 0i64;
-
     loop {
-        let request = build_request(&method, &uri, &headers, &body)?;
-        let resp = client
+        if !matches!(uri.scheme_str(), Some("http" | "https")) {
+            return Err("HTTP URL must use http or https".into());
+        }
+        let replay = body.repeat();
+        let mut guard = BodyCleanup(Some(body.clone()));
+        let request = build_request(&method, &uri, &headers, body)?;
+        let response = client
             .request(request)
             .await
             .map_err(|e| format!("http: {}", describe(&e)))?;
-
-        let status = resp.status();
-        let version = version_num(resp.version());
-        let (parts, incoming) = resp.into_parts();
-        let resp_headers = Headers(
+        let status = response.status();
+        let version = version_num(response.version());
+        let (parts, incoming) = response.into_parts();
+        let response_headers = Headers(
             parts
                 .headers
                 .iter()
@@ -236,54 +246,44 @@ async fn do_request(
                 })
                 .collect(),
         );
-        let resp_body = match opts.max_body.filter(|n| *n > 0) {
-            Some(limit) => Limited::new(incoming, limit as usize)
-                .collect()
-                .await
-                .map_err(|e| format!("http body: {}", describe(&*e)))?
-                .to_bytes(),
-            None => incoming
-                .collect()
-                .await
-                .map_err(|e| format!("http body: {}", describe(&e)))?
-                .to_bytes(),
-        };
-
-        let location = if is_redirect(status) {
-            resp_headers.get("location").map(str::to_string)
+        let incoming = Body::incoming(incoming, deadline, max_body, guard.0.take());
+        let location = if is_redirect(status) && redirects < opts.redirects.max(0) {
+            response_headers.get("location").map(str::to_owned)
         } else {
             None
         };
         let Some(location) = location else {
+            let body = if opts.stream {
+                BodyValue::Stream(incoming)
+            } else {
+                BodyValue::Bytes(LuaBytes(incoming.collect(None).await?))
+            };
             return Ok(ClientResponse {
                 status: status.as_u16(),
                 version,
-                headers: resp_headers,
-                body: LuaBytes(resp_body),
+                headers: response_headers,
+                body,
             });
         };
-        if redirects >= max_redirects {
-            return Ok(ClientResponse {
-                status: status.as_u16(),
-                version,
-                headers: resp_headers,
-                body: LuaBytes(resp_body),
-            });
+        if opts.stream {
+            incoming.stop();
+        } else {
+            incoming.collect(None).await?;
         }
-
         let next = resolve(&uri, &location)
             .ok_or_else(|| format!("invalid redirect location '{location}'"))?;
-        // 303 一律转 GET；301/302 对非 GET/HEAD 按浏览器惯例转 GET；307/308 保留原样
         let to_get = status == StatusCode::SEE_OTHER
             || ((status == StatusCode::MOVED_PERMANENTLY || status == StatusCode::FOUND)
                 && method != Method::GET
                 && method != Method::HEAD);
         if to_get {
             method = Method::GET;
-            body = Bytes::new();
+            body = BodyValue::default();
             headers.0.retain(|(k, _)| {
                 k != "content-length" && k != "content-type" && k != "transfer-encoding"
             });
+        } else {
+            body = replay?;
         }
         if origin(&next) != origin(&uri) {
             headers.0.retain(|(k, _)| {
@@ -294,32 +294,34 @@ async fn do_request(
         redirects += 1;
     }
 }
-
 fn build_request(
     method: &Method,
     uri: &Uri,
     headers: &Headers,
-    body: &Bytes,
-) -> Result<Request<Full<Bytes>>, String> {
-    let mut request = Request::builder()
-        .method(method.clone())
-        .uri(uri.clone())
-        .body(Full::new(body.clone()))
-        .map_err(|e| format!("build request: {e}"))?;
-    {
-        let map = request.headers_mut();
-        for (k, v) in &headers.0 {
-            let name = HeaderName::from_bytes(k.as_bytes())
-                .map_err(|_| format!("invalid header name '{k}'"))?;
-            let value = HeaderValue::from_bytes(v.as_bytes())
-                .map_err(|_| format!("invalid header value for '{k}'"))?;
-            map.append(name, value);
+    body: BodyValue,
+) -> Result<Request<Outgoing>, String> {
+    let length = body.length();
+    let mut builder = Request::builder().method(method.clone()).uri(uri.clone());
+    let map = builder.headers_mut().ok_or("invalid request")?;
+    for (k, v) in &headers.0 {
+        if k == "transfer-encoding" {
+            continue;
         }
-        if !map.contains_key(ACCEPT_ENCODING) {
-            map.insert(ACCEPT_ENCODING, HeaderValue::from_static("identity"));
+        if k == "content-length" && v.parse::<u64>().ok() != length {
+            return Err("content-length must match a body with known length".into());
         }
+        let name = HeaderName::from_bytes(k.as_bytes())
+            .map_err(|e| format!("invalid header name '{k}': {e}"))?;
+        let value = HeaderValue::from_bytes(v.as_bytes())
+            .map_err(|e| format!("invalid header value for '{k}': {e}"))?;
+        map.append(name, value);
     }
-    Ok(request)
+    if !map.contains_key(ACCEPT_ENCODING) {
+        map.insert(ACCEPT_ENCODING, HeaderValue::from_static("identity"));
+    }
+    builder
+        .body(body.into_wire()?)
+        .map_err(|e| format!("build request: {e}"))
 }
 
 fn is_redirect(status: StatusCode) -> bool {

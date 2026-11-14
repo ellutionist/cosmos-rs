@@ -12,7 +12,7 @@
 - HTTP/WebSocket 回调已改用 `LuaFunction::call<A, R>`；userdata 借用失败只返回 Err，最外层 trampoline 统一抛 Lua 错误。
 - 外部嵌入使用 `Machine::new(tokio_handle)`，插件实现 `Module` 并通过 add_module 注入；插件包括 `Network`、`Encoding`、`Encryption`、`Database`，CLI 默认启用四个对应 feature。
 - 通用生态顺序见 `ROADMAP.md`；FS 与 datetime 按用户要求属于 builtin，当前首批已完成迁移核对并按用户要求提交。目录统一为 `builtin/fs/mod.rs` 与 `builtin/time/mod.rs`，不保留同名入口 .rs 与子目录并存的布局；接口见 `cosmos/fs.md`、`cosmos/time.md`。
-- 用户新增交付节奏：每完成一个 module，验证并记录后停下供用户检查，再等待提交指令；不自动连做下一模块。本批 FS/time 完成后停止，不继续 HTTP 流式传输。纳秒时间戳用整数字符串保存；文件根目录检查使用组件级路径 API，见对应文档。
+- 用户新增交付节奏：每完成一个 module，逐项核对迁移/功能需求、验证并记录后停下供用户检查，再等待提交指令；不自动连做下一模块。FS/time 已提交；用户随后授权的 HTTP 流式模块已完成需求核对与验证，已获用户确认提交；下一阶段按新指令推进密码与随机数。纳秒时间戳用整数字符串保存；文件根目录检查使用组件级路径 API，见对应文档。
 - WebSocket 已改成独立读写：后台完整解析帧，接收超时/取消不丢半帧，写入开始后取消会关闭连接；最后一个句柄或 Machine 销毁时取消读任务。并发与取消回归见 `examples/websocket_concurrent.lua`。
 - 用户已撤销 CDP/browser 插件，浏览器控制逻辑留给应用层通过现有 WebSocket、JSON 和协程能力组合；不再增加通用库中的浏览器高层 API。
 - UDP 已作为 `cosmos.network.udp` 接入 Network，支持 IPv4 / IPv6、报文边界、二进制、域名、并发收发、超时/取消与关闭唤醒；不再属于待做。
@@ -77,6 +77,16 @@ cosmos-rs/
 - HTTP client 已改为实例独占连接池，构造时固定 TLS 配置，调用迁移为 new + 冒号 request。
 
 ## 4. 最近完成的工作
+
+### HTTP 流式传输（2026-11-14，已确认提交）
+
+- Network 增加 http.body 与 http.file；client 的 stream=true 返回 reader，server 的 stream_body=true 按需读取请求。保留默认字符串 body；输出接受字符串或一次性 body，文件源/回调/网络输入共用有界读取模型。
+- Lua 生产任务固定 spawn_local；容量 1 的 mpsc 只传 Send 字节帧给客户端 HTTP 驱动，不发送 Lua 引用。64 KiB 发送块、读取超时、取消与资源清理均在真实网络上验证。保留 per-client 池和凭证头重定向规则，307/308 等不可重放流体会明确报错。
+- 核心仅增加 userdata::FileReader 受控文件视图；共享 builtin 文件与串行调度，按偏移读取不改变应用游标，不暴露状态指针/FD。from_file 默认不接管关闭，file.response 默认接管；派发后取消沿用 FS 关闭语义。非 Unix 的读取保存并恢复游标，但本机未实际测试该平台。
+- 文件响应提供单 Range、HEAD、条件缓存、可选显式强 ETag；默认 mtime ETag 弱验证，日期 If-Range 保守返回完整响应。文件访问权限、MIME 和缓存策略属于应用。
+- 接口/边界见 cosmos-network/http.md，examples/http_stream.lua 覆盖 80 MiB 文件上传下载、流式转发、HTTP/2、背压、错误与取消；Rust 集成测试覆盖两种 Runtime、回调线程、尾部字段/截断与 VM 销毁。对照 storage/updates 文件响应与 archiver 受限下载已满足本阶段需要，详见 ROADMAP。
+- 用户已确认本模块并要求提交、继续下一阶段；密码与随机数随后单独交付检查。代理与服务排空仍属后续阶段，未联调真实 NAS/SMB。
+
 
 ### TOML / YAML（2026-11-14）
 

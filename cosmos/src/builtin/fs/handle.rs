@@ -137,6 +137,12 @@ impl<T: Send + 'static> Handle<T> {
         })
         .await
     }
+    pub(super) fn abort(&self) {
+        self.0.stop();
+        if let Ok(mut value) = self.0.value.try_lock() {
+            value.take();
+        }
+    }
     pub(super) async fn close(&self) -> Result<bool, String> {
         self.0.stop();
         let inner = self.0.clone();

@@ -309,6 +309,8 @@ s:close()
 
 ### HTTP 客户端：cosmos.network.http.client
 
+客户端与服务端支持流式收发、文件源、背压、单 Range 和条件缓存；用法见 [HTTP 文档](cosmos-network/http.md)，完整运行示例见 [http_stream.lua](examples/http_stream.lua)。
+
 hyper + hyper-util 连接池，外挂重定向与整体超时。**每个 client 独立持有连接池**，克隆句柄和并发请求共享该实例的池：
 
 ```lua
@@ -769,6 +771,7 @@ cargo test --workspace
 | `tcp_client.lua` + `tcp_server.lua` | TCP echo（双进程） |
 | `tls_client.lua` + `tls_server.lua` | TLS echo（双进程） |
 | `network_socket.lua` | 顺序协议 socket 与 STARTTLS |
+| [http_stream.lua](examples/http_stream.lua) | HTTP 流式上传/下载、文件范围、条件缓存与取消 |
 | `http.lua` | HTTP 客户端 + 服务端（单进程，含重定向、超时、h2） |
 | `websocket.lua` | WebSocket 客户端 + 服务端升级（单进程） |
 | [websocket_concurrent.lua](examples/websocket_concurrent.lua) | 并发收发、取消与关闭 |

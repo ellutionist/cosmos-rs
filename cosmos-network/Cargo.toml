@@ -8,6 +8,7 @@ bytes = "1"
 cosmos = { path = "../cosmos" }
 fastwebsockets = { version = "0.8", default-features = false, features = ["upgrade", "unstable-split"] }
 http-body-util = "0.1"
+httpdate = "1"
 hyper = { version = "1", features = ["client", "server", "http1", "http2"] }
 hyper-util = { version = "0.1", features = ["client-legacy", "server-auto", "http1", "http2", "tokio"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
@@ -18,4 +19,5 @@ tower-service = "0.3"
 webpki-roots = "0.26"
 
 [dev-dependencies]
+tempfile = "3"
 tokio = { version = "1.49", features = ["rt-multi-thread"] }

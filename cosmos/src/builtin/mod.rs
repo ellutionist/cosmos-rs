@@ -1,6 +1,6 @@
 //! cosmos 内建模块：统一安装文件系统、时间/日期、轻线程和协程同步接口。
 
-mod fs;
+pub(crate) mod fs;
 mod light_thread;
 mod sync;
 mod time;

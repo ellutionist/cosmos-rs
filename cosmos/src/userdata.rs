@@ -434,6 +434,34 @@ pub(crate) unsafe fn cleanup(lua_state: *mut lua_State) {
     }
 }
 
+/// builtin 文件句柄的只读桥接视图；供文件上传/响应等插件消费，不暴露原始描述符。
+/// 与原句柄共享生命周期与串行调度；跨取消的语义沿用 builtin FS。
+#[derive(Clone)]
+pub struct FileReader {
+    file: crate::builtin::fs::file::File,
+}
+impl FileReader {
+    /// 逻辑关闭原文件；进行中的系统调用完成后回收资源，不等待它完成。
+    pub fn close(&self) {
+        self.file.abort();
+    }
+    /// 返回普通文件的长度与可用修改时间。
+    pub async fn info(&self) -> Result<(u64, Option<std::time::SystemTime>), String> {
+        self.file.stream_info().await
+    }
+    /// 按偏移读取，最多 16 MiB，不改变应用可见的文件游标。
+    pub async fn read_at(&self, offset: u64, size: usize) -> Result<Vec<u8>, String> {
+        self.file.read_at(offset, size).await
+    }
+}
+impl<'lua> FromLua<'lua> for FileReader {
+    unsafe fn from_lua(value: Value<'lua>) -> Result<Self, String> {
+        Ok(Self {
+            file: value.read::<crate::builtin::fs::file::File>()?,
+        })
+    }
+}
+
 /// 方法参数：从 Lua 栈取值
 pub trait FromLua<'lua>: Sized {
     /// # Safety

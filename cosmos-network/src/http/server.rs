@@ -14,7 +14,7 @@
 //! handler 在注册表里锚定（LuaFunction），每个请求由运行时创建独立轻线程执行；
 //! 协程之间、以及握手/读写任务之间都在同一个 LocalSet 上交错推进。
 //! 连接由 hyper auto builder 处理（h1 keep-alive、h2 多路复用），
-//! 请求体在 v1 全量读入内存（max_body 封顶）。
+//! 默认全量读取请求体；stream_body 模式在头部就绪时调用 handler，按需逐块消费。
 //!
 //! WebSocket 不单独监听：handler 对选定的 path 返回
 //! `{ websocket = function(conn, req) ... end }`，本层把保留的请求 Parts
@@ -27,19 +27,22 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use bytes::Bytes;
-use http_body_util::{BodyExt, Full, Limited};
+use http_body_util::{BodyExt, Limited};
 use hyper::body::Incoming;
+use hyper::body::{Body as HyperBody, Frame, SizeHint};
 use hyper::header::{HeaderName, HeaderValue};
 use hyper::service::Service;
 use hyper::{Request as HyperRequest, Response, StatusCode};
 use hyper_util::rt::TokioIo;
 use hyper_util::server::conn::auto;
+use std::io;
 use tokio::net::TcpListener;
 use tokio::task::JoinHandle;
 use tokio_rustls::TlsAcceptor;
 
 use cosmos::userdata::{LuaFunction, Nil};
 
+use super::body::{integer, Body, BodyCleanup, BodyValue, Outgoing};
 use super::{Headers, LuaBytes};
 use crate::error::classify_io;
 use crate::tcp::tls::{ServerCfg, TlsIo};
@@ -69,6 +72,7 @@ struct ServerOptions {
     max_body: Option<i64>,
     tls: Option<ServerCfg>,
     ws_max_message: Option<i64>,
+    stream_body: bool,
 }
 
 /// 服务端共享状态：锚定的 handler；Rc 由 accept 循环与各连接共同持有
@@ -76,22 +80,24 @@ struct ServerInner {
     handler: LuaFunction,
     max_body: usize,
     ws_max_message: usize,
+    stream_body: bool,
 }
 
 /// 服务端请求（Lua userdata）
+#[derive(Clone)]
 pub(crate) struct HttpRequest {
     method: String,
     target: String,
     path: String,
     version: i64,
     headers: Headers,
-    body: Bytes,
+    body: BodyValue,
     remote: String,
 }
 
 #[cosmos::userdata(name = "network.http.request")]
 impl HttpRequest {
-    fn method(&self) -> String {
+    pub(super) fn method(&self) -> String {
         self.method.clone()
     }
     /// 原始 request-target（含 query）
@@ -112,12 +118,36 @@ impl HttpRequest {
         self.headers.clone()
     }
 
-    fn header(&self, name: String) -> Option<String> {
+    pub(super) fn header(&self, name: String) -> Option<String> {
         self.headers.get(&name).map(str::to_string)
     }
 
-    fn body(&self) -> LuaBytes {
-        LuaBytes(self.body.clone())
+    async fn body(self, limit: Option<f64>) -> Result<LuaBytes, String> {
+        match self.body {
+            BodyValue::Bytes(bytes) => {
+                if let Some(limit) = limit {
+                    if bytes.0.len() as u64 > integer(limit, 64.0 * 1024.0 * 1024.0, "body limit")?
+                    {
+                        return Err("HTTP body exceeds collection limit".into());
+                    }
+                }
+                Ok(bytes)
+            }
+            BodyValue::Stream(body) => {
+                let limit = integer(
+                    limit.unwrap_or(64.0 * 1024.0 * 1024.0),
+                    64.0 * 1024.0 * 1024.0,
+                    "body limit",
+                )?;
+                body.collect(Some(limit)).await.map(LuaBytes)
+            }
+        }
+    }
+    fn stream(&self) -> Body {
+        match &self.body {
+            BodyValue::Bytes(bytes) => Body::bytes(bytes.0.clone()),
+            BodyValue::Stream(body) => body.clone(),
+        }
     }
 
     fn remote_addr(&self) -> String {
@@ -126,7 +156,7 @@ impl HttpRequest {
 }
 
 impl HttpRequest {
-    fn from_parts(parts: &hyper::http::request::Parts, body: Bytes, peer: &str) -> Self {
+    fn from_parts(parts: &hyper::http::request::Parts, body: BodyValue, peer: &str) -> Self {
         HttpRequest {
             method: parts.method.as_str().to_string(),
             target: parts
@@ -163,7 +193,7 @@ impl HttpRequest {
 struct RespSpec {
     status: u16,
     headers: Headers,
-    body: LuaBytes,
+    body: BodyValue,
     websocket: Option<LuaFunction>,
 }
 
@@ -194,46 +224,121 @@ impl Default for RespSpec {
         RespSpec {
             status: 200,
             headers: Headers::default(),
-            body: LuaBytes::default(),
+            body: BodyValue::default(),
             websocket: None,
         }
     }
 }
 
-impl RespSpec {
-    fn into_response(self) -> Response<Full<Bytes>> {
-        let status = StatusCode::from_u16(self.status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
-        let mut builder = Response::builder().status(status);
-        for (k, v) in self.headers.0 {
-            // 帧长度交给 hyper 按 body 计算，避免用户填错导致 framing 不一致
-            if k == "content-length" || k == "transfer-encoding" {
-                continue;
-            }
-            let (Ok(name), Ok(value)) = (
-                HeaderName::from_bytes(k.as_bytes()),
-                HeaderValue::from_bytes(v.as_bytes()),
-            ) else {
-                return plain_response(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "invalid response header",
-                );
-            };
-            builder = builder.header(name, value);
+/// 服务端保留请求输入到响应完成，允许请求流直接转发或由输出回调延迟读取。
+struct ServerBody {
+    outgoing: Outgoing,
+    input: Option<Body>,
+}
+impl Drop for ServerBody {
+    fn drop(&mut self) {
+        if let Some(input) = &self.input {
+            input.stop();
         }
-        builder
-            .body(Full::new(self.body.0))
-            .unwrap_or_else(|_| plain_response(StatusCode::INTERNAL_SERVER_ERROR, "bad response"))
     }
 }
-
-fn plain_response(status: StatusCode, msg: &str) -> Response<Full<Bytes>> {
-    let mut resp = Response::new(Full::new(Bytes::from(msg.to_string())));
-    *resp.status_mut() = status;
-    resp.headers_mut().insert(
-        hyper::header::CONTENT_TYPE,
-        HeaderValue::from_static("text/plain; charset=utf-8"),
-    );
-    resp
+impl HyperBody for ServerBody {
+    type Data = Bytes;
+    type Error = io::Error;
+    fn poll_frame(
+        self: Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<Result<Frame<Bytes>, io::Error>>> {
+        Pin::new(&mut self.get_mut().outgoing).poll_frame(cx)
+    }
+    fn size_hint(&self) -> SizeHint {
+        self.outgoing.size_hint()
+    }
+    fn is_end_stream(&self) -> bool {
+        self.outgoing.is_end_stream()
+    }
+}
+struct RequestCleanup(Option<Body>);
+impl Drop for RequestCleanup {
+    fn drop(&mut self) {
+        if let Some(body) = &self.0 {
+            body.stop();
+        }
+    }
+}
+impl RespSpec {
+    fn into_response(
+        self,
+        head: bool,
+        input: Option<Body>,
+    ) -> Result<Response<ServerBody>, String> {
+        let mut input = RequestCleanup(input);
+        let mut source = BodyCleanup(Some(self.body.clone()));
+        let status = StatusCode::from_u16(self.status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+        let no_body = status.is_informational() || matches!(status.as_u16(), 204 | 205 | 304);
+        let known = self.body.length();
+        let mut builder = Response::builder().status(status);
+        for (k, v) in self.headers.0 {
+            if k == "transfer-encoding" {
+                continue;
+            }
+            if k == "content-length" {
+                if no_body {
+                    continue;
+                }
+                let supplied = v
+                    .parse::<u64>()
+                    .map_err(|_| "invalid response content-length")?;
+                if !head && Some(supplied) != known {
+                    if matches!(&self.body, BodyValue::Stream(_)) {
+                        return Err("content-length must match a body with known length".into());
+                    }
+                    continue;
+                }
+            }
+            let name =
+                HeaderName::from_bytes(k.as_bytes()).map_err(|_| "invalid response header name")?;
+            let value = HeaderValue::from_bytes(v.as_bytes())
+                .map_err(|_| "invalid response header value")?;
+            builder = builder.header(name, value);
+        }
+        let outgoing = if head || no_body {
+            self.body.cancel();
+            if head
+                && !no_body
+                && !builder
+                    .headers_ref()
+                    .is_some_and(|h| h.contains_key("content-length"))
+            {
+                if let Some(length) = known {
+                    builder = builder.header("content-length", length);
+                }
+            }
+            Outgoing::empty()
+        } else {
+            self.body.into_wire()?
+        };
+        let response = builder
+            .body(ServerBody {
+                outgoing,
+                input: input.0.take(),
+            })
+            .map_err(|e| format!("build response: {e}"))?;
+        source.0.take();
+        Ok(response)
+    }
+}
+fn plain_response(status: StatusCode, msg: &str) -> Response<ServerBody> {
+    Response::builder()
+        .status(status)
+        .header("content-type", "text/plain; charset=utf-8")
+        .body(ServerBody {
+            outgoing: BodyValue::Bytes(LuaBytes(Bytes::copy_from_slice(msg.as_bytes())))
+                .into_wire()
+                .expect("byte body"),
+            input: None,
+        })
+        .expect("static headers")
 }
 
 /// 每个连接一个 service 实例；请求处理完把结果收敛成 hyper Response
@@ -243,7 +348,7 @@ struct LuaService {
 }
 
 impl Service<HyperRequest<Incoming>> for LuaService {
-    type Response = Response<Full<Bytes>>;
+    type Response = Response<ServerBody>;
     type Error = Infallible;
     type Future = Pin<Box<dyn Future<Output = Result<Self::Response, Infallible>>>>;
 
@@ -258,26 +363,46 @@ async fn handle(
     req: HyperRequest<Incoming>,
     inner: Rc<ServerInner>,
     peer: Arc<str>,
-) -> Response<Full<Bytes>> {
-    let (parts, body) = req.into_parts();
-    let body = match Limited::new(body, inner.max_body).collect().await {
-        Ok(collected) => collected.to_bytes(),
-        Err(_) => {
-            return plain_response(StatusCode::PAYLOAD_TOO_LARGE, "payload too large");
-        }
+) -> Response<ServerBody> {
+    let (parts, incoming) = req.into_parts();
+    let (body, mut cleanup) = if inner.stream_body {
+        let body = Body::incoming(incoming, None, Some(inner.max_body as u64), None);
+        (BodyValue::Stream(body.clone()), RequestCleanup(Some(body)))
+    } else {
+        let body = match Limited::new(incoming, inner.max_body).collect().await {
+            Ok(collected) => collected.to_bytes(),
+            Err(_) => return plain_response(StatusCode::PAYLOAD_TOO_LARGE, "payload too large"),
+        };
+        (BodyValue::Bytes(LuaBytes(body)), RequestCleanup(None))
     };
-    // Bytes 克隆只是引用计数：websocket 分支要重建一份请求 userdata 时零拷贝
     let request = HttpRequest::from_parts(&parts, body.clone(), &peer);
-    match run_handler(&inner, request).await {
+    let result = match run_handler(&inner, request).await {
         Ok(mut spec) => match spec.websocket.take() {
             Some(handler) => {
-                let request = HttpRequest::from_parts(&parts, body, &peer);
-                upgrade_websocket(parts, handler, request, inner.ws_max_message)
+                let body = match body {
+                    BodyValue::Bytes(bytes) => Ok(bytes),
+                    BodyValue::Stream(body) => body
+                        .collect(Some(inner.max_body as u64))
+                        .await
+                        .map(LuaBytes),
+                };
+                match body {
+                    Ok(body) => {
+                        let request =
+                            HttpRequest::from_parts(&parts, BodyValue::Bytes(body), &peer);
+                        return upgrade_websocket(parts, handler, request, inner.ws_max_message);
+                    }
+                    Err(error) => Err(error),
+                }
             }
-            None => spec.into_response(),
+            None => spec.into_response(parts.method == hyper::Method::HEAD, cleanup.0.take()),
         },
-        Err(err) => {
-            eprintln!("http handler error: {err}");
+        Err(error) => Err(error),
+    };
+    match result {
+        Ok(response) => response,
+        Err(error) => {
+            eprintln!("http handler error: {error}");
             plain_response(StatusCode::INTERNAL_SERVER_ERROR, "internal server error")
         }
     }
@@ -290,7 +415,7 @@ fn upgrade_websocket(
     handler: LuaFunction,
     request: HttpRequest,
     ws_max_message: usize,
-) -> Response<Full<Bytes>> {
+) -> Response<ServerBody> {
     use fastwebsockets::upgrade;
 
     let mut req = HyperRequest::from_parts(parts, ());
@@ -316,7 +441,13 @@ fn upgrade_websocket(
         }
     });
     let (parts, _) = resp.into_parts();
-    Response::from_parts(parts, Full::new(Bytes::new()))
+    Response::from_parts(
+        parts,
+        ServerBody {
+            outgoing: Outgoing::empty(),
+            input: None,
+        },
+    )
 }
 
 /// 类型化回调负责协程生命周期与结果转换，本层只组装 HTTP 响应。
@@ -330,7 +461,7 @@ async fn run_handler(inner: &Rc<ServerInner>, request: HttpRequest) -> Result<Re
         HandlerReply::Body(body) => Ok(RespSpec {
             status: 200,
             headers: Headers::default(),
-            body,
+            body: BodyValue::Bytes(body),
             websocket: None,
         }),
         HandlerReply::Empty(_, ReplyError::Message(err)) => Err(err),
@@ -419,6 +550,7 @@ impl HttpServer {
         let local_port = listener.local_addr().map_err(|e| classify_io(&e))?.port();
         let inner = Rc::new(ServerInner {
             handler,
+            stream_body: opts.stream_body,
             max_body: opts
                 .max_body
                 .filter(|n| *n > 0)

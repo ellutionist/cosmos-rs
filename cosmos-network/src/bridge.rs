@@ -13,7 +13,9 @@ use cosmos::userdata::{
     Call, FromLua, LuaCallable, LuaClosure, Output, PushLua, StringPairs, Value,
 };
 
+use crate::http::body::Body;
 use crate::http::client::HttpClient;
+use crate::http::file::HttpFile;
 use crate::http::server::{HttpRequest, HttpServer, HttpServerHandle};
 use crate::http::{Headers, LuaBytes};
 use crate::socket::{Socket, SocketListener};
@@ -148,6 +150,8 @@ pub(crate) fn register(machine: &mut cosmos::Machine) {
     machine.register::<TlsConn>();
     machine.register::<TlsListener>();
 
+    machine.register::<Body>();
+    machine.register::<HttpFile>();
     machine.register::<HttpClient>();
     machine.register::<HttpServer>();
     machine.register::<HttpServerHandle>();

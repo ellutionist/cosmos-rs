@@ -3,7 +3,9 @@
 //! 这里只放两者共用的数据类型：客户端连接流（明文/TLS 统一枚举）、Headers、
 //! 二进制 body 包装 LuaBytes。Lua 转换与注册集中在 crate::bridge。
 
+pub(crate) mod body;
 pub(crate) mod client;
+pub(crate) mod file;
 pub(crate) mod server;
 
 use std::pin::Pin;
@@ -91,7 +93,7 @@ impl Headers {
 
 /// 二进制安全的 Lua 字符串 ↔ Bytes（body 可能是任意字节）。
 /// 持有 Bytes 是为了多次取值时零拷贝（clone 只是引用计数）
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub(crate) struct LuaBytes(pub(crate) bytes::Bytes);
 
 /// HTTP 版本 → Lua 侧数字（10 / 11 / 20 / 30）

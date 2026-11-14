@@ -1,6 +1,6 @@
 //! builtin 文件系统；路径和文件内容使用原始 Lua 字节串。
 mod dir;
-mod file;
+pub(crate) mod file;
 mod handle;
 mod metadata;
 mod path;

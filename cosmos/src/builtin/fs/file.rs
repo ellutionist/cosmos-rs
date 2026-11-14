@@ -25,7 +25,7 @@ pub(super) enum Mode {
     Options(Flags),
 }
 #[derive(Clone)]
-pub(super) struct File(Handle<State>);
+pub(crate) struct File(Handle<State>);
 struct State {
     file: StdFile,
     locked: bool,
@@ -76,6 +76,48 @@ impl File {
             file,
             locked: false,
         })))
+    }
+}
+impl File {
+    pub(crate) fn abort(&self) {
+        self.0.abort();
+    }
+    pub(crate) async fn stream_info(&self) -> Result<(u64, Option<std::time::SystemTime>), String> {
+        self.0
+            .run(|state| {
+                let metadata = state.file.metadata()?;
+                if !metadata.is_file() {
+                    return Err(io::Error::other("file source requires a regular file"));
+                }
+                Ok((metadata.len(), metadata.modified().ok()))
+            })
+            .await
+    }
+    pub(crate) async fn read_at(&self, offset: u64, size: usize) -> Result<Vec<u8>, String> {
+        if size > 16 * 1024 * 1024 {
+            return Err("file read size exceeds 16 MiB".into());
+        }
+        self.0
+            .run(move |state| {
+                let mut data = vec![0; size];
+                #[cfg(unix)]
+                let count = {
+                    use std::os::unix::fs::FileExt;
+                    state.file.read_at(&mut data, offset)?
+                };
+                #[cfg(not(unix))]
+                let count = {
+                    // 其他平台在同一文件调度锁内恢复游标，不让桥接读取改变应用的游标。
+                    let original = state.file.stream_position()?;
+                    state.file.seek(SeekFrom::Start(offset))?;
+                    let result = state.file.read(&mut data);
+                    state.file.seek(SeekFrom::Start(original))?;
+                    result?
+                };
+                data.truncate(count);
+                Ok(data)
+            })
+            .await
     }
 }
 #[crate::userdata(name = "fs.file")]
