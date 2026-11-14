@@ -881,3 +881,36 @@
 - 重写前将完整历史备份到 .git/english-history/before.bundle，旧新提交映射保存在同目录 mapping.json；逐一验证 33 条历史提交的代码树、作者信息与预期提交正文，全部一致，仅提交信息和相应历史标识更新。
 - 同步替换当前 HANDOFF / PROGRESS 中本仓库的旧提交引用；上游依赖仓库的提交号保持原样。按用户补充要求，在 AGENTS.md 明确提交标题与正文统一使用英文，其他交流、注释和文档仍使用中文。
 - 本轮只重写历史元数据、更新文档与工程约定，没有代码或行为修改，不重复运行代码测试；检查差异及提交信息后以英文提交本轮文档更新。后续在 master 上继续开发，ClickHouse 仍为待做。
+
+## 2026-11-14 扩展 README 为完整的用户文档
+
+### 核心逻辑
+
+- 按用户要求，将 83 行的精简 README 扩展为约 630 行的用户文档，从"使用为主"改为
+  面向用户的完整介绍：特性概览、异步运行模型、内建模块、各插件的能力说明与代码片段、
+  Rust 嵌入与插件编写、CLI 说明、目录结构与示例索引，链接现有子模块 README。
+- 每个代码片段都对照当前源码、examples 与真实调用逐一核验，修正了多处初稿与实现不符的接口：
+  Tls.connect / Tls.listen 是位置参数而非 options 表；TlsContext 客户端构造是 new()，
+  信任根用 add_ca_file，证书/私钥分用 use_cert_chain_file / use_private_key_file；
+  HTTP 服务端句柄没有 wait()，常驻用 srv:port() + cosmos.sync.notify.new():wait()；
+  notify 的方法是 notify_one / notify_all；mutex 守卫与信号量共用 permit，释放是 release()；
+  摘要返回原始字节需组合 hex；Ed25519 是 from_seed / from_key_material + key:sign，RSA 只有
+  公钥 OAEP 加密；MySQL query 无占位符绑定，字符串用 quote_sql_str，client 池与 set_keepalive
+  按 lua-resty-mysql 语义；feature 表按 workspace 实际定义（database = mysql + redis）。
+- 按用户反馈删除与旧 C++ 项目及 OpenResty 生态的所有关联表述（"对应 C++ 的…"、"对齐 OpenResty"、
+  "兼容 ngx.null / cjson.null"、"基于 lua-resty-mysql 移植"），用户文档只描述本项目自身的接口与语义。
+- 按用户反馈在标题后新增两级目录索引，锚点按 GitHub 规则生成（标题中的点号、全角冒号等标点在
+  anchor 中移除，空格转为连字符）。
+
+### 踩坑
+
+- Write/Edit 工具对工作区外路径的 README.md 持续报"文件未读取"，即使刚 Read 过也拒绝；
+  改用 Bash heredoc 写入后再用 Edit 逐段修正。重试前必须先重新 Read 让工具刷新状态。
+- 初稿依赖记忆中的接口形态，JSON / Redis 等模块在本轮之间由并行轮次演进过，
+  必须重新以源码和 examples 为准逐条验证，而不是沿用上一次调研结论。
+
+### 验证与下一步
+
+- 文档中所有 API 名称、参数顺序、返回值协议均已对照源码/examples 核实；无代码修改，
+  未运行测试，未提交。
+- 下一步由用户安排；UDP / unix socket 与 ClickHouse 仍在待做清单。
