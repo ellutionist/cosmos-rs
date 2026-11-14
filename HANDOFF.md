@@ -12,7 +12,7 @@
 - HTTP/WebSocket 回调已改用 `LuaFunction::call<A, R>`；userdata 借用失败只返回 Err，最外层 trampoline 统一抛 Lua 错误。
 - 外部嵌入使用 `Machine::new(tokio_handle)`，插件实现 `Module` 并通过 add_module 注入；插件包括 `Network`、`Encoding`、`Encryption`、`Database`，CLI 默认启用四个对应 feature。
 - 通用生态顺序见 `ROADMAP.md`；FS 与 datetime 按用户要求属于 builtin，当前首批已完成迁移核对并按用户要求提交。目录统一为 `builtin/fs/mod.rs` 与 `builtin/time/mod.rs`，不保留同名入口 .rs 与子目录并存的布局；接口见 `cosmos/fs.md`、`cosmos/time.md`。
-- 用户新增交付节奏：每完成一个 module，逐项核对迁移/功能需求、验证并记录后停下供用户检查，再等待提交指令；不自动连做下一模块。FS/time 已提交；用户随后授权的 HTTP 流式模块已完成需求核对与验证，已获用户确认提交；随后授权的密码与随机数模块已获用户确认提交；随后按指令推进 XML，完成后单独检查，不自动继续图片。纳秒时间戳用整数字符串保存；文件根目录检查使用组件级路径 API，见对应文档。
+- 用户新增交付节奏：每完成一个 module，逐项核对迁移/功能需求、验证并记录后停下供用户检查，再等待提交指令；不自动连做下一模块。FS/time 已提交；用户随后授权的 HTTP 流式模块已完成需求核对与验证，已获用户确认提交；随后授权的密码与随机数模块已获用户确认提交；随后授权的 XML 已获用户确认提交；本轮按新指令推进独立图片模块，完成后停下检查。纳秒时间戳用整数字符串保存；文件根目录检查使用组件级路径 API，见对应文档。
 - WebSocket 已改成独立读写：后台完整解析帧，接收超时/取消不丢半帧，写入开始后取消会关闭连接；最后一个句柄或 Machine 销毁时取消读任务。并发与取消回归见 `examples/websocket_concurrent.lua`。
 - 用户已撤销 CDP/browser 插件，浏览器控制逻辑留给应用层通过现有 WebSocket、JSON 和协程能力组合；不再增加通用库中的浏览器高层 API。
 - UDP 已作为 `cosmos.network.udp` 接入 Network，支持 IPv4 / IPv6、报文边界、二进制、域名、并发收发、超时/取消与关闭唤醒；不再属于待做。
@@ -78,9 +78,20 @@ cosmos-rs/
 
 ## 4. 最近完成的工作
 
+### XML（2026-11-14，已确认提交）
+
+- Encryption 已按用户指令提交为 1350906（未 push）。本批只做 cosmos.encoding.xml，沿用 Encoding/encoding feature，无新插件开关；XML 已获用户确认提交，图片随后单独交付检查。
+- 不可变 Document / Node 拥有原文及紧凑索引；UTF-8 XML 1.0 文档读取、构造、名称/URI/属性/子节点与后代访问、文本/CDATA/注释/PI、原始字节片段和范围。document:encode 保留原文；node:encode 补齐独立子树命名空间，编辑返回新文档且只改目标字节区域，旧节点不能定位新版本。
+- roxmltree 验证结构与命名空间，xmlparser 预检/记录词法边界。原生 roxmltree 会合并相邻文本/CDATA 且范围只指向第一段，不能直接用于精确编辑；本实现单独记录词法节点。继承 URI 内部 Arc 驻留共享，属性/命名空间输出另受预算约束。
+- xml.element(name, attrs?, children?) 使用有序数组，attrs 为 {name,value}，children 为字符串或节点；text/cdata/comment/pi 构造叶子；xml.document.new(root) 创建文档。注意 root 模块不能同时定义 document 函数和 document 子类型表，避免自动父表注册冲突。
+- 输入/输出 16 MiB、深度 64、节点/属性各 100000，拒绝 DTD（含空 DTD）与外部实体。补齐 XMLNS 空前缀解绑、xmlns 保留前缀、PI 保留目标/NCName/间隔约束；xmlns="" 语义统一为无命名空间。
+- LuaStr 锚定构造参数，受控 InputList 验证连续序列和累计预算，工作额度到位后才复制纯 Rust 数据；无裸 FFI、不发送 Lua。XML 全局 2 个原生作业、16 个已接纳作业，取消已运行任务后不提前归还额度。元数据查询同步，解析/构造/编辑/片段编码在工作线程；VM 销毁不保留 Lua。
+- 文档见 cosmos-encoding/xml.md，examples/xml.lua 覆盖 NFO 所需的读取、重复字段修改、精确原文保留、默认/前缀命名空间移动、CDATA 与 BOM 范围、资源限制及 FS 原子写回；对照 importer/nfo 和 translation_retry 的核对表已写入 ROADMAP。严格解析不自动修复旧文件中的裸 &，相关策略由应用决定。
+
+
 ### 密码与随机数（2026-11-14，已确认提交）
 
-- HTTP 流式上一批已按用户授权提交为 bfb1c5e，未 push。本批扩展现有 Encryption / encryption feature，新增 digest、hmac、password、random，本次已获用户确认提交，随后开始 XML，图片仍待后续指令。
+- HTTP 流式上一批已按用户授权提交为 bfb1c5e，未 push。本批扩展现有 Encryption / encryption feature，新增 digest、hmac、password、random，本次已获用户确认提交，提交号 1350906；随后实现的 XML 已确认提交，图片本轮按用户指令推进。
 - 旧 sha1/sha256/sha512 保持同步，保留 require 初始化兼容；新增摘要/HMAC 每次输入最多 64 MiB，改由工作线程计算；增量状态串行共享，finalize/verify 消费状态，close 幂等。HMAC 使用完整标签校验，原始字节返回，无 Encoding 依赖；现有 RSA/Ed25519 保留。
 - Argon2id v19 默认 m=19456,t=2,p=1，16 字节随机 salt，PHC 互操作验证；验证可接受 id/i/d、v16/v19 和 m/t/p 参数，内存最多 64 MiB、迭代 10、lane 4、输出 16–64 字节。PHC 512 字节、密码 4096 字节，先验证成本再分配；工作区和原生密码副本显式清零。
 - random.bytes 0–1 MiB；integer 在 Lua 安全整数闭区间内拒绝采样，OS 随机源失败返回错误，不做伪随机回退。

@@ -496,6 +496,10 @@ print(assert(yaml.encode(config)))
 
 每次解码一份文档，映射键必须是字符串；`yaml.array()` / `yaml.object()` 标记空容器。大整数保留为精确数字，`yes` / `off` 等保持字符串；重复键、不支持的标签、循环别名与超限输入返回 `nil, err`。完整用法见 [yaml.lua](examples/yaml.lua)，类型范围与限制见 [encoding 文档](cosmos-encoding/README.md)。
 
+### XML：cosmos.encoding.xml
+
+XML 提供独立文档/节点、命名空间和保留原文的编辑，见 [XML 文档](cosmos-encoding/xml.md) 与 [xml.lua](examples/xml.lua)。
+
 ## 加密插件
 
 `cosmos-encryption` 提供 `cosmos.encryption.*`，支持增量摘要、HMAC、Argon2 密码哈希、安全随机数及非对称算法。接口与资源边界见 [Encryption 文档](cosmos-encryption/README.md)，完整用法见 [crypto.lua](examples/crypto.lua)。摘要返回原始字节，需要文本时与编解码插件组合：
@@ -777,6 +781,7 @@ cargo test --workspace
 | [websocket_concurrent.lua](examples/websocket_concurrent.lua) | 并发收发、取消与关闭 |
 | `encoding.lua` / `json.lua` | 编解码与 JSON |
 | `encryption.lua` | 哈希与签名 |
+| [xml.lua](examples/xml.lua) | XML 文档、节点、命名空间与原文编辑 |
 | [crypto.lua](examples/crypto.lua) | 增量文件摘要、HMAC、Argon2 密码和安全随机数 |
 | `mysql.lua` / `redis.lua` | 数据库端到端（需本地服务） |
 

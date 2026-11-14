@@ -4,6 +4,7 @@
 mod json;
 mod toml;
 mod value;
+mod xml;
 mod yaml;
 
 use base64::engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD};
@@ -29,6 +30,7 @@ impl Module for Encoding {
         machine.register::<toml::Toml>();
         machine.register::<toml::Datetime>();
         machine.register::<yaml::Yaml>();
+        xml::register(machine);
         machine.load(
             "cosmos.encoding.formats",
             include_str!("../lua/formats.lua"),

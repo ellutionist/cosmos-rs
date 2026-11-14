@@ -301,6 +301,10 @@ fn codec_and_encryption_registration_follow_features() {
             assert(toml == encoding.toml and yaml == encoding.yaml)
             assert(toml.decode("enabled=true").enabled)
             assert(yaml.decode("value: null").value == cosmos.null)
+            local xml = require("cosmos.encoding.xml")
+            assert(xml == encoding.xml and xml.document == require("cosmos.encoding.xml.document"))
+            assert(xml.node == require("cosmos.encoding.xml.node"))
+            assert(xml.parse("<x>value</x>"):root():text() == "value")
             assert(toml.number == json.number and yaml.number == json.number)
         else
             assert(cosmos.encoding == nil)
@@ -308,6 +312,7 @@ fn codec_and_encryption_registration_follow_features() {
             assert(not pcall(require, "cosmos.encoding.json"))
             assert(not pcall(require, "cosmos.encoding.toml"))
             assert(not pcall(require, "cosmos.encoding.yaml"))
+            assert(not pcall(require, "cosmos.encoding.xml"))
         end
         if {encryption} then
             local encryption = require("cosmos.encryption")

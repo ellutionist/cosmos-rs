@@ -1,6 +1,6 @@
 # cosmos-encoding
 
-cosmos 的 Rust 原生编解码插件，提供 Hex、Base64、URI 二进制编解码与 JSON、TOML、YAML 文本转换。
+cosmos 的 Rust 原生编解码插件，提供 Hex、Base64、URI 二进制编解码与 JSON、TOML、YAML 文本转换，以及 XML 文档与节点操作。
 
 CLI 默认启用 `encoding` feature。Rust 宿主通过 `machine.add_module(cosmos_encoding::Encoding)?` 安装；插件需要 Rust 1.89+。
 
@@ -13,6 +13,7 @@ CLI 默认启用 `encoding` feature。Rust 宿主通过 `machine.add_module(cosm
 | `cosmos.encoding.json` | `encode(value)`、`decode(text[, options])`，基于 sonic-rs |
 | `cosmos.encoding.toml` | `encode(table)`、`decode(text)`，基于 Rust toml |
 | `cosmos.encoding.yaml` | `encode(value)`、`decode(text)`，基于 serde-saphyr |
+| `cosmos.encoding.xml` | `parse(text)`、节点构造与文档编辑，见 [XML 文档](xml.md) |
 
 每个子模块的 `require` 入口与 `cosmos.encoding` 的对应字段是同一张表。Hex、Base64、URI 解码成功返回原始字节字符串，非法编码返回 `nil, err`。
 
@@ -57,3 +58,9 @@ TOML 整数限有符号 64 位，安全整数返回 Lua number，大整数复用
 三种格式的文本、字符串值和映射键都要求有效 UTF-8；编解码最多 64 层容器、100 万个值节点、64 MiB 输入/输出，转换字符串与键共用字节预算。YAML 另限制 10000 个锚点/别名及 100 万次别名事件重放，展开后仍受节点和深度限制。编解码同步执行，输出不保留原文注释与排版。
 
 用法见[项目 README](../README.md#yamlcosmosencodingyaml)，完整示例见 [yaml.lua](../examples/yaml.lua)。
+
+## XML
+
+XML 保留文档原文、节点顺序、属性、命名空间、混合文本、CDATA、注释和处理指令。支持节点构造及不可变的精确替换/插入，修改指定内容时保留其余原文；不经 JSON 转换。
+
+解析和编辑在 Rust 工作线程执行，限制大小、深度、节点数与并发，不加载 DTD 或外部实体。接口及资源边界见 [XML 文档](xml.md)，完整用法见 [xml.lua](../examples/xml.lua)。
