@@ -418,13 +418,16 @@ dependencies = [
 name = "cosmos-network"
 version = "0.1.0"
 dependencies = [
+ "base64 0.22.1",
  "bytes",
  "cosmos",
  "fastwebsockets",
  "http-body-util",
+ "httparse",
  "httpdate",
  "hyper",
  "hyper-util",
+ "percent-encoding",
  "rustls",
  "rustls-pemfile",
  "tempfile",

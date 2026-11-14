@@ -9,6 +9,7 @@ mod bridge;
 mod deadline;
 mod error;
 mod http;
+mod proxy;
 mod socket;
 mod tcp;
 mod udp;

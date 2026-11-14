@@ -12,7 +12,8 @@
 - HTTP/WebSocket 回调已改用 `LuaFunction::call<A, R>`；userdata 借用失败只返回 Err，最外层 trampoline 统一抛 Lua 错误。
 - 外部嵌入使用 `Machine::new(tokio_handle)`，插件实现 `Module` 并通过 add_module 注入；插件包括 `Network`、`Encoding`、`Encryption`、`Database`、`Image`、`Text`，CLI 默认仅启用 network；encoding/encryption/database/image/text 默认关闭，full 开启全部插件。
 - 通用生态顺序见 `ROADMAP.md`；FS 与 datetime 按用户要求属于 builtin，当前首批已完成迁移核对并按用户要求提交。目录统一为 `builtin/fs/mod.rs` 与 `builtin/time/mod.rs`，不保留同名入口 .rs 与子目录并存的布局；接口见 `cosmos/fs.md`、`cosmos/time.md`。
-- 用户新增交付节奏：每完成一个 module，逐项核对迁移/功能需求、验证并记录后停下供用户检查，再等待提交指令；不自动连做下一模块。FS/time 已提交；用户随后授权的 HTTP 流式模块已完成需求核对与验证，已获用户确认提交；随后授权的密码与随机数模块已获用户确认提交；随后授权的 XML 已获用户确认提交；独立图片模块及 CLI 默认/ full 调整已获用户确认提交；文本模块已提交为 e2fa04b；用户随后授权的 URL 模块已完成迁移核对和验证，本轮获用户确认提交并授权开始 HTTP/SOCKS 代理。接口见 `cosmos-text/README.md`、`cosmos-network/url.md`；不自动继续代理。纳秒时间戳用整数字符串保存；文件根目录检查使用组件级路径 API，见对应文档。
+- 本轮最新授权：用户要求一次完成 ROADMAP 剩余项，每完成一个 module 核对需求、验证、更新进度并单独 commit；覆盖此前逐模块等待检查的节奏，不 push。模块顺序为代理、日期日历、数据库资源、生命周期、日志，业务工具层按实际复用需求组织。
+- 先前交付节奏：每完成一个 module，逐项核对迁移/功能需求、验证并记录后停下供用户检查，再等待提交指令；不自动连做下一模块。FS/time 已提交；用户随后授权的 HTTP 流式模块已完成需求核对与验证，已获用户确认提交；随后授权的密码与随机数模块已获用户确认提交；随后授权的 XML 已获用户确认提交；独立图片模块及 CLI 默认/ full 调整已获用户确认提交；文本模块已提交为 e2fa04b；用户随后授权的 URL 模块已完成迁移核对和验证，本轮获用户确认提交并授权开始 HTTP/SOCKS 代理。接口见 `cosmos-text/README.md`、`cosmos-network/url.md`；不自动继续代理。纳秒时间戳用整数字符串保存；文件根目录检查使用组件级路径 API，见对应文档。
 - WebSocket 已改成独立读写：后台完整解析帧，接收超时/取消不丢半帧，写入开始后取消会关闭连接；最后一个句柄或 Machine 销毁时取消读任务。并发与取消回归见 `examples/websocket_concurrent.lua`。
 - 用户已撤销 CDP/browser 插件，浏览器控制逻辑留给应用层通过现有 WebSocket、JSON 和协程能力组合；不再增加通用库中的浏览器高层 API。
 - UDP 已作为 `cosmos.network.udp` 接入 Network，支持 IPv4 / IPv6、报文边界、二进制、域名、并发收发、超时/取消与关闭唤醒；不再属于待做。
@@ -79,6 +80,13 @@ cosmos-rs/
 - HTTP client 已改为实例独占连接池，构造时固定 TLS 配置，调用迁移为 new + 冒号 request。
 
 ## 4. 最近完成的工作
+
+### 代理（2026-11-14，按连续授权提交）
+
+- URL 已提交为 4adb589。本批 Network 新增 Proxy，四种协议、HTTP/SOCKS 认证、HTTP 逐跳异步路由与独立路由池、HTTPS 嵌套 TLS、SOCKS DNS 和 WebSocket 隧道均实现，策略仍在 Lua 应用；不自动读取环境代理。
+- Connector 仅持有原生配置，LocalSet 保存回调；最后 client 释放取消未完成建连，默认 connect_timeout=10 秒，跨源头剥离及 body 超时/背压沿用原语义。代理/来源 TLS 独立，HTTP/2 在来源层协商。旧 HTTP Conn/ALPN 查询已删除。
+- 迁移核对、工作区 107 项测试和 5 项编译失败文档检查、严格 Clippy、两种 Runtime、真实 HTTP/HTTPS/SOCKS/WS、超时/销毁、头预算/预读、CLI full 10 项/无插件 9 项通过；实际 proxy/http/websocket 示例通过，默认构建已恢复。接口见 cosmos-network/proxy.md。
+- 按最新用户批量授权提交后继续 builtin 日期日历，不等待单模块确认，不 push。
 
 ### URL（2026-11-14，已确认提交）
 

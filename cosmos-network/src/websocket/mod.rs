@@ -27,15 +27,13 @@ use http_body_util::Empty;
 use hyper::header::{HeaderName, HeaderValue, CONNECTION, HOST, UPGRADE};
 use hyper::{Method, Request, Uri};
 use hyper_util::rt::TokioExecutor;
-use tokio::net::TcpStream;
 use tokio::time::Instant;
 
 use self::conn::WsConn;
 use crate::deadline::{timeout_from_ms, with_deadline};
-use crate::error::classify_io;
 use crate::http::client::default_tls_config;
 use crate::http::Headers;
-use crate::tcp::tls::{connect_tls_io, with_alpn_client, ClientCfg};
+use crate::tcp::tls::{with_alpn_client, ClientCfg};
 
 const DEFAULT_MAX_MESSAGE: usize = 64 * 1024 * 1024;
 
@@ -51,6 +49,7 @@ struct WsOptions {
     timeout: Option<i64>,
     ctx: Option<ClientCfg>,
     max_message: Option<i64>,
+    proxy: Option<crate::proxy::Proxy>,
 }
 
 /// 客户端入口：静态方法
@@ -114,26 +113,18 @@ impl Ws {
             .timeout
             .and_then(timeout_from_ms)
             .map(|d| Instant::now() + d);
-        let io = if secure {
-            let cfg = match opts.ctx {
-                Some(ClientCfg(c)) => c,
-                None => default_tls_config(),
-            };
-            let cfg = with_alpn_client(cfg, &[b"http/1.1"]);
-            let tls = with_deadline(
-                connect_deadline,
-                connect_tls_io(host, port, None, Some(ClientCfg(cfg))),
-            )
-            .await
-            .map_err(|_| "timeout".to_string())??;
-            crate::http::Conn::Tls(tls)
+        let config = if secure {
+            let cfg = opts.ctx.map_or_else(default_tls_config, |ctx| ctx.0);
+            Some(with_alpn_client(cfg, &[b"http/1.1"]))
         } else {
-            let stream = with_deadline(connect_deadline, TcpStream::connect((host, port)))
-                .await
-                .map_err(|_| "timeout".to_string())?
-                .map_err(|e| classify_io(&e))?;
-            crate::http::Conn::Plain(stream)
+            None
         };
+        let io = with_deadline(
+            connect_deadline,
+            crate::proxy::connect(host, port, config, opts.proxy.as_ref(), true),
+        )
+        .await
+        .map_err(|_| "timeout".to_owned())??;
 
         let (ws, _resp) = with_deadline(
             connect_deadline,

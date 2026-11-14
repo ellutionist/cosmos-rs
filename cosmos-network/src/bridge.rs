@@ -135,6 +135,7 @@ impl<'lua> FromLua<'lua> for ServerCfg {
 
 /// 注册全部网络 userdata 类型。
 pub(crate) fn register(machine: &mut cosmos::Machine) {
+    machine.register::<crate::proxy::Proxy>();
     machine.register::<Udp>();
     machine.register::<Socket>();
     machine.register::<SocketListener>();

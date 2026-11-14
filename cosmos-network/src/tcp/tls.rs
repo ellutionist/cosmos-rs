@@ -80,15 +80,6 @@ impl TlsIo {
         }
         .and_then(|certs| certs.first().cloned())
     }
-
-    /// 握手后 ALPN 是否协商为 h2（HTTP 客户端的 h2 连接池判断用）
-    pub(crate) fn negotiated_h2(&self) -> bool {
-        let alpn = match self {
-            TlsIo::Client(s) => s.get_ref().1.alpn_protocol(),
-            TlsIo::Server(s) => s.get_ref().1.alpn_protocol(),
-        };
-        alpn == Some(b"h2")
-    }
 }
 
 impl AsyncWrite for TlsIo {

@@ -5,6 +5,9 @@ edition = "2021"
 
 [dependencies]
 bytes = "1"
+base64 = "0.22"
+percent-encoding = "2.3"
+httparse = "1"
 url = "2.5"
 cosmos = { path = "../cosmos" }
 fastwebsockets = { version = "0.8", default-features = false, features = ["upgrade", "unstable-split"] }

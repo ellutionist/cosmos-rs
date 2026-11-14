@@ -1146,3 +1146,20 @@
 - 按用户明确授权提交 URL、HTTP 标准合并、示例/测试和文档，提交信息使用英文，不 push。
 - 提交前核对差异和新增文件，沿用上一轮已通过的工作区 103 项测试、5 项编译失败检查、严格 Clippy、两种 Runtime、CLI feature 组合及实际 URL/HTTP 示例；本轮提交前仅更新交付记录。
 - 用户授权继续下一个 HTTP/SOCKS 代理模块；完成后核对迁移需求并停下供检查，不连续推进日期日历。
+
+
+## 2026-11-14 连续完成路线图的授权
+
+- 用户进一步明确要求一次完成 ROADMAP 剩余工作，并在每个 module 完成后单独提交；本轮覆盖此前逐模块等待检查的节奏，不再反复请求确认，不 push。
+- URL 已提交为 4adb589，当前继续 HTTP(S)/SOCKS5(SOCKS5H) 代理，然后按日期日历、数据库资源、服务生命周期与日志推进。每批仍执行迁移核对、实际示例和相关回归，独立更新进度和英文提交。
+
+
+## 2026-11-14 HTTP/SOCKS 代理
+
+- 新增 Network 内的不可变 Proxy 配置，支持 http/https/socks5/socks5h、认证与独立代理 TLS；HTTP client 固定代理或 LocalSet 异步逐跳回调，策略保留应用。每个 client 的直连与代理池隔离，最多缓存 32 个 Proxy 路由；connect_timeout 默认 10 秒，最后句柄销毁通知原生 connector 停止建连。
+- 原生传输支持嵌套 TLS、HTTP 正向/CONNECT、SOCKS DNS/认证与 IPv4/IPv6，复用到 WebSocket；不修改核心 PlainIo/TlsIo 表示，删除不再使用的 HTTP Conn 和 negotiated_h2。明文 TCP 内联，仅 TLS/真实预读时装箱；无 Lua FFI，不将路由回调送到其他线程。
+- CONNECT 有界解析保留预读内容，SOCKS 握手字段及认证版本严格校验；错误不泄露凭证、不降级直连/认证。代理 URL 4096 字节、凭证合计 1024 字节、CONNECT 头总计 16 KiB。代理和来源 SNI/证书及 ALPN 分离，来源 HTTP/2、HTTPS 代理上的双重 TLS 已实际验证。
+- 踩坑：代理服务端不能自动跟随来源重定向，否则客户端看不到逐跳路由；测试 forward fixture 使用 redirects=0 并保留 Location。HTTP Server.target() 是 path/query 视图，绝对 request-target 由原生测试检查；Lua 示例按 Host 重建。cargo test 的工作目录在 crate 下，证书路径使用编译期绝对路径。认证方法只协商已配置的单一方法，避免 SOCKS 降级。
+- 核对 archiver/network/settings/images/translation 的四种代理与应用直连策略，回调满足逐跳决策，未内置私网/业务规则。新代理/HTTP/WebSocket、两种 Runtime、TLS 嵌套、DNS、流式、池隔离、损坏协议、超时/VM 销毁和预读/上限测试通过；最终工作区/Clippy/实际示例与 feature 验证收尾后按授权单独提交，继续日期日历。
+
+- 收尾验证：工作区 107 项测试、5 项编译失败文档检查、严格 Clippy，CLI full 10 项/无插件 9 项通过；实际 proxy.lua、http.lua、websocket.lua 通过。feature 构建与 CLI 示例已改为串行执行，避免测试期间覆盖同名二进制；默认仅 network 构建恢复。非注释中文扫描 0 处，差异与格式检查通过。按连续授权提交本模块并继续日期日历，不 push。

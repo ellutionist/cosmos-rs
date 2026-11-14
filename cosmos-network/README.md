@@ -10,6 +10,7 @@ cosmos-rs 的网络插件，为 Lua 提供 TCP、UDP、TLS、HTTP 和 WebSocket�
 - **顺序协议 socket**：统一收发、TCP / Unix domain socket、同一连接内升级 TLS；收发失败或取消时关闭连接。
 - **HTTP**：HTTP / HTTPS 客户端与服务端，支持 HTTP/1.1、HTTP/2；客户端提供实例独立的连接池、重定向与请求超时；双向流式 body、文件响应、单 Range 与条件缓存见 [HTTP 用法](http.md)。
 - **URL**：标准解析与相对地址合并、不可变组件修改、有序重复查询参数；HTTP 重定向复用解析规则，见 [URL 用法](url.md)。
+- **代理**：HTTP(S) 正向代理/CONNECT、SOCKS5/SOCKS5H、认证与逐跳路由，HTTP/WebSocket 共用，见 [代理用法](proxy.md)。
 - **WebSocket**：支持 ws / wss，文本与二进制消息、ping / pong、同一连接并发收发；服务端通过 HTTP handler 升级连接。
 
 ## 启用
@@ -33,6 +34,7 @@ machine.add_module(cosmos_network::Network)?;
 
 | 模块 | 示例 |
 | --- | --- |
+| `cosmos.network.proxy` | [HTTP 代理、路由、流式与池隔离](../examples/proxy.lua) |
 | `cosmos.network.http.url` | [URL 解析、修改、查询与真实 HTTP 重定向](../examples/url.lua) |
 | `cosmos.network.socket` | [明文握手、TLS 升级、Unix、超时与取消](../examples/network_socket.lua) |
 | `cosmos.network.tcp.stream` | [TCP 服务端](../examples/tcp_server.lua)、[客户端](../examples/tcp_client.lua) |
