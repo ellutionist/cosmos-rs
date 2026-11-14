@@ -13,6 +13,8 @@ use cosmos_database::Database;
 use cosmos_encoding::Encoding;
 #[cfg(feature = "encryption")]
 use cosmos_encryption::Encryption;
+#[cfg(feature = "image")]
+use cosmos_image::Image;
 #[cfg(feature = "network")]
 use cosmos_network::Network;
 
@@ -91,6 +93,8 @@ fn run(
     machine.prepend_cpath(&cpath.join(";"))?;
     #[cfg(feature = "encoding")]
     machine.add_module(Encoding)?;
+    #[cfg(feature = "image")]
+    machine.add_module(Image)?;
     #[cfg(feature = "encryption")]
     machine.add_module(Encryption)?;
     #[cfg(feature = "network")]

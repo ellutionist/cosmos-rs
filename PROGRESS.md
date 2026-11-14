@@ -1081,3 +1081,29 @@
 - 按用户明确授权，提交 XML 文档/节点、原文编辑、命名空间与资源预算、文档和回归；提交信息使用英文，不 push。
 - 提交前核对差异，沿用已通过的工作区 86 项测试、严格 Clippy、两种 Runtime、CLI feature 与实际示例验证，没有新增行为修改。
 - 用户同时授权继续下一个模块；本次实现独立 cosmos-image，完成后核对迁移需求并停下供检查，不自动提交新模块或继续文本模块。
+
+## 2026-11-14 图片模块与迁移需求核对
+
+- 按用户授权继续独立图片模块，新增 cosmos-image / Image 插件与 cosmos.image，CLI 默认启用独立 image feature，可单独裁剪。工作区、CLI 注入/注册测试、AGENTS 模块路径及文档同步；本批不提交，不继续文本模块。
+- 使用 Rust image 0.25.10，仅启用 PNG/JPEG/WebP，不增加 C 图像库、OpenCV 或业务识别依赖。不可变 Arc<RgbaImage> 句柄统一 RGBA8，提供内容识别解码、填充创建、原始像素创建、编码、严格裁剪、五种滤波精确缩放、等比缩略图、旋转翻转、单点与像素平面读取、批量矩形像素替换。原图保持不变，适合并发处理。
+- PNG/WebP 无损编码，WebP 仅 lossless；JPEG quality 1–100，默认 90，可显式 95 对齐归档输出。JPEG 默认丢弃 alpha，兼容原后端 to_rgb8，可指定不透明背景合成。解码可选 auto_orient（默认关闭），16 位输入转换为 8 位；不保留原始编码/ICC/EXIF 或动画帧。thumbnail 默认不放大，第三参数 true 可组合原后端允许放大的原生行为。
+- 单边 16000、33554432 像素、每幅 RGBA 缓冲 128 MiB；编码输入/输出 64 MiB，原始像素输入/输出 128 MiB。先检查头部尺寸/像素/解码字节数，并配置原生解码器分配额度；编码通过受限 writer 写出。重采样的浮点中间图限制 256 MiB，源/目标/中间像素缓冲合计估算 512 MiB，提前拒绝长宽比交叉导致的大中间分配。编解码器内部预算属于其支持范围，不承诺进程 RSS 硬上限。
+- 创建、转换、编码和像素平面操作在 Tokio 阻塞工作线程执行；本地 LuaBytes 保活参数，获取作业额度后才准备原生拥有型数据。图像跨 Machine/Runtime 共享 2 个原生作业、16 个已接纳作业的预算；取消已运行任务不提前归还额度，完成后回收数据，VM 销毁不保留 Lua。尺寸/info 与单点查询同步，功能模块零裸 FFI。
+- 按分层约束补齐 cosmos 的 u8/u32 PushLua 基元，复用现有 number 转换以精确表示全部取值并避开 32 位 lua_Integer 的符号范围；图片颜色和尺寸 DTO 保持原生整数类型，仍由 derive 组合输出。外部插件宏回归同时验证结构体/元组的零值、u8/u32 最大值，没有公开底层状态或更改 FromLua 生命周期。
+- examples/image.lua 覆盖二进制像素、灰度/RGB/RGBA、透明度与 PNG/WebP 无损往返、JPEG 质量/背景、所有滤波、裁剪/缩略图/方向、不可变并发、数值/区域/内存错误及 FS 原子发布。image_http.lua 在真实本地 HTTP 上组合流式下载、图像裁剪、回调上传、服务端缩略与 JPEG 响应，Image 正常依赖不包含 Network 或 FS 适配层。
+- 原生测试构造超大 PNG 头部并验证分配前拒绝、16 位 PNG 标准化与 JPEG EXIF 方向，检查编码输出 writer 的边界；另验证取消后仍占预算、满队列拒绝。两种 Runtime 的独立插件示例、取消后 Lua 对象回收、处理期间定时器推进、VM 销毁和后续 Machine 恢复通过。
+- 对照 Librarian archiver/images.rs、storage.rs 与 watermark_detector.rs，已满足本阶段所需的安全解码、JPEG 输出、比例裁剪、缩略、固定宽度采样与灰度像素材料。海报比例、站点选图、RLE 模板、Sobel/评分和水印判定留给应用。核对表和明确边界已写入 ROADMAP 与 Image README。
+- 工作区 94 项普通测试、5 项编译失败文档检查、严格 Clippy 通过；全关/仅 image CLI 各 9 项测试通过，仅 image CLI 实际运行 image/FS 示例通过，正常依赖树不包含其他插件及额外并行/C 图像库依赖，全关不含 Image/codec 依赖。已恢复默认构建并实际运行图像 HTTP 流水线；默认 image、XML、HTTP 示例回归通过。格式、差异、链接及非注释中文扫描通过，README/HANDOFF/ROADMAP 已更新；停止等待用户检查及提交指令。
+
+## 2026-11-14 CLI 默认插件与 full feature
+
+- 按用户最终要求，将 CLI 默认 feature 收窄为仅 network；encoding、encryption、database（MySQL/Redis）与 image 均默认关闭，保留各自的按需开关。数据库 crate 自身默认启用两种数据库的行为保持原样。
+- 新增 CLI full 聚合 feature，显式启用 network/encoding/encryption/database/image；在 no-default-features 下同样可以独立开启全部插件。根 README、各插件 README、HANDOFF 与 ROADMAP 同步说明构建开关和示例前置条件。
+- 最终默认配置与 no-default-features + full 各通过 10 项 CLI 测试，覆盖模块存在/缺失和注册。实际运行默认 HTTP 示例、full 的 Image/XML/Crypto 示例通过；默认依赖树不含四个可选插件。已恢复默认构建，并实际验证仅 Network 加 builtin 可 require，其他插件不可 require。
+- 本轮只调整 CLI feature 配置与文档，没有新增运行时实现，沿用图片批次已通过的工作区/严格 Clippy 结果。格式、差异和文档链接检查通过；本轮未提交或推送。
+
+## 2026-11-14 提交图片模块与 CLI 插件预设
+
+- 按用户明确授权，将 cosmos-image、u8/u32 基元桥接、示例/测试/文档，以及 CLI 默认仅 network 与 full 聚合开关一并提交，提交信息使用英文，不 push。
+- 提交前核对全部差异和新增文件，沿用已通过的工作区 94 项测试、5 项编译失败检查、严格 Clippy、两种 Runtime、实际图像/HTTP/FS 示例和最终默认/full 各 10 项 CLI 测试结果；本轮仅更新交付记录，无新行为修改。
+- ROADMAP/HANDOFF 同步确认完成状态；默认构建已恢复。停止等待后续指令，不自动开始文本模块。

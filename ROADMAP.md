@@ -79,14 +79,14 @@ FS、datetime 不新增插件 crate 或 CLI feature。其他新增插件独立�
 
 不可信 PHC 在分配前检查算法、版本、字段与成本上限；密码/派生输出和 Argon2 工作区显式清零，Lua 字符串不承诺擦除。已开始的原生计算不能强制中断，取消后继续受全局预算限制直到结束。现有 RSA/Ed25519 和 MySQL 明文/TLS 认证回归保持通过。此阶段不引入登录策略、JWT、密码加密或密钥派生接口。
 
-### 4. XML 与图片（XML 已核对，图片待做）
+### 4. XML 与图片（迁移核对通过）
 
 - [x] XML 文档读取、构造、访问与序列化，不经 JSON 中转。
 - [x] XML 大小、深度、节点数、并发预算及取消/VM 销毁回归。
-- [ ] 图像解码、缩放、裁剪、像素访问和编码；文件读写由 FS 组合。
-- [ ] 图片像素、内存限制，以及耗时图像任务取消后的资源回收。
+- [x] 图像解码、缩放、裁剪、像素访问和编码；文件读写由 FS 组合。
+- [x] 图片像素、内存限制，以及耗时图像任务取消后的资源回收。
 
-XML 本阶段扩展 Encoding 插件，接口见 [XML 文档](cosmos-encoding/xml.md)，实际用法见 [xml.lua](examples/xml.lua)。图片属于独立模块，本批不实现。
+XML 本阶段扩展 Encoding 插件，接口见 [XML 文档](cosmos-encoding/xml.md)，实际用法见 [xml.lua](examples/xml.lua)。XML 已单独确认提交；图片本批作为独立 cosmos-image 插件交付。
 
 | XML 迁移需求 | 核对结果 |
 | --- | --- |
@@ -97,6 +97,18 @@ XML 本阶段扩展 Encoding 插件，接口见 [XML 文档](cosmos-encoding/xml
 | 运行模型与资源 | 拥有型文档/节点、纯 Rust 工作线程、2 个计算/16 个已接纳作业；两种 Runtime、取消、VM 销毁、错误后恢复通过 |
 
 已覆盖本阶段原后端所需 XML 基础能力。未转义 `&` 等历史文件的修复策略、具体 NFO 字段与文件备份/回滚由应用组织；不增加业务格式专用 API。严格 XML 1.0/UTF-8 子集不加载 DTD，也不提供 XPath/XSD 或其他编码转换。
+
+图片模块接口见 [Image 文档](cosmos-image/README.md)，用法见 [image.lua](examples/image.lua) 和 [HTTP 组合示例](examples/image_http.lua)。CLI 的 image feature 默认关闭，可单独启用或通过 full 启用；没有文件/网络依赖。
+
+| 图片迁移需求 | 核对结果 |
+| --- | --- |
+| `archiver/images.rs` 的下载图解码与输出 | PNG/JPEG/WebP 内容识别、解码前尺寸/像素/分配检查；JPEG 显式 quality=95，PNG/WebP 无损编码；下载仍组合 HTTP |
+| 封面裁剪与 `storage.rs` 的缩略图 | 严格矩形裁剪、精确尺寸缩放、等比 thumbnail；允许放大时传 upscale=true，可组合原生 thumbnail 行为 |
+| `watermark_detector.rs` 的灰度与像素 | nearest/triangle 等五种采样、luma8/rgb8/rgba8 像素平面、按点读取、批量矩形写入；模板与 Sobel/评分规则留在 Lua |
+| 原生格式与图像语义 | JPEG 质量、透明背景选项、16 位 PNG 转 RGBA8、可选 EXIF 方向、旋转翻转与原图保持不变都有回归 |
+| 资源、并发与发布 | 解码头部与尺寸限制、重采样中间缓冲预检、受限输出、2 个计算/16 个已接纳作业；两种 Runtime、取消/VM 销毁、FS 原子写回与真实本地 HTTP 流水线通过 |
+
+本阶段已覆盖原后端需要的图像基础能力，不移入海报比例、站点选择、徽标模板或水印判定策略。内部使用 RGBA8，不保留原始位深/元数据或动画；WebP 仅无损编码。原生编解码器分配预算属于其支持范围内的限制，不承诺进程 RSS 硬上限；大图像及应用保留的多个版本仍由应用控制。
 
 ### 5. 文本、URL 与时间进阶
 

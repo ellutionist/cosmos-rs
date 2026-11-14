@@ -72,7 +72,7 @@
   避免无意义的包装函数。
 - Lua 状态指针统一命名为 `lua_state`，未使用时为 `_lua_state`；宏生成代码同样遵守。
 - 文件系统（`cosmos.fs`）和时间/日期（`cosmos.time`）属于 builtin，随 Machine 自动安装，不拆为可选插件；其他生态模块按 `ROADMAP.md` 推进，业务策略保留在应用层。
-- Lua 模块命名统一 `cosmos.network.*`、`cosmos.encoding.*`、`cosmos.encryption.*`、`cosmos.database.*`、`cosmos.fs`、`cosmos.time`、`cosmos.thread`、`cosmos.sync`；
+- Lua 模块命名统一 `cosmos.network.*`、`cosmos.encoding.*`、`cosmos.encryption.*`、`cosmos.database.*`、`cosmos.image`、`cosmos.fs`、`cosmos.time`、`cosmos.thread`、`cosmos.sync`；
   userdata 用 `#[cosmos::userdata(name = "…")]` 指定相对 `cosmos` 的路径，注册层自动组装父模块表，
   父表字段与对应 `require` 入口复用同一张类型表。
 

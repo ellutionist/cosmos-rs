@@ -1,0 +1,16 @@
+[package]
+name = "cosmos-image"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.89"
+description = "Rust-native image processing for cosmos"
+
+[dependencies]
+cosmos = { path = "../cosmos" }
+image = { version = "0.25.10", default-features = false, features = ["png", "jpeg", "webp"] }
+tokio = { version = "1.49", features = ["rt", "sync"] }
+
+[dev-dependencies]
+tempfile = "3"
+tokio = { version = "1.49", features = ["rt-multi-thread", "time"] }
+cosmos-network = { path = "../cosmos-network" }

@@ -2,7 +2,7 @@
 
 cosmos 的 Rust 原生编解码插件，提供 Hex、Base64、URI 二进制编解码与 JSON、TOML、YAML 文本转换，以及 XML 文档与节点操作。
 
-CLI 默认启用 `encoding` feature。Rust 宿主通过 `machine.add_module(cosmos_encoding::Encoding)?` 安装；插件需要 Rust 1.89+。
+CLI 默认不启用编解码；构建时通过 `--features encoding` 或 `--features full` 启用。Rust 宿主通过 `machine.add_module(cosmos_encoding::Encoding)?` 安装；插件需要 Rust 1.89+。
 
 | 模块 | 接口 |
 | --- | --- |

@@ -21,7 +21,7 @@ Rust 宿主通过 `machine.add_module(cosmos_database::Database)?` 注入，插�
 cosmos-database = { path = "../cosmos-rs/cosmos-database", default-features = false, features = ["redis"] }
 ```
 
-CLI 的 `database` feature 默认启用两种数据库；也提供 `mysql`、`redis` 独立开关：
+CLI 默认不启用数据库。`database` feature 启用两种数据库，`full` 启用全部插件；也提供 `mysql`、`redis` 独立开关：
 
 ```sh
 cargo build -p cosmos-cli --no-default-features --features redis

@@ -10,14 +10,14 @@
 - 已按用户要求将统一返回值桥接、分层修复和冗余清理纳入本次本地提交；最新验证与踩坑见 `PROGRESS.md`。
 - 异步边界采用 `PendingOp::poll_push`，只保留 `PushLua` 转换协议；不采用返回值闭包装箱方案（见 §5）。
 - HTTP/WebSocket 回调已改用 `LuaFunction::call<A, R>`；userdata 借用失败只返回 Err，最外层 trampoline 统一抛 Lua 错误。
-- 外部嵌入使用 `Machine::new(tokio_handle)`，插件实现 `Module` 并通过 add_module 注入；插件包括 `Network`、`Encoding`、`Encryption`、`Database`，CLI 默认启用四个对应 feature。
+- 外部嵌入使用 `Machine::new(tokio_handle)`，插件实现 `Module` 并通过 add_module 注入；插件包括 `Network`、`Encoding`、`Encryption`、`Database`、`Image`，CLI 默认仅启用 network；encoding/encryption/database/image 默认关闭，full 开启全部插件。
 - 通用生态顺序见 `ROADMAP.md`；FS 与 datetime 按用户要求属于 builtin，当前首批已完成迁移核对并按用户要求提交。目录统一为 `builtin/fs/mod.rs` 与 `builtin/time/mod.rs`，不保留同名入口 .rs 与子目录并存的布局；接口见 `cosmos/fs.md`、`cosmos/time.md`。
-- 用户新增交付节奏：每完成一个 module，逐项核对迁移/功能需求、验证并记录后停下供用户检查，再等待提交指令；不自动连做下一模块。FS/time 已提交；用户随后授权的 HTTP 流式模块已完成需求核对与验证，已获用户确认提交；随后授权的密码与随机数模块已获用户确认提交；随后授权的 XML 已获用户确认提交；本轮按新指令推进独立图片模块，完成后停下检查。纳秒时间戳用整数字符串保存；文件根目录检查使用组件级路径 API，见对应文档。
+- 用户新增交付节奏：每完成一个 module，逐项核对迁移/功能需求、验证并记录后停下供用户检查，再等待提交指令；不自动连做下一模块。FS/time 已提交；用户随后授权的 HTTP 流式模块已完成需求核对与验证，已获用户确认提交；随后授权的密码与随机数模块已获用户确认提交；随后授权的 XML 已获用户确认提交；独立图片模块及 CLI 默认/ full 调整已获用户确认提交；文本模块尚未开始。纳秒时间戳用整数字符串保存；文件根目录检查使用组件级路径 API，见对应文档。
 - WebSocket 已改成独立读写：后台完整解析帧，接收超时/取消不丢半帧，写入开始后取消会关闭连接；最后一个句柄或 Machine 销毁时取消读任务。并发与取消回归见 `examples/websocket_concurrent.lua`。
 - 用户已撤销 CDP/browser 插件，浏览器控制逻辑留给应用层通过现有 WebSocket、JSON 和协程能力组合；不再增加通用库中的浏览器高层 API。
 - UDP 已作为 `cosmos.network.udp` 接入 Network，支持 IPv4 / IPv6、报文边界、二进制、域名、并发收发、超时/取消与关闭唤醒；不再属于待做。
 - `cosmos.database.mysql` 已完成 lua-resty-mysql 适配与按 client 隔离的空闲连接池；真实 MySQL 8.4.5 的明文 TCP / TLS 回归通过。认证异常与大包另有离线协议测试；尚未用真实 MariaDB 验证，不支持服务端预编译语句。
-- `cosmos.database.redis` 已适配 lua-resty-redis 0.34，提供 RESP2、pipeline、事务、Pub/Sub 与 client 池。数据库 crate 的 `mysql` / `redis` feature 默认全开；CLI 的 `database` 是两者合集，也可单独选择，依赖随数据库关闭。Redis 8.10.3 的真实回归通过，配置用 COSMOS_REDIS_URL。
+- `cosmos.database.redis` 已适配 lua-resty-redis 0.34，提供 RESP2、pipeline、事务、Pub/Sub 与 client 池。数据库 crate 的 `mysql` / `redis` feature 默认全开；CLI 的 `database` 是两者合集，默认关闭，可单独选择或通过 full 启用，依赖随数据库关闭。Redis 8.10.3 的真实回归通过，配置用 COSMOS_REDIS_URL。
 - Lua / C 模块路径分别沿用 LuaJIT 的 `LUA_PATH` / `LUA_CPATH` 与原生默认值（`;;` 展开默认路径）；CLI 可重复传入 `--path` / `--cpath` 前置模板，宿主使用 `Machine::prepend_path` / `prepend_cpath`，不修改进程环境变量。
 - CLI 的 build.rs 为 macOS / Linux 最终二进制保留并导出 Lua C API；该链接参数不会传播给外部 Machine 宿主。宿主需自行配置，见 README 的 C 扩展节；cosmos 的 Rust ffi 仍私有。
 - 交流、注释、文档一律**中文**；**不要自动 commit / push**。
@@ -31,9 +31,10 @@ cosmos-rs/
   cosmos-network/    # 功能模块：tcp/{stream,tls} / udp / http / websocket + bridge.rs（叶子转换）
   cosmos-encoding/   # Encoding 插件：Hex、Base64、URI、JSON / TOML / YAML
   cosmos-encryption/ # Encryption 插件：SHA、RSA-OAEP、Ed25519
+  cosmos-image/      # Image 插件：PNG / JPEG / WebP、图像变换与像素
   cosmos-database/   # Database 插件：按 feature 选择 mysql / redis，内嵌 Lua 协议与 client 池
   Cargo.toml         # 虚拟 workspace，默认成员为 cosmos-cli
-  cosmos-cli/        # clap 命令行入口，注入 Runtime Handle，默认 network/encoding/encryption/database
+  cosmos-cli/        # clap 命令行入口，注入 Runtime Handle，默认仅 network，full 开启全部插件
   cosmos-network/examples/machine.rs # Rust 嵌入示例，根 examples/machine.lua 验证参数与模块入口
   examples/*.lua     # 全部端到端用例
   cosmos-network/lua/ # 内嵌 Lua 源码（include_str! 随二进制编译）
@@ -78,9 +79,20 @@ cosmos-rs/
 
 ## 4. 最近完成的工作
 
+### 图片（2026-11-14，已确认提交）
+
+- XML 已按用户指令提交为 46e32af，未 push。新增独立 cosmos-image crate / Image 插件，CLI 的 image feature 默认关闭，可单独启用或通过 full 启用；图片和 CLI feature 调整已获用户确认提交，不继续文本模块。
+- cosmos.image 使用不可变 Arc<RgbaImage> 句柄，同一类型表含 decode/new/from_pixels 和实例方法；解码 PNG/JPEG/WebP，统一 RGBA8，编码 PNG/无损 WebP/JPEG。公开 Rust 面仅 Image 插件，功能类型、字段和编解码保持私有，零裸 Lua FFI。
+- 核心补齐 u8/u32 的 PushLua 基元，复用 number 转换保持精确数值与 32 位兼容，颜色/尺寸 DTO 直接采用原生整数；外部宏展开验证零值与最大值。
+- 支持尺寸/info、像素点/像素平面、批量矩形替换、严格 crop、五种 resize 滤波、等比 thumbnail（默认不放大，第三参数 true 允许）、旋转翻转；JPEG quality 默认 90，透明通道默认丢弃，可显式合成不透明 background。可选 auto_orient；高位深转 8 位，不保留原元数据或动画。
+- 单边 16000、像素 33554432、RGBA 缓冲 128 MiB；编码输入/输出 64 MiB，原始像素 128 MiB。头部和像素数在解码分配前检查，向原生解码器传分配额度；resize 另检查浮点中间图 256 MiB 与合计估算 512 MiB，避免长宽比交叉造成大分配。编解码器内部限制不是 RSS 硬上限，详见 Image README。
+- LuaBytes 在本地等待/准备，Tokio 阻塞线程仅持有拥有型 Rust 数据；图像全局 2 个原生作业/16 个已接纳作业，取消不提前返还已运行额度，VM 销毁不保留 Lua。原图不可变，失败和取消不使原图失效。
+- examples/image.lua 验证格式/透明度、像素、滤波、裁剪/方向、内存边界与 FS；image_http.lua 验证下载、流式上传与处理响应。两种 Runtime、原生 EXIF/16 位/超大头部、输出预算、取消/队列/VM 销毁均有测试；迁移核对见 ROADMAP，原后端水印模板、Sobel 和封面规则由应用实现。
+
+
 ### XML（2026-11-14，已确认提交）
 
-- Encryption 已按用户指令提交为 1350906（未 push）。本批只做 cosmos.encoding.xml，沿用 Encoding/encoding feature，无新插件开关；XML 已获用户确认提交，图片随后单独交付检查。
+- Encryption 已按用户指令提交为 1350906（未 push）。本批只做 cosmos.encoding.xml，沿用 Encoding/encoding feature，无新插件开关；XML 提交号 46e32af；图片已单独交付并获用户确认提交。
 - 不可变 Document / Node 拥有原文及紧凑索引；UTF-8 XML 1.0 文档读取、构造、名称/URI/属性/子节点与后代访问、文本/CDATA/注释/PI、原始字节片段和范围。document:encode 保留原文；node:encode 补齐独立子树命名空间，编辑返回新文档且只改目标字节区域，旧节点不能定位新版本。
 - roxmltree 验证结构与命名空间，xmlparser 预检/记录词法边界。原生 roxmltree 会合并相邻文本/CDATA 且范围只指向第一段，不能直接用于精确编辑；本实现单独记录词法节点。继承 URI 内部 Arc 驻留共享，属性/命名空间输出另受预算约束。
 - xml.element(name, attrs?, children?) 使用有序数组，attrs 为 {name,value}，children 为字符串或节点；text/cdata/comment/pi 构造叶子；xml.document.new(root) 创建文档。注意 root 模块不能同时定义 document 函数和 document 子类型表，避免自动父表注册冲突。

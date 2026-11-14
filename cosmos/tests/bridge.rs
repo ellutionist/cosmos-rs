@@ -43,6 +43,12 @@ struct Borrowed<'lua> {
 struct EmptyReply {}
 
 #[derive(cosmos::PushLua)]
+struct UnsignedReply {
+    small: u8,
+    wide: u32,
+}
+
+#[derive(cosmos::PushLua)]
 struct InvalidField {
     value: (),
 }
@@ -113,6 +119,15 @@ struct Api;
 #[cosmos::userdata(name = "test.bridge")]
 impl Api {
     async fn noop() {}
+    fn unsigned_fields() -> UnsignedReply {
+        UnsignedReply {
+            small: 0,
+            wide: u32::MAX,
+        }
+    }
+    fn unsigned_values() -> (u8, u32) {
+        (u8::MAX, 0)
+    }
 
     async fn binary_echo(value: LuaBytes) -> Vec<u8> {
         tokio::task::yield_now().await;
@@ -211,6 +226,10 @@ fn external_macros_and_closures_use_only_controlled_bridge_operations() {
         assert(bridge_ready)
         local api = require('cosmos.test.bridge')
         assert(select('#', api.noop()) == 0)
+        local integers=api.unsigned_fields()
+        assert(integers.small==0 and integers.wide==4294967295)
+        local small,wide=api.unsigned_values()
+        assert(small==255 and wide==0)
         assert(type(api.empty({})) == 'table')
         assert(not pcall(api.empty, 'bad'))
         assert(api.borrowed('\229\144\140\230\173\165\229\128\159\231\148\168') == '\229\144\140\230\173\165\229\128\159\231\148\168')

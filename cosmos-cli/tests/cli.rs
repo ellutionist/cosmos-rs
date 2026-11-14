@@ -314,6 +314,14 @@ fn codec_and_encryption_registration_follow_features() {
             assert(not pcall(require, "cosmos.encoding.yaml"))
             assert(not pcall(require, "cosmos.encoding.xml"))
         end
+        if {image} then
+            local image=require("cosmos.image")
+            assert(image==cosmos.image)
+            local value=assert(image.new(1,1))
+            assert(image.decode(assert(value:encode("png"))):width()==1)
+        else
+            assert(cosmos.image==nil and not pcall(require,"cosmos.image"))
+        end
         if {encryption} then
             local encryption = require("cosmos.encryption")
             assert(encryption == cosmos.encryption)
@@ -330,6 +338,7 @@ fn codec_and_encryption_registration_follow_features() {
             assert(not pcall(require, "cosmos.encryption"))
         end
     "#,
+        image = cfg!(feature = "image"),
         encoding = cfg!(feature = "encoding"),
         encryption = cfg!(feature = "encryption")
     );

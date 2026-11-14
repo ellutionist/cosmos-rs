@@ -2,7 +2,7 @@
 
 cosmos 的 Rust 原生加密插件，提供增量摘要、HMAC、Argon2 密码哈希、安全随机数、RSA-OAEP 和 Ed25519。基于 RustCrypto、ed25519-dalek 与操作系统随机源，不依赖 OpenSSL。字节参数支持 NUL 和非 UTF-8 数据，摘要和密文返回原始字节字符串。
 
-CLI 默认启用 `encryption` feature；Rust 宿主通过 `machine.add_module(cosmos_encryption::Encryption)?` 安装。插件独立于 `encoding`，需要文本结果时再组合 Hex / Base64。原认证用法见 [encryption.lua](../examples/encryption.lua)，增量文件摘要、HMAC、密码与随机数见 [crypto.lua](../examples/crypto.lua)，后者需传入一个已存在的临时父目录。
+CLI 默认不启用加密；构建时通过 `--features encryption` 或 `--features full` 启用。Rust 宿主通过 `machine.add_module(cosmos_encryption::Encryption)?` 安装。插件独立于 `encoding`，需要文本结果时再组合 Hex / Base64。原认证用法见 [encryption.lua](../examples/encryption.lua)，增量文件摘要、HMAC、密码与随机数见 [crypto.lua](../examples/crypto.lua)，后者需传入一个已存在的临时父目录。
 
 ## 摘要与消息认证
 

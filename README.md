@@ -22,6 +22,7 @@
   - [JSON：cosmos.encoding.json](#jsoncosmosencodingjson)
   - [TOML：cosmos.encoding.toml](#tomlcosmosencodingtoml)
   - [YAML：cosmos.encoding.yaml](#yamlcosmosencodingyaml)
+- [图片插件](#图片插件)
 - [加密插件](#加密插件)
 - [数据库插件](#数据库插件)
   - [MySQL：cosmos.database.mysql](#mysqlcosmosdatabasemysql)
@@ -57,7 +58,7 @@ cosmos.sync.notify.new():wait() -- 常驻：主协程等待，请求协程在后
 - **同步写法，异步执行**：Lua 协程与 Rust `Future` 一一对应，由 Tokio 驱动；等待网络或计时器时挂起当前协程，其他协程交错运行。
 - **单线程协作式调度**：每个 `Machine` 是一个独立 Lua VM 加 `LocalSet`，所有 Lua 协程固定在同一个宿主线程上，从不跨线程迁移——共享状态无需加锁，天然避免 Lua 状态竞争。
 - **内建并发原语**：时间、协程（`spawn`/`join`/`wait`/`kill`），以及 Channel、Notify、Semaphore、Mutex 等同步原语。
-- **插件化**：网络、编解码、加密、数据库（MySQL / Redis）都是可独立裁剪的 Rust 插件，通过 `add_module` 注入；CLI 默认全量启用。
+- **插件化**：网络、编解码、图片、加密、数据库（MySQL / Redis）都是可独立裁剪的 Rust 插件，通过 `add_module` 注入；CLI 默认仅启用网络，其他插件按需启用，`full` 启用全部插件。
 - **方便嵌入**：每个 `Machine` 拥有独立 Lua 环境，复用宿主的 Tokio Runtime；多次执行脚本保留全局状态，宿主可注册自己的 userdata 类型。
 - **Rust 侧零裸指针**：插件通过 `#[cosmos::userdata]` 宏注册类型，`#[derive(PushLua, FromLua)]` 组合完成 Lua 栈桥接，业务代码不接触任何 Lua C API。
 
@@ -415,7 +416,7 @@ wss 使用 `ctx` 指定 TLS 上下文（缺省公有根，ALPN 强制 http/1.1�
 
 ## 编解码插件
 
-`cosmos-encoding` 提供 `cosmos.encoding.*`，支持二进制编解码和 JSON、TOML、YAML 文本转换：
+构建 CLI 时通过 `--features encoding` 或 `--features full` 启用。`cosmos-encoding` 提供 `cosmos.encoding.*`，支持二进制编解码和 JSON、TOML、YAML 文本转换：
 
 ```lua
 local hex    = require("cosmos.encoding.hex")
@@ -500,9 +501,13 @@ print(assert(yaml.encode(config)))
 
 XML 提供独立文档/节点、命名空间和保留原文的编辑，见 [XML 文档](cosmos-encoding/xml.md) 与 [xml.lua](examples/xml.lua)。
 
+## 图片插件
+
+构建 CLI 时通过 `--features image` 或 `--features full` 启用。`cosmos-image` 提供 `cosmos.image`，支持 PNG/JPEG/WebP、缩放裁剪及像素操作，耗时处理由 Rust 工作线程执行。用法见 [Image 文档](cosmos-image/README.md)、[image.lua](examples/image.lua) 和 [HTTP 组合示例](examples/image_http.lua)。文件读写复用 builtin FS，裁剪比例与检测规则由应用决定。
+
 ## 加密插件
 
-`cosmos-encryption` 提供 `cosmos.encryption.*`，支持增量摘要、HMAC、Argon2 密码哈希、安全随机数及非对称算法。接口与资源边界见 [Encryption 文档](cosmos-encryption/README.md)，完整用法见 [crypto.lua](examples/crypto.lua)。摘要返回原始字节，需要文本时与编解码插件组合：
+构建 CLI 时通过 `--features encryption` 或 `--features full` 启用。`cosmos-encryption` 提供 `cosmos.encryption.*`，支持增量摘要、HMAC、Argon2 密码哈希、安全随机数及非对称算法。接口与资源边界见 [Encryption 文档](cosmos-encryption/README.md)，完整用法见 [crypto.lua](examples/crypto.lua)。摘要返回原始字节，需要文本时与编解码插件组合：
 
 ```lua
 local encryption = require("cosmos.encryption")
@@ -528,7 +533,7 @@ assert(#public:encrypt("secret\0data", "sha256") == public:size())
 
 ## 数据库插件
 
-`cosmos-database` 组合网络、编解码和加密能力，协议实现随 crate 内嵌（不依赖外部数据库客户端库）。
+构建 CLI 时通过 `--features database` 或 `--features full` 启用两种数据库，也可单选 `mysql` / `redis`。`cosmos-database` 组合网络、编解码和加密能力，协议实现随 crate 内嵌（不依赖外部数据库客户端库）。
 
 ### MySQL：cosmos.database.mysql
 
@@ -728,16 +733,20 @@ C 扩展的调用是同步的：阻塞操作会阻塞 `Machine` 所在线程，�
 
 ### 插件开关
 
+默认仅启用 `network`。`encoding`、`encryption`、`database`、`image` 按需启用，`full` 开启全部插件：`cargo build --release -p cosmos-cli --features full`。
+
 | Feature | 插件 | 依赖 |
 | --- | --- | --- |
 | `network` | 网络（TCP / UDP / TLS / socket / HTTP / WebSocket） | — |
+| `full` | 全部插件 | `network` + `encoding` + `encryption` + `database` + `image` |
+| `image` | 图片（PNG / JPEG / WebP、缩放裁剪、像素；默认关闭） | — |
 | `encoding` | 编解码（hex / base64 / uri / json / toml / yaml） | — |
 | `encryption` | 加密（摘要 / HMAC / 密码 / 随机数 / Ed25519 / RSA） | — |
-| `database` | 数据库（MySQL + Redis） | `mysql` + `redis` |
+| `database` | 数据库（MySQL + Redis；默认关闭） | `mysql` + `redis` |
 | `mysql` | 仅 MySQL | `network` + `encoding` + `encryption` |
 | `redis` | 仅 Redis | `network` |
 
-默认全部启用；例如仅要网络与 MySQL：
+关闭默认 feature 后可按需组合，例如仅要网络与 MySQL：
 
 ```sh
 cargo build --release --no-default-features --features network,mysql
@@ -752,6 +761,7 @@ cosmos-network/   网络插件：TCP / TLS / socket / HTTP / WebSocket
 cosmos-encoding/  编解码插件：hex / base64 / uri / json
 cosmos-encryption/ 加密插件：摘要 / HMAC / 密码 / 随机数 / Ed25519 / RSA
 cosmos-database/  数据库插件：MySQL / Redis
+cosmos-image/     图片插件：编解码 / 缩放裁剪 / 像素
 cosmos-cli/       命令行入口
 examples/         端到端 Lua 示例
 ```
@@ -762,7 +772,7 @@ examples/         端到端 Lua 示例
 cargo test --workspace
 ```
 
-端到端示例（`examples/`）：
+端到端示例（`examples/`）：涉及可选插件的示例需要启用对应 feature，或构建时使用 `--features full`。
 
 | 示例 | 说明 |
 | --- | --- |
@@ -781,6 +791,8 @@ cargo test --workspace
 | [websocket_concurrent.lua](examples/websocket_concurrent.lua) | 并发收发、取消与关闭 |
 | `encoding.lua` / `json.lua` | 编解码与 JSON |
 | `encryption.lua` | 哈希与签名 |
+| [image.lua](examples/image.lua) | 图片编解码、变换与像素读写 |
+| [image_http.lua](examples/image_http.lua) | HTTP 图像下载、上传与处理组合 |
 | [xml.lua](examples/xml.lua) | XML 文档、节点、命名空间与原文编辑 |
 | [crypto.lua](examples/crypto.lua) | 增量文件摘要、HMAC、Argon2 密码和安全随机数 |
 | `mysql.lua` / `redis.lua` | 数据库端到端（需本地服务） |

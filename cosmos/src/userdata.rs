@@ -897,6 +897,17 @@ impl PushLua for u16 {
         1
     }
 }
+// u8/u32 均可由 Lua number 精确表示；不用 lua_Integer，避免 32 位目标上的符号溢出。
+impl PushLua for u8 {
+    unsafe fn push_lua(self, output: &mut Output<'_>) -> i32 {
+        unsafe { f64::from(self).push_lua(output) }
+    }
+}
+impl PushLua for u32 {
+    unsafe fn push_lua(self, output: &mut Output<'_>) -> i32 {
+        unsafe { f64::from(self).push_lua(output) }
+    }
+}
 impl PushLua for f64 {
     unsafe fn push_lua(self, output: &mut Output<'_>) -> i32 {
         let lua_state = output.lua_state;
