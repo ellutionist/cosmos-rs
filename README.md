@@ -22,6 +22,7 @@
   - [JSON：cosmos.encoding.json](#jsoncosmosencodingjson)
   - [TOML：cosmos.encoding.toml](#tomlcosmosencodingtoml)
   - [YAML：cosmos.encoding.yaml](#yamlcosmosencodingyaml)
+- [文本插件](#文本插件)
 - [图片插件](#图片插件)
 - [加密插件](#加密插件)
 - [数据库插件](#数据库插件)
@@ -58,7 +59,7 @@ cosmos.sync.notify.new():wait() -- 常驻：主协程等待，请求协程在后
 - **同步写法，异步执行**：Lua 协程与 Rust `Future` 一一对应，由 Tokio 驱动；等待网络或计时器时挂起当前协程，其他协程交错运行。
 - **单线程协作式调度**：每个 `Machine` 是一个独立 Lua VM 加 `LocalSet`，所有 Lua 协程固定在同一个宿主线程上，从不跨线程迁移——共享状态无需加锁，天然避免 Lua 状态竞争。
 - **内建并发原语**：时间、协程（`spawn`/`join`/`wait`/`kill`），以及 Channel、Notify、Semaphore、Mutex 等同步原语。
-- **插件化**：网络、编解码、图片、加密、数据库（MySQL / Redis）都是可独立裁剪的 Rust 插件，通过 `add_module` 注入；CLI 默认仅启用网络，其他插件按需启用，`full` 启用全部插件。
+- **插件化**：网络、编解码、文本、图片、加密、数据库（MySQL / Redis）都是可独立裁剪的 Rust 插件，通过 `add_module` 注入；CLI 默认仅启用网络，其他插件按需启用，`full` 启用全部插件。
 - **方便嵌入**：每个 `Machine` 拥有独立 Lua 环境，复用宿主的 Tokio Runtime；多次执行脚本保留全局状态，宿主可注册自己的 userdata 类型。
 - **Rust 侧零裸指针**：插件通过 `#[cosmos::userdata]` 宏注册类型，`#[derive(PushLua, FromLua)]` 组合完成 Lua 栈桥接，业务代码不接触任何 Lua C API。
 
@@ -501,6 +502,10 @@ print(assert(yaml.encode(config)))
 
 XML 提供独立文档/节点、命名空间和保留原文的编辑，见 [XML 文档](cosmos-encoding/xml.md) 与 [xml.lua](examples/xml.lua)。
 
+## 文本插件
+
+构建 CLI 时通过 `--features text` 或 `--features full` 启用。`cosmos-text` 提供编译型正则、捕获组与可挂起的替换回调、Unicode 规范化/大小写及 Rust OpenCC 繁简转换。用法见 [Text 文档](cosmos-text/README.md) 和 [text.lua](examples/text.lua)。名称清洗、匹配与规范化顺序由应用组织。
+
 ## 图片插件
 
 构建 CLI 时通过 `--features image` 或 `--features full` 启用。`cosmos-image` 提供 `cosmos.image`，支持 PNG/JPEG/WebP、缩放裁剪及像素操作，耗时处理由 Rust 工作线程执行。用法见 [Image 文档](cosmos-image/README.md)、[image.lua](examples/image.lua) 和 [HTTP 组合示例](examples/image_http.lua)。文件读写复用 builtin FS，裁剪比例与检测规则由应用决定。
@@ -733,12 +738,13 @@ C 扩展的调用是同步的：阻塞操作会阻塞 `Machine` 所在线程，�
 
 ### 插件开关
 
-默认仅启用 `network`。`encoding`、`encryption`、`database`、`image` 按需启用，`full` 开启全部插件：`cargo build --release -p cosmos-cli --features full`。
+默认仅启用 `network`。`encoding`、`encryption`、`database`、`image`、`text` 按需启用，`full` 开启全部插件：`cargo build --release -p cosmos-cli --features full`。
 
 | Feature | 插件 | 依赖 |
 | --- | --- | --- |
 | `network` | 网络（TCP / UDP / TLS / socket / HTTP / WebSocket） | — |
-| `full` | 全部插件 | `network` + `encoding` + `encryption` + `database` + `image` |
+| `full` | 全部插件 | `network` + `encoding` + `encryption` + `database` + `image` + `text` |
+| `text` | 文本（正则 / Unicode / 繁简转换；默认关闭） | — |
 | `image` | 图片（PNG / JPEG / WebP、缩放裁剪、像素；默认关闭） | — |
 | `encoding` | 编解码（hex / base64 / uri / json / toml / yaml） | — |
 | `encryption` | 加密（摘要 / HMAC / 密码 / 随机数 / Ed25519 / RSA） | — |
@@ -761,6 +767,7 @@ cosmos-network/   网络插件：TCP / TLS / socket / HTTP / WebSocket
 cosmos-encoding/  编解码插件：hex / base64 / uri / json
 cosmos-encryption/ 加密插件：摘要 / HMAC / 密码 / 随机数 / Ed25519 / RSA
 cosmos-database/  数据库插件：MySQL / Redis
+cosmos-text/      文本插件：正则 / Unicode / 繁简转换
 cosmos-image/     图片插件：编解码 / 缩放裁剪 / 像素
 cosmos-cli/       命令行入口
 examples/         端到端 Lua 示例
@@ -791,6 +798,7 @@ cargo test --workspace
 | [websocket_concurrent.lua](examples/websocket_concurrent.lua) | 并发收发、取消与关闭 |
 | `encoding.lua` / `json.lua` | 编解码与 JSON |
 | `encryption.lua` | 哈希与签名 |
+| [text.lua](examples/text.lua) | 正则、可挂起替换、Unicode 与繁简转换 |
 | [image.lua](examples/image.lua) | 图片编解码、变换与像素读写 |
 | [image_http.lua](examples/image_http.lua) | HTTP 图像下载、上传与处理组合 |
 | [xml.lua](examples/xml.lua) | XML 文档、节点、命名空间与原文编辑 |

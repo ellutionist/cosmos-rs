@@ -314,6 +314,16 @@ fn codec_and_encryption_registration_follow_features() {
             assert(not pcall(require, "cosmos.encoding.yaml"))
             assert(not pcall(require, "cosmos.encoding.xml"))
         end
+        if {text} then
+            local text=require("cosmos.text")
+            assert(text==cosmos.text and text.regex==require("cosmos.text.regex"))
+            assert(text.unicode.upper("text")=="TEXT")
+            assert(text.regex.new("a+"):is_match("aaa"))
+            assert(text.chinese.convert("ASCII","t2s")=="ASCII")
+        else
+            assert(cosmos.text==nil and not pcall(require,"cosmos.text"))
+            assert(not pcall(require,"cosmos.text.regex"))
+        end
         if {image} then
             local image=require("cosmos.image")
             assert(image==cosmos.image)
@@ -338,6 +348,7 @@ fn codec_and_encryption_registration_follow_features() {
             assert(not pcall(require, "cosmos.encryption"))
         end
     "#,
+        text = cfg!(feature = "text"),
         image = cfg!(feature = "image"),
         encoding = cfg!(feature = "encoding"),
         encryption = cfg!(feature = "encryption")

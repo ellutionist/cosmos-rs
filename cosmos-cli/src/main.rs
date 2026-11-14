@@ -17,6 +17,8 @@ use cosmos_encryption::Encryption;
 use cosmos_image::Image;
 #[cfg(feature = "network")]
 use cosmos_network::Network;
+#[cfg(feature = "text")]
+use cosmos_text::Text;
 
 #[derive(Parser)]
 #[command(
@@ -95,6 +97,8 @@ fn run(
     machine.add_module(Encoding)?;
     #[cfg(feature = "image")]
     machine.add_module(Image)?;
+    #[cfg(feature = "text")]
+    machine.add_module(Text)?;
     #[cfg(feature = "encryption")]
     machine.add_module(Encryption)?;
     #[cfg(feature = "network")]

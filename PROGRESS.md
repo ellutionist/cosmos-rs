@@ -1107,3 +1107,22 @@
 - 按用户明确授权，将 cosmos-image、u8/u32 基元桥接、示例/测试/文档，以及 CLI 默认仅 network 与 full 聚合开关一并提交，提交信息使用英文，不 push。
 - 提交前核对全部差异和新增文件，沿用已通过的工作区 94 项测试、5 项编译失败检查、严格 Clippy、两种 Runtime、实际图像/HTTP/FS 示例和最终默认/full 各 10 项 CLI 测试结果；本轮仅更新交付记录，无新行为修改。
 - ROADMAP/HANDOFF 同步确认完成状态；默认构建已恢复。停止等待后续指令，不自动开始文本模块。
+
+
+## 2026-11-14 通用文本模块（等待用户检查）
+
+- 本轮按路线图只实现 cosmos-text：公开 Text 插件，自动组装 cosmos.text.regex / unicode / chinese；与其他插件无依赖。CLI 新增默认关闭的 text feature 并纳入 full，默认仍仅 network。只增加模块、feature 和文档，没有修改运行时桥接或前批插件行为；未提交/推送。
+- 正则使用 Rust regex：异步受限编译与复用、匹配/捕获、拥有型原文与一基闭区间字节范围、集合游标、模板及可挂起 Lua 回调替换、分段与字面量转义。原生结果只携带 Rust 数据；Lua 回调始终在宿主 LocalSet，不跨 await 借用 userdata。集合与独立匹配共享原文，避免逐个复制所有捕获内容。
+- Unicode 支持四种规范化、大小写、空白裁剪、scalar 计数与截断。小写保留 Rust str::to_lowercase 的上下文语义，不能简单用逐字符小写替代，否则希腊语词尾 sigma 不兼容。繁简沿用原后端 ferrous-opencc 0.4 / t2s / s2t，内嵌词典在工作线程按方向惰性缓存，不逐字切块破坏词组。
+- 资源：跨 Machine/Runtime 共用最多 2 个计算、16 个已接纳作业；复制原生输入前先取得许可，运行许可由真实原生作业持有，取消不能提前归还。一般输入 8 MiB、输出 16 MiB、OpenCC 输入 1 MiB、模式/模板 64 KiB；编译大小、缓存、深度、捕获、匹配及 split 均有限制。匹配先有界收集再执行回调，超量不触发应用副作用；迭代步骤协作取消，单次搜索/字典初始化/转换不承诺强制终止。
+- 踩坑：替换模板复用 regex-automata 的公开插值器，以保留 $name / ${name} / $$ 的原生语义，并在捕获展开前检查输出预算；字面量最多额外暂存一个模板长度。regex.match 是类型表，正则句柄使用 find 方法，避免父方法与子类型表重名。is_match 需要拥有型异步 self，仅在该方法说明并豁免 Clippy wrong_self_convention，不扩大借用生命周期。Unicode/OpenCC 部分中间分配由依赖负责，文档明确不承诺 RSS 硬上限。
+- 迁移核对：已对照 Librarian 的 importer/nfo.rs、archiver/translation.rs、actor_names.rs、scraper/filters.rs 等；实际正则的捕获/范围、模板展开、OpenCC 词组与歧义字均与原生依赖对照通过。编号/广告/名称/标签规则保留应用层。ROADMAP 只勾选文本项，URL、代理与日期日历仍待做。
+- 已通过：cargo test --workspace（100 项常规测试、5 项编译失败文档测试；真实数据库联调仍按原测试标记忽略）、严格全 feature Clippy；新增 6 项测试覆盖两种 Runtime、独立/重复注入、UTF-8/NUL/空匹配、标志/边界、回调挂起/失败/取消、资源超限、队列预算、VM 销毁及错误后恢复。CLI text-only/无插件各 9 项、full 10 项通过；实际 text.lua、xml.lua、image_http.lua 通过。实际 full 与默认 HTTP 回归通过，默认 CLI 10 项通过且已恢复仅 network 构建；格式、差异、本地文档链接和非注释中文扫描通过（0 处）。
+- 下一步：本批完成后停下供用户检查并等待明确提交指令；不自动推进 URL 模块。
+
+
+## 2026-11-14 提交文本模块
+
+- 按用户明确授权提交 cosmos-text、CLI text/full 开关、示例与文档；提交信息使用英文，不 push。
+- 提交前核对差异、格式和新增文件，沿用上一轮工作区 100 项测试、5 项编译失败检查、严格 Clippy、实际示例、Runtime/feature 组合等验证；本轮提交前只更新交付记录，无新行为修改。
+- 用户已授权继续下一个 URL 模块；本批完成后再次核对需求并停下供检查，不自动推进代理模块。

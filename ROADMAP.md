@@ -112,10 +112,22 @@ XML 本阶段扩展 Encoding 插件，接口见 [XML 文档](cosmos-encoding/xml
 
 ### 5. 文本、URL 与时间进阶
 
-- [ ] 编译型正则、Unicode normalization 与大小写、繁简转换。
+- [x] 编译型正则、Unicode normalization 与大小写、繁简转换（迁移核对通过）。
 - [ ] URL 解析、合并、查询参数，与已有 URI 百分号编码区分职责。
 - [ ] HTTP / SOCKS 代理能力；直连规则由应用配置。
 - [ ] 补齐日期日历运算和按需扩展的格式支持；继续放在 builtin time。
+
+文本部分作为独立 `cosmos-text` 插件交付，接口见 [Text 文档](cosmos-text/README.md)，实际用法见 [text.lua](examples/text.lua)。CLI 的 text 默认关闭，单独启用或通过 full 启用，无其他插件依赖。
+
+| 文本迁移需求 | 核对结果 |
+| --- | --- |
+| `importer/nfo.rs` 的域名过滤与编号提取 | 编译复用、大小写标志、转义、捕获组及原文范围；条件替换由可挂起 Lua 回调组合，不内置媒体规则 |
+| `archiver/translation.rs` 的文本片段清理 | 内联标志、跨行/大小写、惰性量词；原后端实际模式的捕获与字节位置逐项对照 Rust 引擎通过 |
+| 名称/分类筛选的 Unicode 处理 | NFC/NFD/NFKC/NFKD、上下文相关小写、大写、Unicode 空白、scalar 计数与截断；执行顺序保留给应用 |
+| `actor_names.rs` 等繁简处理 | 沿用 ferrous-opencc 0.4 的内嵌 t2s/s2t 词典并按方向缓存，词组、歧义字和 NUL 原生结果对照通过 |
+| 资源与运行模型 | UTF-8/输入输出/捕获/分段预算、2 个计算/16 个已接纳作业；两种 Runtime、取消、VM 销毁与回调挂起通过 |
+
+本批已满足原后端的文本基础能力；Rust regex 不支持环视/反向引用，现有迁移模式不依赖它们。len/truncate 按 Unicode scalar 计数，不提供字形簇或 locale case folding；繁简转换不承诺可逆。已开始的单次原生搜索/OpenCC 转换不能强制中断，仍持有计算预算到结束；OpenCC 另限 1 MiB 输入并保留词组上下文。URL、代理、日历进阶尚未实现，不把文本完成视为第 5 阶段全部完成。
 
 ### 6. 数据库、服务生命周期与日志
 

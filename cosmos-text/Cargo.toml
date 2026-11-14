@@ -1,0 +1,17 @@
+[package]
+name = "cosmos-text"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.89"
+description = "Rust-native regular expressions, Unicode and Chinese conversion for cosmos"
+
+[dependencies]
+cosmos = { path = "../cosmos" }
+regex = "1"
+regex-automata = { version = "0.4", default-features = false, features = ["std"] }
+unicode-normalization = "0.1"
+ferrous-opencc = { version = "0.4", default-features = false, features = ["t2s-conversion", "s2t-conversion"] }
+tokio = { version = "1.49", features = ["rt", "sync"] }
+
+[dev-dependencies]
+tokio = { version = "1.49", features = ["rt-multi-thread", "time"] }

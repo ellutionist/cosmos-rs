@@ -10,9 +10,9 @@
 - 已按用户要求将统一返回值桥接、分层修复和冗余清理纳入本次本地提交；最新验证与踩坑见 `PROGRESS.md`。
 - 异步边界采用 `PendingOp::poll_push`，只保留 `PushLua` 转换协议；不采用返回值闭包装箱方案（见 §5）。
 - HTTP/WebSocket 回调已改用 `LuaFunction::call<A, R>`；userdata 借用失败只返回 Err，最外层 trampoline 统一抛 Lua 错误。
-- 外部嵌入使用 `Machine::new(tokio_handle)`，插件实现 `Module` 并通过 add_module 注入；插件包括 `Network`、`Encoding`、`Encryption`、`Database`、`Image`，CLI 默认仅启用 network；encoding/encryption/database/image 默认关闭，full 开启全部插件。
+- 外部嵌入使用 `Machine::new(tokio_handle)`，插件实现 `Module` 并通过 add_module 注入；插件包括 `Network`、`Encoding`、`Encryption`、`Database`、`Image`、`Text`，CLI 默认仅启用 network；encoding/encryption/database/image/text 默认关闭，full 开启全部插件。
 - 通用生态顺序见 `ROADMAP.md`；FS 与 datetime 按用户要求属于 builtin，当前首批已完成迁移核对并按用户要求提交。目录统一为 `builtin/fs/mod.rs` 与 `builtin/time/mod.rs`，不保留同名入口 .rs 与子目录并存的布局；接口见 `cosmos/fs.md`、`cosmos/time.md`。
-- 用户新增交付节奏：每完成一个 module，逐项核对迁移/功能需求、验证并记录后停下供用户检查，再等待提交指令；不自动连做下一模块。FS/time 已提交；用户随后授权的 HTTP 流式模块已完成需求核对与验证，已获用户确认提交；随后授权的密码与随机数模块已获用户确认提交；随后授权的 XML 已获用户确认提交；独立图片模块及 CLI 默认/ full 调整已获用户确认提交；文本模块尚未开始。纳秒时间戳用整数字符串保存；文件根目录检查使用组件级路径 API，见对应文档。
+- 用户新增交付节奏：每完成一个 module，逐项核对迁移/功能需求、验证并记录后停下供用户检查，再等待提交指令；不自动连做下一模块。FS/time 已提交；用户随后授权的 HTTP 流式模块已完成需求核对与验证，已获用户确认提交；随后授权的密码与随机数模块已获用户确认提交；随后授权的 XML 已获用户确认提交；独立图片模块及 CLI 默认/ full 调整已获用户确认提交；文本模块已完成迁移核对与验证，本轮获用户确认提交，并授权开始 URL 模块。文本接口见 `cosmos-text/README.md`；URL 完成后仍须停下供检查。纳秒时间戳用整数字符串保存；文件根目录检查使用组件级路径 API，见对应文档。
 - WebSocket 已改成独立读写：后台完整解析帧，接收超时/取消不丢半帧，写入开始后取消会关闭连接；最后一个句柄或 Machine 销毁时取消读任务。并发与取消回归见 `examples/websocket_concurrent.lua`。
 - 用户已撤销 CDP/browser 插件，浏览器控制逻辑留给应用层通过现有 WebSocket、JSON 和协程能力组合；不再增加通用库中的浏览器高层 API。
 - UDP 已作为 `cosmos.network.udp` 接入 Network，支持 IPv4 / IPv6、报文边界、二进制、域名、并发收发、超时/取消与关闭唤醒；不再属于待做。
@@ -31,6 +31,7 @@ cosmos-rs/
   cosmos-network/    # 功能模块：tcp/{stream,tls} / udp / http / websocket + bridge.rs（叶子转换）
   cosmos-encoding/   # Encoding 插件：Hex、Base64、URI、JSON / TOML / YAML
   cosmos-encryption/ # Encryption 插件：SHA、RSA-OAEP、Ed25519
+  cosmos-text/       # Text 插件：正则 / Unicode / Rust OpenCC 繁简转换
   cosmos-image/      # Image 插件：PNG / JPEG / WebP、图像变换与像素
   cosmos-database/   # Database 插件：按 feature 选择 mysql / redis，内嵌 Lua 协议与 client 池
   Cargo.toml         # 虚拟 workspace，默认成员为 cosmos-cli
@@ -79,9 +80,17 @@ cosmos-rs/
 
 ## 4. 最近完成的工作
 
+### 文本（2026-11-14，已确认提交）
+
+- 新增 cosmos-text / Text 插件，只有插件入口公开。正则、Unicode、繁简转换分别注册在 cosmos.text.regex / unicode / chinese，父表自动生成；CLI 的 text 默认关闭并纳入 full，默认仍仅 network。
+- 正则覆盖编译、搜索、捕获与原文范围、集合、模板/可挂起回调替换、分段和转义；匹配拥有共享 Rust 原文。Unicode 覆盖四种规范化、上下文相关大小写、空白、scalar 计数和截断；繁简使用与原后端相同的 ferrous-opencc 0.4 / t2s / s2t 内嵌词典与惰性缓存。
+- 零裸 Lua FFI；原生输入在宿主准备，工作线程不持有 Lua。跨 Machine/Runtime 的 2 个运行/16 个已接纳作业预算，取消不提前释放运行额度；搜索步之间协作取消，单次搜索/OpenCC 不强制中断。输入、输出、模式、编译、捕获和分段均有限制，详见 cosmos-text/README.md。
+- 新增 6 项测试及 examples/text.lua；对照原后端实际模式、Rust 捕获范围/模板与 OpenCC 歧义字，迁移核对通过。工作区 100 项常规测试、5 项编译失败文档测试和严格 Clippy 通过；text-only/无插件 CLI 各 9 项，默认/full 各 10 项，实际文本/XML/HTTP 图片/HTTP 示例通过；默认构建已恢复。
+- 用户已明确要求提交文本模块并继续 URL；本轮提交信息使用英文，不 push。URL 完成后等待检查，不连续实现代理。
+
 ### 图片（2026-11-14，已确认提交）
 
-- XML 已按用户指令提交为 46e32af，未 push。新增独立 cosmos-image crate / Image 插件，CLI 的 image feature 默认关闭，可单独启用或通过 full 启用；图片和 CLI feature 调整已获用户确认提交，不继续文本模块。
+- XML 已按用户指令提交为 46e32af，未 push。新增独立 cosmos-image crate / Image 插件，CLI 的 image feature 默认关闭，可单独启用或通过 full 启用；图片和 CLI feature 调整已获用户确认提交为 9ecdb85，未 push。
 - cosmos.image 使用不可变 Arc<RgbaImage> 句柄，同一类型表含 decode/new/from_pixels 和实例方法；解码 PNG/JPEG/WebP，统一 RGBA8，编码 PNG/无损 WebP/JPEG。公开 Rust 面仅 Image 插件，功能类型、字段和编解码保持私有，零裸 Lua FFI。
 - 核心补齐 u8/u32 的 PushLua 基元，复用 number 转换保持精确数值与 32 位兼容，颜色/尺寸 DTO 直接采用原生整数；外部宏展开验证零值与最大值。
 - 支持尺寸/info、像素点/像素平面、批量矩形替换、严格 crop、五种 resize 滤波、等比 thumbnail（默认不放大，第三参数 true 允许）、旋转翻转；JPEG quality 默认 90，透明通道默认丢弃，可显式合成不透明 background。可选 auto_orient；高位深转 8 位，不保留原元数据或动画。

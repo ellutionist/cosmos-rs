@@ -1,4 +1,4 @@
 [workspace]
-members = ["cosmos", "cosmos-macros", "cosmos-network", "cosmos-encoding", "cosmos-encryption", "cosmos-database", "cosmos-image", "cosmos-cli"]
+members = ["cosmos", "cosmos-macros", "cosmos-network", "cosmos-encoding", "cosmos-encryption", "cosmos-database", "cosmos-image", "cosmos-text", "cosmos-cli"]
 default-members = ["cosmos-cli"]
 resolver = "2"
