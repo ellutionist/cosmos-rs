@@ -44,6 +44,7 @@ fn toml_preserves_types_and_yaml_handles_bounded_documents() {
         .unwrap();
     let mut machine = Machine::new(runtime.handle().clone()).unwrap();
     machine.add_module(Encoding).unwrap();
+    runtime.block_on(machine.exec("assert(debug.getinfo(cosmos.encoding.toml.decode).source == 'cosmos.encoding.formats'); assert(debug.getinfo(cosmos.encoding.yaml.decode).source == 'cosmos.encoding.formats')")).unwrap();
     runtime
         .block_on(machine.exec(include_str!("../../examples/toml.lua")))
         .unwrap();

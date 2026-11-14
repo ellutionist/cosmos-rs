@@ -70,7 +70,7 @@ local started = false
 local reader = cosmos.thread.spawn(function()
     started = true
     client:receive(1)
-    error("已取消的读取不能继续执行")
+    error("cancelled reads must not resume")
 end)
 while not started do cosmos.time.sleep(0) end
 reader:kill()
@@ -86,7 +86,7 @@ started = false
 local handshake = cosmos.thread.spawn(function()
     started = true
     client:starttls("localhost", client_context)
-    error("已取消的握手不能继续执行")
+    error("cancelled handshakes must not resume")
 end)
 while not started do cosmos.time.sleep(0) end
 handshake:kill()
@@ -127,4 +127,4 @@ if package.config:sub(1, 1) == "/" then
     unix_listener:close()
     assert(os.remove(path))
 end
-print("socket 明文、TLS 升级、Unix、超时与取消验证通过")
+print("socket plaintext, TLS upgrade, Unix, timeout and cancellation passed")

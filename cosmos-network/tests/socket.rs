@@ -62,7 +62,7 @@ fn cancelling_a_partial_write_discards_the_connection() {
             local sender = cosmos.thread.spawn(function()
                 started = true
                 socket:send(string.rep("x", 16 * 1024 * 1024))
-                error("写入不应在服务端停止读取时完成")
+                error("write must not complete while the server is not reading")
             end)
             while not started do cosmos.time.sleep(0) end
             sender:kill()

@@ -29,7 +29,7 @@ impl Toml {
     fn encode(input: Input) -> Result<String, String> {
         let input = input.0?;
         if !matches!(input, DocumentValue::Object(_)) {
-            return Err("TOML 文档根必须是字符串键表".into());
+            return Err("TOML document root must be a table with string keys".into());
         }
         value::encoded(::toml::to_string(&to_toml(input)?).map_err(|error| error.to_string())?)
     }
@@ -51,15 +51,15 @@ impl Toml {
 
 fn to_toml(value: DocumentValue) -> Result<TomlValue, String> {
     Ok(match value {
-        DocumentValue::Null => return Err("TOML 不支持 null".into()),
+        DocumentValue::Null => return Err("TOML does not support null".into()),
         DocumentValue::Boolean(value) => TomlValue::Boolean(value),
         DocumentValue::Integer(value) => TomlValue::Integer(value),
-        DocumentValue::Unsigned(value) => {
-            TomlValue::Integer(i64::try_from(value).map_err(|_| "TOML 整数超出 i64 范围")?)
-        }
+        DocumentValue::Unsigned(value) => TomlValue::Integer(
+            i64::try_from(value).map_err(|_| "TOML integer is out of i64 range")?,
+        ),
         DocumentValue::Float(value) => TomlValue::Float(value),
         DocumentValue::Exact(value) => TomlValue::Integer(
-            i64::try_from(value.as_integer()?).map_err(|_| "TOML 整数超出 i64 范围")?,
+            i64::try_from(value.as_integer()?).map_err(|_| "TOML integer is out of i64 range")?,
         ),
         DocumentValue::Datetime(value) => TomlValue::Datetime(value.0),
         DocumentValue::String(value) => TomlValue::String(value),
@@ -88,7 +88,7 @@ fn from_toml(
         }
         DeValue::Integer(value) => DocumentValue::Integer(
             i64::from_str_radix(value.as_str(), value.radix())
-                .map_err(|_| "TOML 整数超出 i64 范围")?,
+                .map_err(|_| "TOML integer is out of i64 range")?,
         ),
         DeValue::Float(value) => {
             let number = value
@@ -96,7 +96,7 @@ fn from_toml(
                 .parse::<f64>()
                 .map_err(|error| error.to_string())?;
             if number.is_infinite() && !value.as_str().contains("inf") {
-                return Err("TOML 浮点数超出 f64 范围".into());
+                return Err("TOML float is out of f64 range".into());
             }
             DocumentValue::Float(number)
         }
@@ -104,7 +104,7 @@ fn from_toml(
         DeValue::Datetime(value) => DocumentValue::Datetime(Datetime(value)),
         DeValue::Array(values) => {
             if depth >= MAX_DEPTH {
-                return Err("文档嵌套深度超限".into());
+                return Err("document nesting depth limit exceeded".into());
             }
             DocumentValue::Array(
                 values
@@ -115,7 +115,7 @@ fn from_toml(
         }
         DeValue::Table(values) => {
             if depth >= MAX_DEPTH {
-                return Err("文档嵌套深度超限".into());
+                return Err("document nesting depth limit exceeded".into());
             }
             DocumentValue::Object(
                 values

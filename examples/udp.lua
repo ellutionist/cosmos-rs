@@ -80,7 +80,7 @@ started = false
 local cancelled = cosmos.thread.spawn(function()
     started = true
     server:receivefrom()
-    error("已取消的接收不能恢复")
+    error("cancelled receives must not resume")
 end)
 while not started do cosmos.time.sleep(0) end
 cancelled:kill()
@@ -152,4 +152,4 @@ end
 collectgarbage("collect")
 local collected = assert(Udp.bind(gc_host,gc_port,1000))
 collected:close()
-print("UDP "..host.." 报文边界、二进制、空报文、来源地址、超时、并发、取消及关闭验证通过")
+print("UDP "..host.." datagram boundaries, binary data, empty packets, addresses, timeouts, concurrency, cancellation and close passed")

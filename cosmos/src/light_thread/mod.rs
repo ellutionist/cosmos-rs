@@ -65,7 +65,7 @@ impl LightThread {
         });
         async move {
             let Some(mut guard) = guard else {
-                return Err("轻线程已经启动，不能重复执行".to_string());
+                return Err("light thread has already started".to_string());
             };
             let result = poll_fn(|cx| guard.poll(cx))
                 .await
@@ -96,7 +96,7 @@ impl LightThread {
 
     /// 等待任一任务；所有等待只观察结果，未选中的任务仍可再次等待。
     pub(crate) async fn wait_any(threads: &[Self]) -> (usize, Result<(), String>) {
-        assert!(!threads.is_empty(), "至少需要一个轻线程");
+        assert!(!threads.is_empty(), "at least one light thread is required");
         let mut waits: Vec<_> = threads
             .iter()
             .map(|thread| thread.inner.control.wait())

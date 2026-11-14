@@ -3,7 +3,7 @@ local sync = require("cosmos.sync")
 local spawn = cosmos.thread.spawn
 assert(sync == cosmos.sync)
 for _, name in ipairs({ "channel", "notify", "semaphore", "mutex", "permit" }) do
-    assert(sync[name] == require("cosmos.sync." .. name), "子模块与 require 类型表不一致")
+    assert(sync[name] == require("cosmos.sync." .. name), "submodule table differs from require")
 end
 assert(require("cosmos") == cosmos)
 assert(getmetatable(sync.channel.new(1)) == sync.channel)
@@ -23,14 +23,14 @@ end
 local function cancel(t)
     t:kill()
     local value, err = t:join()
-    check(value == nil and err:find("cancelled", 1, true), "取消失败")
+    check(value == nil and err:find("cancelled", 1, true), "cancellation failed")
 end
 
 -- channel：原始对象身份、二进制串、nil 与关闭错误可以区分。
 do
     local ch = sync.channel.new(4)
     local object = { x = 42 }
-    local fn = function() return "回调" end
+    local fn = function() return "\229\155\158\232\176\131" end
     check(ch:send(object) == true)
     check(ch:send(fn) == true)
     check(ch:send("a\0b\255") == true)
@@ -41,7 +41,7 @@ do
     check(ch:recv() == object)
     check(ch:recv() == fn)
     check(ch:recv() == "a\0b\255")
-    check(select("#", ch:recv()) == 1, "nil 消息应只返回一个值")
+    check(select("#", ch:recv()) == 1, "nil messages must return exactly one value")
     failure("closed", ch:recv())
     failure("closed", ch:send(1))
 end
@@ -66,10 +66,10 @@ do
     check(ch:recv() == 4)
     failure("timeout", ch:recv(1))
 
-    local soon = spawn(function() check(ch:send("稍后到达")) end)
+    local soon = spawn(function() check(ch:send("\231\168\141\229\144\142\229\136\176\232\190\190")) end)
     failure("timeout", ch:recv(0))
     join(soon)
-    check(ch:recv(0) == "稍后到达")
+    check(ch:recv(0) == "\231\168\141\229\144\142\229\136\176\232\190\190")
 end
 
 -- 同一个 userdata 上多个发送者/接收者可以并发挂起，close 唤醒所有等待者。
@@ -78,7 +78,7 @@ do
     for i = 1, 8 do
         workers[#workers + 1] = spawn(function()
             local value = assert(ch:recv())
-            check(not received[value], "重复接收")
+            check(not received[value], "duplicate receive")
             received[value] = true
         end)
     end
@@ -119,13 +119,13 @@ do
     end
     put()
     collectgarbage("collect")
-    check(weak[1] ~= nil, "队列中的值被提前回收")
+    check(weak[1] ~= nil, "queued value was collected too early")
     local function take()
         check(ch:recv() == weak[1])
     end
     take()
     collectgarbage("collect")
-    check(weak[1] == nil, "消费后锚点未释放")
+    check(weak[1] == nil, "anchor was not released after consuming the value")
     check(ch:send(true))
     local function pending_send()
         local object = { 456 }
@@ -142,7 +142,7 @@ do
 
     local mutex = sync.mutex.new()
     check(ch:send(mutex))
-    check(ch:recv() == mutex, "userdata 身份丢失")
+    check(ch:recv() == mutex, "userdata identity was lost")
 
     check(ch:send(true))
     local victim = spawn(function()
@@ -154,7 +154,7 @@ do
     check(weak[3] ~= nil)
     cancel(victim)
     collectgarbage("collect")
-    check(weak[3] == nil, "取消 send 后锚点未释放")
+    check(weak[3] == nil, "anchor was not released after cancelling send")
     check(ch:recv() == true)
 end
 
@@ -229,7 +229,7 @@ do
     local function abandoned_permit() assert(sem:acquire()) end
     abandoned_permit()
     collectgarbage("collect")
-    check(sem:available() == 2, "GC 应归还配额")
+    check(sem:available() == 2, "GC must return the permit")
     a, b = assert(sem:acquire()), assert(sem:acquire())
     local waiter = spawn(function() failure("closed", sem:acquire()) end)
     cosmos.time.sleep(2)
@@ -256,7 +256,7 @@ do
         end)
     end
     for _, worker in ipairs(workers) do join(worker) end
-    check(total == 30, "互斥失败")
+    check(total == 30, "mutual exclusion failed")
     local guard = assert(mutex:lock(0))
     failure("timeout", mutex:lock(1))
     local ran = false
@@ -269,8 +269,8 @@ do
     check(select("#", mutex:with_lock(function() end)) == 1)
     local object = {}
     check(mutex:with_lock(function() return object end) == object)
-    local value, err = mutex:with_lock(function() error("锁内错误") end)
-    check(value == nil and err:find("锁内错误", 1, true))
+    local value, err = mutex:with_lock(function() error("error inside lock") end)
+    check(value == nil and err:find("error inside lock", 1, true))
     assert(mutex:lock(0)):release()
 
     local entered = sync.channel.new(1)
@@ -303,8 +303,8 @@ do
     for _, value in ipairs({ -1, math.huge, 0/0, "1" }) do
         check(not pcall(function() ch:recv(value) end))
     end
-    check(ch:send("仍然可用"))
-    check(ch:recv() == "仍然可用")
+    check(ch:send("\228\187\141\231\132\182\229\143\175\231\148\168"))
+    check(ch:recv() == "\228\187\141\231\132\182\229\143\175\231\148\168")
 end
 
 -- 异步拥有型接收者不依赖原 userdata 保活；VM 退出时回收未结束的等待任务。
@@ -322,7 +322,7 @@ do
     end)
     check(ready:recv())
     collectgarbage("collect")
-    check(weak[1] == nil, "等待方法不应持有原 userdata 的借用")
+    check(weak[1] == nil, "wait methods must not hold the original userdata borrow")
     join(worker)
     spawn(function() sync.channel.new(1):recv() end)
     spawn(function() sync.notify.new():wait() end)

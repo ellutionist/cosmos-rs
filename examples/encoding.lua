@@ -28,4 +28,4 @@ for _, case in ipairs({ {hex, "0"}, {hex, "gg"}, {base64, "!"}, {base64, "Zg"}, 
     local value, err = case[1].decode(case[2])
     assert(value == nil and type(err) == "string")
 end
-print("Hex、Base64、URI 的标准向量、二进制与错误处理通过")
+print("Hex, Base64 and URI vectors, binary data and error handling passed")

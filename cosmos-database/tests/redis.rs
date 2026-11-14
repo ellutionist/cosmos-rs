@@ -49,7 +49,7 @@ async fn closed(stream: &mut TcpStream) {
                 error.kind(),
                 std::io::ErrorKind::ConnectionReset | std::io::ErrorKind::ConnectionAborted
             ) => {}
-        other => panic!("连接应已关闭：{other:?}"),
+        other => panic!("connection should be closed: {other:?}"),
     }
 }
 fn run_case(server: impl AsyncFnOnce(TcpStream), script: impl FnOnce(u16) -> String) {
@@ -314,9 +314,9 @@ fn pipeline_reply_size_limit_is_shared_between_results() {
 }
 
 #[test]
-#[ignore = "需要 COSMOS_REDIS_URL；创建独立测试键与临时 ACL 用户并清理"]
+#[ignore = "requires COSMOS_REDIS_URL; creates and cleans up isolated test keys and temporary ACL users"]
 fn redis_example_against_explicit_server() {
-    let url = std::env::var("COSMOS_REDIS_URL").expect("请设置 COSMOS_REDIS_URL");
+    let url = std::env::var("COSMOS_REDIS_URL").expect("set COSMOS_REDIS_URL");
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()

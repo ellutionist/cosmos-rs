@@ -34,14 +34,17 @@ impl Budget {
     pub(super) fn node(&mut self, depth: usize) -> Result<(), String> {
         self.nodes += 1;
         if depth > MAX_DEPTH || self.nodes > MAX_NODES {
-            return Err("文档嵌套深度或节点数超限".into());
+            return Err("document nesting depth or node limit exceeded".into());
         }
         Ok(())
     }
     pub(super) fn bytes(&mut self, count: usize) -> Result<(), String> {
-        self.bytes = self.bytes.checked_add(count).ok_or("文档字节数超限")?;
+        self.bytes = self
+            .bytes
+            .checked_add(count)
+            .ok_or("document byte limit exceeded")?;
         if self.bytes > MAX_BYTES {
-            return Err("文档字节数超限".into());
+            return Err("document byte limit exceeded".into());
         }
         Ok(())
     }
@@ -60,14 +63,14 @@ impl<'lua> FromLua<'lua> for Input {
 
 pub(super) fn text(input: &[u8]) -> Result<&str, String> {
     if input.len() > MAX_BYTES {
-        return Err("文档字节数超限".into());
+        return Err("document byte limit exceeded".into());
     }
     std::str::from_utf8(input).map_err(|error| error.to_string())
 }
 
 pub(super) fn encoded(text: String) -> Result<String, String> {
     if text.len() > MAX_BYTES {
-        return Err("文档字节数超限".into());
+        return Err("document byte limit exceeded".into());
     }
     Ok(text)
 }
@@ -105,23 +108,23 @@ unsafe fn read(
             } else if let Ok(datetime) = value.read::<Datetime>() {
                 Ok(DocumentValue::Datetime(datetime))
             } else {
-                Err("不支持该 userdata".into())
+                Err("unsupported userdata".into())
             }
         }
         ValueKind::Table => {
             if depth >= MAX_DEPTH {
-                return Err("文档嵌套深度超限".into());
+                return Err("document nesting depth limit exceeded".into());
             }
             let table = value.table()?;
             let identity = table.identity();
             if !path.insert(identity) {
-                return Err("不支持循环引用".into());
+                return Err("cyclic references are not supported".into());
             }
             let result = read_table(value, depth, path, budget);
             path.remove(&identity);
             result
         }
-        _ => Err("不支持该值类型或缺少实参".into()),
+        _ => Err("unsupported value type or missing argument".into()),
     }
 }
 
@@ -136,7 +139,7 @@ unsafe fn read_table(
         .as_deref()
         .is_some_and(|kind| kind != "array" && kind != "object")
     {
-        return Err("无效的容器类型标记".into());
+        return Err("invalid container type marker".into());
     }
     let mut object = Vec::new();
     let mut array = Vec::new();
@@ -144,7 +147,7 @@ unsafe fn read_table(
         match key.kind() {
             ValueKind::String => {
                 if !array.is_empty() || hint.as_deref() == Some("array") {
-                    return Err("数组不能包含字符串键".into());
+                    return Err("arrays must not contain string keys".into());
                 }
                 let name = key.read::<&str>()?;
                 budget.bytes(name.len())?;
@@ -152,15 +155,15 @@ unsafe fn read_table(
             }
             ValueKind::Number => {
                 if !object.is_empty() || hint.as_deref() == Some("object") {
-                    return Err("对象只接受字符串键".into());
+                    return Err("objects require string keys".into());
                 }
                 let index = key.read::<f64>()?;
                 if index < 1.0 || index > MAX_NODES as f64 || index.fract() != 0.0 {
-                    return Err("数组下标必须是连续的正整数".into());
+                    return Err("array indices must be consecutive positive integers".into());
                 }
                 array.push((index as usize, read(item, depth + 1, path, budget)?));
             }
-            _ => return Err("表只接受字符串键或连续整数下标".into()),
+            _ => return Err("tables require string keys or consecutive integer indices".into()),
         }
         Ok(())
     })?;
@@ -169,7 +172,7 @@ unsafe fn read_table(
         let mut values = Vec::with_capacity(array.len());
         for (position, (index, value)) in array.into_iter().enumerate() {
             if index != position + 1 {
-                return Err("不支持稀疏数组，请使用 cosmos.null 填充".into());
+                return Err("sparse arrays are not supported; fill gaps with cosmos.null".into());
             }
             values.push(value);
         }

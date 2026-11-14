@@ -6,7 +6,7 @@ assert(json.encode(nil) == 'null' and json.encode(json.null) == 'null')
 assert(json.encode(true) == 'true' and json.encode(false) == 'false')
 assert(json.encode(42) == '42' and json.decode('42') == 42)
 assert(json.decode('false') == false and json.decode('null') == cosmos.null)
-local text = '中文😀\0\1\n\r\t"\\'
+local text = '\228\184\173\230\150\135😀\0\1\n\r\t"\\'
 assert(json.decode(json.encode(text)) == text)
 assert(json.decode('"\\ud83d\\ude00"') == '😀')
 assert(json.decode('-0') == 0 and 1/json.decode('-0') == -math.huge)
@@ -67,7 +67,7 @@ end
 
 -- 读取元表标签和表字段都不能执行用户元方法。
 local methods = 0
-local custom = setmetatable({value=1}, {__index=function() methods=methods+1; error('不应执行') end})
+local custom = setmetatable({value=1}, {__index=function() methods=methods+1; error('must not execute') end})
 assert(json.decode(json.encode(custom)).value == 1 and methods == 0)
 assert(json.array(custom) == nil)
 assert(json.encode(setmetatable({}, {__jsontype='unknown'})) == nil)
@@ -92,10 +92,10 @@ assert(json.encode(root) == nil)
 for i=1,100 do
     assert(json.encode(cyclic) == nil)
     assert(json.decode('[invalid]') == nil)
-    assert(json.decode(json.encode({value='恢复',array=json.array()})).value == '恢复')
+    assert(json.decode(json.encode({value='\230\129\162\229\164\141',array=json.array()})).value == '\230\129\162\229\164\141')
 end
 local channel = cosmos.sync.channel.new(1)
 assert(channel:send(precise))
 local received = assert(channel:recv())
 assert(json.encode(received) == '[1,1.2300,1e+03,-0]')
-print('JSON 标量、容器、NULL、精确数字、循环/非法输入与深层栈恢复验证通过')
+print('JSON scalars, containers, NULL, exact numbers, invalid input and deep-stack recovery passed')

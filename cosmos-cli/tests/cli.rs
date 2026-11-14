@@ -36,6 +36,9 @@ fn help_version_and_missing_script_are_handled_by_clap() {
     assert!(help.status.success());
     let text = String::from_utf8(help.stdout).unwrap();
     assert!(text.contains("cosmos-cli") && text.contains("<SCRIPT>"));
+    assert!(text.contains("Prepend Lua module search templates"));
+    assert!(text.contains("Prepend C module search templates"));
+    assert!(text.contains("Lua script path (- for stdin)"));
     let version = command().arg("--version").output().unwrap();
     assert!(version.status.success());
     assert_eq!(
@@ -57,11 +60,11 @@ fn help_version_and_missing_script_are_handled_by_clap() {
 #[test]
 fn stdin_runs_with_builtins_and_forwards_flag_like_unicode_and_empty_args() {
     let result = stdin(
-        &["-", "--help", "--version", "-42", "中文", ""],
+        &["-", "--help", "--version", "-42", "\u{4e2d}\u{6587}", ""],
         r##"
         local a,b,c,d,e = ...
         assert(select("#", ...) == 5)
-        assert(a == "--help" and b == "--version" and c == "-42" and d == "中文" and e == "")
+        assert(a == "--help" and b == "--version" and c == "-42" and d == "\228\184\173\230\150\135" and e == "")
         assert(cosmos.test == nil and cosmos.example == nil)
         cosmos.time.sleep(0)
         print("stdin arguments ok")
@@ -126,7 +129,7 @@ fn search_paths_preserve_native_defaults_and_order_cli_before_environment() {
             command,
             &[
                 option,
-                &format!("./cli/?.{extension};./quo'te\\目录/?.{extension}"),
+                &format!("./cli/?.{extension};./quo'te\\\u{76ee}\u{5f55}/?.{extension}"),
                 option,
                 &format!("./cli-last/?.{extension}"),
                 "-",
@@ -140,7 +143,7 @@ fn search_paths_preserve_native_defaults_and_order_cli_before_environment() {
         );
         assert_eq!(
             String::from_utf8(result.stdout).unwrap(),
-            format!("./cli/?.{extension};./quo'te\\目录/?.{extension};./cli-last/?.{extension};./env/?.{extension};{defaults};./env-last/?.{extension}")
+            format!("./cli/?.{extension};./quo'te\\\u{76ee}\u{5f55}/?.{extension};./cli-last/?.{extension};./env/?.{extension};{defaults};./env-last/?.{extension}")
         );
     }
 }
@@ -158,7 +161,7 @@ fn require_loads_lua_files_and_init_files_from_cli_environment_and_defaults() {
     for (directory, origin) in [
         (root.clone(), "default"),
         (root.join("environment"), "environment"),
-        (root.join("first'中文"), "first"),
+        (root.join("first'\u{4e2d}\u{6587}"), "first"),
         (root.join("second"), "second"),
     ] {
         std::fs::create_dir_all(directory.join("probe")).unwrap();
@@ -175,9 +178,9 @@ fn require_loads_lua_files_and_init_files_from_cli_environment_and_defaults() {
         .unwrap();
     }
     let environment = format!("{}/environment/?.lua;;", root.display());
-    let first = format!("{}/first'中文/?.lua", root.display());
+    let first = format!("{}/first'\u{4e2d}\u{6587}/?.lua", root.display());
     let second = format!("{}/second/?.lua", root.display());
-    let init = format!("{}/first'中文/?/init.lua", root.display());
+    let init = format!("{}/first'\u{4e2d}\u{6587}/?/init.lua", root.display());
     let missing = format!("{}/missing/?.lua", root.display());
     let mut results = Vec::new();
     for (paths, environment, module, expected) in [
@@ -239,7 +242,7 @@ fn executable_exports_lua_c_api_for_native_modules() {
             int luaJIT_setmode(void *lua_state, int index, int mode);
         ]]
         for _, name in ipairs({"lua_gettop", "luaL_checkoption", "luaL_prepbuffer", "luaopen_string", "luaJIT_setmode"}) do
-            assert(ffi.C[name] ~= nil, name .. " 未从 CLI 导出")
+            assert(ffi.C[name] ~= nil, name .. " is not exported by the CLI")
         end
         "#,
     );
@@ -332,7 +335,7 @@ fn script_files_receive_arguments_and_load_network_lua_definitions() {
     let result = command()
         .current_dir(root)
         .arg(root.join("examples/machine.lua"))
-        .args(["host", "参数"])
+        .args(["host", "\u{53c2}\u{6570}"])
         .output()
         .unwrap();
     assert!(

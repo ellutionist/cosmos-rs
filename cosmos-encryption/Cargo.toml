@@ -2,7 +2,7 @@
 name = "cosmos-encryption"
 version = "0.1.0"
 edition = "2021"
-description = "cosmos 的 Rust 原生摘要、RSA 与 Ed25519 模块"
+description = "Rust-native digest, RSA and Ed25519 modules for cosmos"
 
 [dependencies]
 cosmos = { path = "../cosmos" }

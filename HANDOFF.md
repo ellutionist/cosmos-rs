@@ -5,6 +5,7 @@
 ## 0. TL;DR
 
 - 项目：LuaJIT + Rust 重写版网络框架，路径 `/Users/ellutionist/code/ellutionist/cosmos-rs`。
+- 语言约定：交流、注释和项目文档用中文；代码中的错误、日志、断言、CLI 帮助、chunk 名称和包描述用英文。Unicode 测试数据通过转义保留原始字节，不能将中文诊断藏进转义；详见 `AGENTS.md`。
 - WebSocket、桥接分层重构和 VM 生命周期修复已提交为 `c030f5d`。
 - 已按用户要求将统一返回值桥接、分层修复和冗余清理纳入本次本地提交；最新验证与踩坑见 `PROGRESS.md`。
 - 异步边界采用 `PendingOp::poll_push`，只保留 `PushLua` 转换协议；不采用返回值闭包装箱方案（见 §5）。
@@ -383,7 +384,7 @@ local sync = require("cosmos.sync")
 local mutex = sync.mutex.new()
 local value, err = mutex:with_lock(function()
     cosmos.time.sleep(1)
-    return "完成"
+    return "done"
 end, 100)
 assert(err == nil, err)
 ```

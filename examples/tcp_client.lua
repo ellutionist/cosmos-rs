@@ -16,7 +16,7 @@ local r2, w2 = c2:split()
 local t0 = cosmos.time.now_ms()
 local payload = "fast\0\255"
 w2:write(payload .. "\n")
-assert(r2:receive("*l") == payload, "二进制短包回显不应被文本解码改写")
+assert(r2:receive("*l") == payload, "binary short-packet echo must not be altered by text decoding")
 local fast_ms = cosmos.time.now_ms() - t0
 assert(fast_ms < 200, "handlers should run concurrently, fast took " .. fast_ms .. "ms")
 print(string.format("fast response in %.0fms", fast_ms))

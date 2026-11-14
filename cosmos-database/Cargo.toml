@@ -2,7 +2,7 @@
 name = "cosmos-database"
 version = "0.1.0"
 edition = "2021"
-description = "cosmos 的异步数据库插件"
+description = "Asynchronous database plugin for cosmos"
 
 [features]
 default = ["mysql", "redis"]

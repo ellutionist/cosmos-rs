@@ -64,7 +64,11 @@ async fn greeting(stream: &mut TcpStream, plugin: &str) -> Vec<u8> {
     let (number, reply) = frame(stream).await;
     assert_eq!(number, 1);
     let flags = u32::from_le_bytes(reply[..4].try_into().unwrap());
-    assert_eq!(flags & 0x80, 0, "客户端不能声明 LOCAL INFILE");
+    assert_eq!(
+        flags & 0x80,
+        0,
+        "the client must not advertise LOCAL INFILE"
+    );
     assert_eq!(reply[8], 45);
     let user_end = reply[32..].iter().position(|byte| *byte == 0).unwrap() + 32;
     assert_eq!(&reply[32..user_end], b"user");
@@ -258,7 +262,7 @@ fn malformed_sequences_rows_and_oversized_packets_close_the_connection() {
                             std::io::ErrorKind::ConnectionReset
                                 | std::io::ErrorKind::ConnectionAborted
                         ) => {}
-                    other => panic!("协议出错后连接必须关闭：{other:?}"),
+                    other => panic!("connection must close after a protocol error: {other:?}"),
                 }
             },
             |port| {

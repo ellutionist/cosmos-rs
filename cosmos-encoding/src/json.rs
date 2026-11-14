@@ -62,7 +62,7 @@ fn check_depth(text: &[u8]) -> Result<(), String> {
                 b'[' | b'{' => {
                     depth += 1;
                     if depth > MAX_DEPTH {
-                        return Err("JSON 嵌套深度超限".into());
+                        return Err("JSON nesting depth limit exceeded".into());
                     }
                 }
                 b']' | b'}' => depth = depth.saturating_sub(1),
@@ -115,14 +115,16 @@ fn to_json(value: DocumentValue) -> Result<JsonValue, String> {
         DocumentValue::Integer(value) => JsonValue::from(value),
         DocumentValue::Unsigned(value) => JsonValue::from(value),
         DocumentValue::Float(value) => {
-            JsonValue::new_f64(value).ok_or("JSON 不支持 NaN 或无穷数")?
+            JsonValue::new_f64(value).ok_or("JSON does not support NaN or infinity")?
         }
         DocumentValue::String(value) => JsonValue::from(value.as_str()),
         DocumentValue::Exact(value) => {
             sonic_rs::to_value(&value.0).map_err(|error| error.to_string())?
         }
         DocumentValue::Datetime(_) => {
-            return Err("JSON 不支持 TOML 日期时间，请先转换为字符串".into())
+            return Err(
+                "JSON does not support TOML datetimes; convert them to strings first".into(),
+            )
         }
         DocumentValue::Array(values) => {
             let mut array = Array::with_capacity(values.len());
@@ -160,24 +162,24 @@ impl Number {
 impl Number {
     pub(super) fn parse(text: &str) -> Result<Self, String> {
         if text.len() > MAX_BYTES {
-            return Err("JSON 字节数超限".into());
+            return Err("JSON byte limit exceeded".into());
         }
         if !matches!(
             text.trim_start().as_bytes().first(),
             Some(b'-' | b'0'..=b'9')
         ) {
-            return Err("需要 JSON 数字文本".into());
+            return Err("expected JSON number text".into());
         }
         let value = sonic_rs::from_str::<JsonValue>(text).map_err(|error| error.to_string())?;
         value
             .as_raw_number()
             .map(Self)
-            .ok_or_else(|| "需要 JSON 数字文本".into())
+            .ok_or_else(|| "expected JSON number text".into())
     }
     pub(super) fn as_integer(&self) -> Result<i128, String> {
         self.0
             .as_str()
             .parse()
-            .map_err(|_| "该格式只支持精确整数 userdata；浮点数请使用 Lua number".into())
+            .map_err(|_| "this format only supports exact integer userdata; use Lua numbers for floating-point values".into())
     }
 }

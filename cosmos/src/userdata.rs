@@ -126,8 +126,12 @@ impl RegistryRef {
     }
 
     unsafe fn push_to(&self, lua_state: *mut lua_State) {
-        assert!(self.is_alive(), "Lua VM 已关闭");
-        debug_assert_eq!(main_state(lua_state), self.main, "Lua 引用不属于目标 VM");
+        assert!(self.is_alive(), "Lua VM is closed");
+        debug_assert_eq!(
+            main_state(lua_state),
+            self.main,
+            "Lua reference does not belong to the target VM"
+        );
         if self.value == LUA_REFNIL {
             lua_pushnil(lua_state);
         } else {
@@ -254,8 +258,8 @@ pub(crate) unsafe fn push_module(lua_state: *mut lua_State, path: &str) {
     lua_pushvalue(lua_state, LUA_GLOBALSINDEX);
     let mut prefix = String::new();
     for part in path.split('.') {
-        assert!(!part.is_empty(), "模块路径不能为空: {path}");
-        let key = CString::new(part).expect("模块路径不能包含 NUL");
+        assert!(!part.is_empty(), "module path must not be empty: {path}");
+        let key = CString::new(part).expect("module path must not contain NUL");
         lua_getfield(lua_state, -1, key.as_ptr());
         if lua_type(lua_state, -1) == LUA_TNIL {
             lua_settop(lua_state, -2);
@@ -266,7 +270,7 @@ pub(crate) unsafe fn push_module(lua_state: *mut lua_State, path: &str) {
         assert_eq!(
             lua_type(lua_state, -1),
             LUA_TTABLE,
-            "模块路径不是表: {path}"
+            "module path is not a table: {path}"
         );
         if !prefix.is_empty() {
             prefix.push('.');
@@ -651,7 +655,7 @@ impl std::ops::Deref for LuaBytes {
         match &self.0 {
             LuaBytesRepr::Owned(bytes) => bytes,
             LuaBytesRepr::Anchored { bytes, anchor } => {
-                assert!(anchor.is_alive(), "Lua VM 已关闭");
+                assert!(anchor.is_alive(), "Lua VM is closed");
                 bytes
             }
         }
@@ -698,7 +702,7 @@ impl std::ops::Deref for LuaStr {
         match &self.0 {
             LuaStrRepr::Owned(s) => s,
             LuaStrRepr::Borrowed(a) => {
-                assert!(a.anchor.is_alive(), "Lua VM 已关闭");
+                assert!(a.anchor.is_alive(), "Lua VM is closed");
                 a.s
             }
         }
@@ -802,7 +806,7 @@ impl LuaFunction {
     /// ```
     pub async fn call<A: PushLua, R: for<'lua> FromLua<'lua>>(&self, args: A) -> Result<R, String> {
         if !self.anchor.is_alive() {
-            return Err("Lua VM 已关闭".to_string());
+            return Err("Lua VM is closed".to_string());
         }
         let thread = unsafe {
             let lua_state = lua_newthread(self.anchor.main);
@@ -1253,7 +1257,7 @@ mod derive_tests {
             push_int_table(lua_state, &[("a", 7), ("b", 9)]);
             match Reply::from_lua(Value::new(lua_state, -1)).unwrap() {
                 Reply::Table(value) => assert_eq!(value, ContainerDefaults { a: 7, b: 9 }),
-                _ => panic!("返回值分支错误"),
+                _ => panic!("unexpected return variant"),
             }
             assert_eq!(lua_gettop(lua_state), 2);
             lua_settop(lua_state, 0);
@@ -1261,14 +1265,14 @@ mod derive_tests {
             vec![0u8, 255, 1].push_lua(&mut Output::new(lua_state));
             match Reply::from_lua(Value::new(lua_state, 1)).unwrap() {
                 Reply::Body(bytes) => assert_eq!(bytes, [0, 255, 1]),
-                _ => panic!("返回值分支错误"),
+                _ => panic!("unexpected return variant"),
             }
             lua_settop(lua_state, 0);
             Nil.push_lua(&mut Output::new(lua_state));
             "callback error".push_lua(&mut Output::new(lua_state));
             match Reply::from_lua(Value::new(lua_state, -2)).unwrap() {
                 Reply::Empty(_, Some(error)) => assert_eq!(error, "callback error"),
-                _ => panic!("返回值分支错误"),
+                _ => panic!("unexpected return variant"),
             }
             assert_eq!(lua_gettop(lua_state), 2);
         });
@@ -1315,7 +1319,7 @@ mod derive_tests {
                     .unwrap()
                     .visit(|_, value| {
                         assert_eq!(value.read::<i64>()?, 42);
-                        panic!("遍历中途退出");
+                        panic!("iteration aborted");
                     })
                     .unwrap();
             }));
@@ -1336,15 +1340,21 @@ mod derive_tests {
     fn string_pairs_preserve_nul_keys_and_values_and_ignore_non_string_keys() {
         with_state(|lua_state| unsafe {
             let mut output = Output::new(lua_state);
-            StringPairs(vec![("key\0中文".to_string(), "value\0尾".to_string())])
-                .push_lua(&mut output);
+            StringPairs(vec![(
+                "key\0\u{4e2d}\u{6587}".to_string(),
+                "value\0\u{5c3e}".to_string(),
+            )])
+            .push_lua(&mut output);
             lua_pushinteger(lua_state, 7);
-            "忽略数字键".push_lua(&mut output);
+            "ignore numeric keys".push_lua(&mut output);
             lua_settable(lua_state, -3);
             let pairs = Value::new(lua_state, -1).read::<StringPairs>().unwrap();
             assert_eq!(
                 pairs.0,
-                [("key\0中文".to_string(), "value\0尾".to_string())]
+                [(
+                    "key\0\u{4e2d}\u{6587}".to_string(),
+                    "value\0\u{5c3e}".to_string()
+                )]
             );
             assert_eq!(lua_gettop(lua_state), 1);
         });
@@ -1408,7 +1418,7 @@ mod derive_tests {
                 assert_eq!(lua_tointeger(lua_state, 1), 42);
                 crate::libs::run_lua_source(
                     lua_state,
-                    "模块注册前半程",
+                    "module registration: first phase",
                     r#"
                     cached_root = require("cosmos")
                     cached_module = require("cosmos.module_test")
@@ -1416,7 +1426,7 @@ mod derive_tests {
                     assert(cached_root == cosmos)
                     assert(cached_root.module_test == cached_module)
                     assert(cached_module.parent == cached_parent)
-                    cached_parent.marker = "保留"
+                    cached_parent.marker = "\228\191\157\231\149\153"
                 "#,
                 )
                 .unwrap();
@@ -1427,13 +1437,13 @@ mod derive_tests {
                 assert_eq!(lua_gettop(lua_state), 1);
                 crate::libs::run_lua_source(
                     lua_state,
-                    "模块注册后半程",
+                    "module registration: second phase",
                     r#"
                     local parent = require("cosmos.module_test.parent")
                     local child = require("cosmos.module_test.parent.child")
                     assert(require("cosmos") == cached_root)
                     assert(require("cosmos.module_test") == cached_module)
-                    assert(parent == cached_parent and parent.marker == "保留")
+                    assert(parent == cached_parent and parent.marker == "\228\191\157\231\149\153")
                     assert(parent.child == child)
                     assert(parent.new():value() == 7)
                     assert(getmetatable(parent.new()) == parent)
@@ -1447,7 +1457,7 @@ mod derive_tests {
                 assert_eq!(lua_gettop(lua_state), 2);
                 crate::libs::run_lua_source(
                     lua_state,
-                    "模块懒注册",
+                    "lazy module registration",
                     r#"
                     assert(cached_parent.lua_method() == 9)
                 "#,
@@ -1472,7 +1482,7 @@ mod derive_tests {
 
             // registry 的负键也可被 Lua 写入，nil 引用不能误读该槽位。
             lua_pushinteger(lua_state, LUA_REFNIL as lua_Integer);
-            "非 nil".push_lua(&mut Output::new(lua_state));
+            "not nil".push_lua(&mut Output::new(lua_state));
             lua_settable(lua_state, LUA_REGISTRYINDEX);
             lua_pushnil(lua_state);
             let nil = LuaValue::from_lua(Value::new(lua_state, 1)).unwrap();
@@ -1558,7 +1568,7 @@ mod derive_tests {
             );
             match result.unwrap() {
                 CallbackReply::Empty(_, Some(value)) => assert_eq!(value, "yielded"),
-                _ => panic!("返回值分支错误"),
+                _ => panic!("unexpected return variant"),
             }
             assert_eq!(lua_gettop(lua_state), 0);
             drop(local);

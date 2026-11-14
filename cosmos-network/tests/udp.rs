@@ -17,7 +17,7 @@ fn udp_datagrams_work_on_injected_runtimes_and_both_ip_families() {
         let runtime = builder.worker_threads(2).enable_all().build().unwrap();
         for host in ["127.0.0.1", "::1"] {
             if host == "::1" && !ipv6 {
-                eprintln!("当前环境不支持 IPv6 loopback，跳过 IPv6 回归");
+                eprintln!("IPv6 loopback is unavailable; skipping IPv6 regression");
                 continue;
             }
             let mut machine = Machine::new(runtime.handle().clone()).unwrap();

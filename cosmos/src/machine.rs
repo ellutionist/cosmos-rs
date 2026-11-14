@@ -37,7 +37,7 @@ impl Machine {
     /// 创建 VM 并装载内建模块。runtime 可为单线程或多线程，需启用所用的 IO/时间驱动。
     pub fn new(runtime: Handle) -> Result<Self, String> {
         let lua_state = NonNull::new(unsafe { luaL_newstate() })
-            .ok_or_else(|| "创建 Lua VM 失败".to_string())?;
+            .ok_or_else(|| "failed to create Lua VM".to_string())?;
         let machine = Self {
             lua_state,
             local: Some(LocalSet::new()),
@@ -86,7 +86,7 @@ impl Machine {
             return Ok(());
         }
         self.load_with_args(
-            "模块搜索路径",
+            "cosmos.module_search_path",
             "local field, paths = ...; package[field] = paths .. ';' .. package[field]",
             &[field.to_owned(), paths.to_owned()],
         )
@@ -100,7 +100,9 @@ impl Machine {
         let mut context = Context::from_waker(Waker::noop());
         match run.as_mut().poll(&mut context) {
             Poll::Ready(result) => result,
-            Poll::Pending => Err(format!("模块 {name} 的同步定义不能等待异步操作")),
+            Poll::Pending => Err(format!(
+                "synchronous module definitions for {name} cannot await async operations"
+            )),
         }
     }
 
@@ -125,10 +127,10 @@ impl Machine {
         source: &str,
         args: &[String],
     ) -> Result<(), String> {
-        let current =
-            Handle::try_current().map_err(|_| "执行 Lua 需要 Tokio 上下文".to_string())?;
+        let current = Handle::try_current()
+            .map_err(|_| "Lua execution requires a Tokio runtime context".to_string())?;
         if current.id() != self.runtime.id() {
-            return Err("必须在注入的 Tokio runtime 中执行 Lua".to_string());
+            return Err("Lua must execute on the injected Tokio runtime".to_string());
         }
         let thread = self.prepare(name, source, args)?;
         self.local
@@ -146,7 +148,7 @@ impl Machine {
     ) -> Result<(), String> {
         let path = path.as_ref();
         let source = std::fs::read_to_string(path)
-            .map_err(|error| format!("无法读取 {}: {error}", path.display()))?;
+            .map_err(|error| format!("failed to read {}: {error}", path.display()))?;
         self.exec_with_args(&format!("@{}", path.display()), &source, args)
             .await
     }
@@ -157,7 +159,7 @@ impl Machine {
         source: &str,
         args: &[String],
     ) -> Result<LightThread, String> {
-        let name = CString::new(name).map_err(|_| "chunk 名称不能包含 NUL".to_string())?;
+        let name = CString::new(name).map_err(|_| "chunk name must not contain NUL".to_string())?;
         unsafe {
             let lua_state = self.lua_state.as_ptr();
             let top = lua_gettop(lua_state);

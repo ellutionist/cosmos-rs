@@ -427,7 +427,7 @@ assert(uri.encode("a b+c/\0") == "a%20b%2Bc%2F%00")
 local json = require("cosmos.encoding.json")
 assert(json.null == cosmos.null)
 
-local doc = assert(json.decode('{"list":[],"null":null,"text":"中文😀"}'))
+local doc = assert(json.decode('{"list":[],"null":null,"text":"\228\184\173\230\150\135😀"}'))
 assert(doc.null == cosmos.null)
 print(json.encode(doc))              -- {"list":[],"null":null,"text":"中文😀"}
 
@@ -601,7 +601,7 @@ struct HostModule;
 impl Module for HostModule {
     fn register(&self, machine: &mut Machine) -> Result<(), String> {
         machine.register::<Host>();
-        machine.load("宿主定义", "host_ready = true")
+        machine.load("host definitions", "host_ready = true")
     }
 }
 

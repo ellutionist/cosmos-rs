@@ -19,7 +19,7 @@ use crate::tcp::tls::TlsIo;
 /// 让 hyper 的连接池对两种传输只有一种类型
 #[allow(
     clippy::large_enum_variant,
-    reason = "内联连接流，避免每条 TLS 连接新增 Box 分配"
+    reason = "inline connection streams avoid an extra Box allocation per TLS connection"
 )]
 pub(crate) enum Conn {
     Plain(TcpStream),

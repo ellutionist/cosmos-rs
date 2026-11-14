@@ -26,7 +26,7 @@ end
 local ws_opts = nil -- 稍后填 tls 配置
 
 local function ws_handler(conn, req)
-  assert(req:header("upgrade") == "websocket", "ws handler 应看到 upgrade 头")
+  assert(req:header("upgrade") == "websocket", "ws handler must receive the upgrade header")
   if req:path() == "/wsbye" then
     noerr(conn:send("closing"))
     return
@@ -65,73 +65,73 @@ local http_base = "http://127.0.0.1:" .. port
 
 -- 同一端口上的普通 HTTP 请求不受影响
 local r = assert(client:request("GET", http_base .. "/hello"))
-check(r.status == 200 and r.body == "http:/hello", "同端口的普通 HTTP 仍可用")
+check(r.status == 200 and r.body == "http:/hello", "plain HTTP remains available on the same port")
 
 -- 非升级请求打到 /ws：400
 r = assert(client:request("GET", http_base .. "/ws"))
-check(r.status == 400, "非 upgrade 请求 /ws 返回 400")
+check(r.status == 400, "non-upgrade /ws request returns 400")
 
 -- 文本 echo
 local conn = assert(Ws.connect(ws_base .. "/ws"))
-check(conn:state() == 0, "连接后 state() == 0")
+check(conn:state() == 0, "state() == 0 after connect")
 noerr(conn:send("hello"))
 local op, data = conn:receive()
-check(op == "text" and data == "echo:hello", "文本帧 echo")
-noerr(conn:send("中文 ütf8"))
+check(op == "text" and data == "echo:hello", "text frame echo")
+noerr(conn:send("\228\184\173\230\150\135 ütf8"))
 op, data = conn:receive()
-check(op == "text" and data == "echo:中文 ütf8", "UTF-8 文本帧 echo")
+check(op == "text" and data == "echo:\228\184\173\230\150\135 ütf8", "UTF-8 text frame echo")
 
 -- 非法 UTF-8 走 send 应报错，且连接不受影响
 local _, err = conn:send("\255\254")
-check(err ~= nil and err:find("UTF", 1, true) ~= nil, "send 拒绝非法 UTF-8")
+check(err ~= nil and err:find("UTF", 1, true) ~= nil, "send rejects invalid UTF-8")
 noerr(conn:send("still-alive"))
 op, data = conn:receive()
-check(op == "text" and data == "echo:still-alive", "非法 UTF-8 后连接仍可用")
+check(op == "text" and data == "echo:still-alive", "connection remains usable after invalid UTF-8")
 
 -- 二进制帧（任意字节，含 0 与 0xFF）
 local bin = "a\0b\255c\1\2\3"
 noerr(conn:send_binary(bin))
 op, data = conn:receive()
-check(op == "binary" and data == bin, "二进制帧 echo（字节完全一致）")
+check(op == "binary" and data == bin, "binary frame echo preserves every byte")
 
 -- ping 由自动 pong 处理，不影响后续收发
 noerr(conn:ping("p1"))
 noerr(conn:send("after-ping"))
 op, data = conn:receive()
-check(op == "text" and data == "echo:after-ping", "ping 后收发正常")
+check(op == "text" and data == "echo:after-ping", "send and receive work after ping")
 -- 超大 ping payload 被拒绝
 local _, perr = conn:ping(string.rep("x", 126))
-check(perr ~= nil, "ping payload > 125 字节被拒绝")
+check(perr ~= nil, "ping payloads over 125 bytes are rejected")
 
 -- 1MB 消息
 local big = string.rep("x", 1024 * 1024)
 noerr(conn:send(big))
 op, data = conn:receive()
-check(op == "text" and data == "echo:" .. big, "1MB 文本消息往返")
+check(op == "text" and data == "echo:" .. big, "1MB text message round-trip")
 
 -- 客户端主动 close
 noerr(conn:close(1000, "done"))
-check(conn:state() == 1, "close 后 state() == 1")
+check(conn:state() == 1, "state() == 1 after close")
 op, data = conn:receive()
-check(op == nil and data == "closed", "close 后 receive 返回 nil,closed")
+check(op == nil and data == "closed", "receive returns nil, closed after close")
 
 -- 服务端主动关闭：先收到最后一条消息，再拿到 closed
 conn = assert(Ws.connect(ws_base .. "/wsbye"))
 op, data = conn:receive()
-check(op == "text" and data == "closing", "服务端关闭前最后一条消息")
+check(op == "text" and data == "closing", "last message before server close")
 op, data = conn:receive()
-check(op == nil and data == "closed", "服务端关闭后 receive 返回 nil,closed")
-check(conn:state() == 1, "服务端关闭后 state() == 1")
+check(op == nil and data == "closed", "receive returns nil, closed after server close")
+check(conn:state() == 1, "state() == 1 after server close")
 
 -- 客户端超时：服务端不主动说话时应返回 nil,timeout 且连接仍可用
 conn = assert(Ws.connect(ws_base .. "/ws"))
 conn:settimeout(50)
 op, data = conn:receive()
-check(op == nil and data == "timeout", "receive 超时返回 nil,timeout")
+check(op == nil and data == "timeout", "receive timeout returns nil, timeout")
 conn:settimeout(0)
 noerr(conn:send("after-timeout"))
 op, data = conn:receive()
-check(op == "text" and data == "echo:after-timeout", "超时后连接仍可用")
+check(op == "text" and data == "echo:after-timeout", "connection remains usable after timeout")
 noerr(conn:close())
 
 -- 并发连接：4 个协程各跑 10 次 echo
@@ -154,7 +154,7 @@ for i = 1, 4 do
 end
 for i = 1, 4 do
   workers[i]:join()
-  check(results[i] == "ok", "并发连接 worker " .. i)
+  check(results[i] == "ok", "concurrent connection worker " .. i)
 end
 
 -- wss：同一个 HTTP server 开 TLS（ALPN 强制 http/1.1 后走 upgrade）
@@ -168,7 +168,7 @@ local tls_srv = assert(HttpServer.listen("127.0.0.1", 0, handler, { tls = sctx }
 local tls_conn = assert(Ws.connect("wss://localhost:" .. tls_srv:port() .. "/ws", { ctx = cctx }))
 noerr(tls_conn:send("secure"))
 op, data = tls_conn:receive()
-check(op == "text" and data == "echo:secure", "wss 文本 echo")
+check(op == "text" and data == "echo:secure", "wss text echo")
 noerr(tls_conn:close())
 tls_srv:close()
 
@@ -176,14 +176,14 @@ tls_srv:close()
 local hconn = assert(Ws.connect(ws_base .. "/ws", { headers = { ["x-token"] = "abc" } }))
 noerr(hconn:send("hdr"))
 op, data = hconn:receive()
-check(op == "text" and data == "echo:hdr", "带自定义头的握手")
+check(op == "text" and data == "echo:hdr", "handshake with custom headers")
 noerr(hconn:close())
 
 -- 连接失败：端口不通 / scheme 不对
 local bad, berr = Ws.connect("ws://127.0.0.1:1/ws")
-check(bad == nil and berr ~= nil, "连接失败返回 nil,err")
+check(bad == nil and berr ~= nil, "connection failure returns nil, err")
 bad, berr = Ws.connect("http://127.0.0.1/ws")
-check(bad == nil and berr:find("scheme", 1, true) ~= nil, "非 ws scheme 报错")
+check(bad == nil and berr:find("scheme", 1, true) ~= nil, "non-ws schemes are rejected")
 
 -- ws_max_message：超过上限的连接被服务端断开
 local small_srv = assert(HttpServer.listen("127.0.0.1", 0, function(req)
@@ -202,13 +202,13 @@ end, { ws_max_message = 1024 }))
 local sc = assert(Ws.connect("ws://127.0.0.1:" .. small_srv:port() .. "/ws"))
 noerr(sc:send(string.rep("y", 2048)))
 op, data = sc:receive()
-check(op == nil, "超过 ws_max_message 的连接被服务端断开")
+check(op == nil, "server closes connections exceeding ws_max_message")
 sc:close() -- 已被服务端断开，忽略返回
 small_srv:close()
 
 srv:close()
 
 if failures > 0 then
-  error(failures .. " 个用例失败")
+  error(failures .. " checks failed")
 end
 print("all websocket checks passed")

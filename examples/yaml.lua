@@ -7,7 +7,7 @@ assert(yaml.number == require("cosmos.encoding.yaml.number"))
 package.loaded['cosmos.encoding.yaml.number'] = nil
 assert(yaml.number == require("cosmos.encoding.yaml.number"))
 local config = assert(yaml.decode([[
-title: 中文配置
+title: Sample configuration
 enabled: true
 ports: [80, 443]
 empty_array: []
@@ -25,7 +25,7 @@ text: |
   first
   second
 ]]))
-assert(config.title == '中文配置' and config.enabled and config.ports[2] == 443)
+assert(config.title == 'Sample configuration' and config.enabled and config.ports[2] == 443)
 assert(config.nothing == cosmos.null and config.text == 'first\nsecond\n')
 assert(config.service.host == 'localhost' and config.service.port == 5678)
 assert(config.maximum:text() == '18446744073709551615' and config.minimum:text() == '-9223372036854775808')
@@ -47,7 +47,7 @@ assert(yaml.decode(yaml.encode('123')) == '123')
 assert(yaml.decode('text: "${HOME}"').text == '${HOME}')
 assert(json.encode(yaml.decode(yaml.encode(yaml.array()))) == '[]')
 assert(json.encode(yaml.decode(yaml.encode(yaml.object()))) == '{}')
-assert(yaml.decode(yaml.encode('中文\0\1\n\r\t"\\')) == '中文\0\1\n\r\t"\\')
+assert(yaml.decode(yaml.encode('\228\184\173\230\150\135\0\1\n\r\t"\\')) == '\228\184\173\230\150\135\0\1\n\r\t"\\')
 assert(yaml.decode(yaml.encode({1,cosmos.null,3}))[2] == cosmos.null)
 
 for _, invalid in ipairs({'x: [1,','a: 1\na: 2','1: numeric-key','true: boolean-key','? [a,b]\n: complex-key','!unknown value','&a [*a]','*missing','---\na\n---\nb','"\255"','.nan','.inf','1e999','18446744073709551616','-9223372036854775809'}) do
@@ -66,6 +66,6 @@ assert(yaml.decode(string.rep('[',10000)..'0'..string.rep(']',10000)) == nil)
 assert(yaml.decode('base: &a [1]\nrefs: ['..string.rep('*a,',10000)..'*a]') == nil)
 for i=1,25 do
     assert(yaml.decode('bad: [') == nil and yaml.encode(cyclic) == nil)
-    assert(yaml.decode(yaml.encode({value='恢复',array=yaml.array()})).value == '恢复')
+    assert(yaml.decode(yaml.encode({value='\230\129\162\229\164\141',array=yaml.array()})).value == '\230\129\162\229\164\141')
 end
-print('YAML 配置、NULL、精确整数、锚点合并、容器、资源限制与错误恢复验证通过')
+print('YAML configuration, NULL, exact integers, anchor merges, containers, resource limits and error recovery passed')

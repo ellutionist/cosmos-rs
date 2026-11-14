@@ -2,7 +2,7 @@
 name = "cosmos-cli"
 version = "0.1.0"
 edition = "2021"
-description = "基于 cosmos Machine 的 Lua 命令行运行工具"
+description = "Lua command-line runner powered by cosmos Machine"
 
 [features]
 default = ["network", "encoding", "encryption", "database"]

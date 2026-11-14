@@ -7,10 +7,10 @@ local object_meta = {__jsontype='object'}
 json.null = cosmos.null
 local function mark(value, meta)
     if value == nil then value = {} end
-    if type(value) ~= 'table' then return nil, 'JSON 容器必须是 table' end
+    if type(value) ~= 'table' then return nil, 'JSON containers must be tables' end
     local previous = getmetatable(value)
     if previous ~= nil and previous ~= array_meta and previous ~= object_meta then
-        return nil, '表已有自定义元表，请显式设置 __jsontype 标记'
+        return nil, 'table already has a custom metatable; set __jsontype explicitly'
     end
     return setmetatable(value, meta)
 end

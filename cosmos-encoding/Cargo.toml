@@ -3,7 +3,7 @@ name = "cosmos-encoding"
 version = "0.1.0"
 edition = "2021"
 rust-version = "1.89"
-description = "cosmos 的 Rust 原生编解码模块"
+description = "Rust-native encoding and decoding modules for cosmos"
 
 [dependencies]
 cosmos = { path = "../cosmos" }

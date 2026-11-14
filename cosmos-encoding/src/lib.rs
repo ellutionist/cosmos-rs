@@ -30,7 +30,7 @@ impl Module for Encoding {
         machine.register::<toml::Datetime>();
         machine.register::<yaml::Yaml>();
         machine.load(
-            "cosmos.encoding 文本格式",
+            "cosmos.encoding.formats",
             include_str!("../lua/formats.lua"),
         )
     }

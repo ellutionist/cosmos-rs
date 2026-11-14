@@ -20,14 +20,14 @@ struct Options {
 impl Mysql {
     fn parse_url(value: &str) -> Result<Options, String> {
         // 错误不携带原始 URL，避免密码进入日志。
-        let url = Url::parse(value).map_err(|_| "MySQL URL 格式错误")?;
+        let url = Url::parse(value).map_err(|_| "invalid MySQL URL")?;
         if url.scheme() != "mysql" || url.fragment().is_some() {
-            return Err("需要不带 fragment 的 mysql:// URL".into());
+            return Err("expected a mysql:// URL without a fragment".into());
         }
         let host = host(&url)?;
         let database = decode(url.path().strip_prefix('/').unwrap_or(url.path()))?;
         if database.contains('/') {
-            return Err("MySQL URL 只接受一级数据库名".into());
+            return Err("MySQL URL must contain a single database name".into());
         }
         let mut options = Options {
             host,
@@ -50,7 +50,7 @@ impl Mysql {
                         options.ssl_verify = Some(enabled);
                     }
                 }
-                _ => return Err("MySQL URL 包含不支持的选项".into()),
+                _ => return Err("MySQL URL contains unsupported options".into()),
             }
         }
         Ok(options)

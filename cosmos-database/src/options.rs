@@ -11,20 +11,20 @@ pub(super) fn decode(value: &str) -> Result<String, String> {
                 .get(index + 1..index + 3)
                 .is_some_and(|pair| pair.iter().all(u8::is_ascii_hexdigit))
         {
-            return Err("数据库 URL 包含非法百分号转义".into());
+            return Err("database URL contains invalid percent escapes".into());
         }
     }
     let decoded = percent_decode_str(value)
         .decode_utf8()
-        .map_err(|_| "数据库 URL 字段必须是 UTF-8")?;
+        .map_err(|_| "database URL fields must be valid UTF-8")?;
     if decoded.contains('\0') {
-        return Err("数据库 URL 字段不能包含 NUL".into());
+        return Err("database URL fields must not contain NUL".into());
     }
     Ok(decoded.into_owned())
 }
 
 pub(super) fn host(url: &Url) -> Result<String, String> {
-    Ok(match url.host().ok_or("数据库 URL 缺少主机")? {
+    Ok(match url.host().ok_or("database URL is missing a host")? {
         Host::Domain(host) => host.to_owned(),
         Host::Ipv4(host) => host.to_string(),
         Host::Ipv6(host) => host.to_string(),
@@ -35,6 +35,6 @@ pub(super) fn boolean(value: &str) -> Result<bool, String> {
     match value {
         "true" | "1" => Ok(true),
         "false" | "0" => Ok(false),
-        _ => Err("数据库 URL 的 TLS 开关必须是 true/false 或 1/0".into()),
+        _ => Err("database URL TLS option must be true/false or 1/0".into()),
     }
 }

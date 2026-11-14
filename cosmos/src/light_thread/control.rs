@@ -38,7 +38,7 @@ impl Control {
 
     pub(super) fn finish(&self, result: Result<(), String>) {
         let mut stored = self.result.borrow_mut();
-        debug_assert!(stored.is_none(), "轻线程只能完成一次");
+        debug_assert!(stored.is_none(), "a light thread can only complete once");
         *stored = Some(result);
         drop(stored);
         let driver = self.driver.borrow_mut().take();

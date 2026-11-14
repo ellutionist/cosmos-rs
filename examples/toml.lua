@@ -9,7 +9,7 @@ package.loaded['cosmos.encoding.toml.number'] = nil
 assert(toml.number == require("cosmos.encoding.toml.number"))
 
 local config = assert(toml.decode([=[
-title = "中文配置"
+title = "Sample configuration"
 enabled = true
 ports = [80, 443]
 empty_array = []
@@ -27,7 +27,7 @@ name = "one"
 [[workers]]
 name = "two"
 ]=]))
-assert(config.title == "中文配置" and config.enabled and config.ports[2] == 443)
+assert(config.title == "Sample configuration" and config.enabled and config.ports[2] == 443)
 assert(config.database.host == "localhost" and config.workers[2].name == "two")
 assert(json.encode(config.empty_array) == '[]' and json.encode(config.empty_table) == '{}')
 assert(type(config.maximum) == 'userdata' and config.maximum:text() == '9223372036854775807')
@@ -72,6 +72,6 @@ assert(toml.decode('a='..string.rep('[',10000)..'0'..string.rep(']',10000)) == n
 assert(toml.decode(string.rep('a.',10000)..'x=1') == nil)
 for i=1,25 do
     assert(toml.decode('invalid=') == nil and toml.encode(cyclic) == nil)
-    assert(toml.decode(toml.encode({value='恢复',array=toml.array()})).value == '恢复')
+    assert(toml.decode(toml.encode({value='\230\129\162\229\164\141',array=toml.array()})).value == '\230\129\162\229\164\141')
 end
-print('TOML 配置、日期时间、精确整数、容器、深度与错误恢复验证通过')
+print('TOML configuration, datetimes, exact integers, containers, depth limits and error recovery passed')

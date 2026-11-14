@@ -56,7 +56,7 @@ impl PushLua for InvalidContainer {
             table.index(1, ());
             table.finish()
         } else {
-            table.finish_with_metatable("无效元表")
+            table.finish_with_metatable("invalid metatable")
         }
     }
 }
@@ -69,7 +69,7 @@ impl<'lua> FromLua<'lua> for MetaText<'lua> {
             .table()?
             .metatable_field::<&str>(c"text")?
             .map(Self)
-            .ok_or_else(|| "缺少元表文本".into())
+            .ok_or_else(|| "missing metatable text".into())
     }
 }
 
@@ -195,7 +195,7 @@ struct Plugin;
 impl Module for Plugin {
     fn register(&self, machine: &mut Machine) -> Result<()> {
         machine.register::<Api>();
-        machine.load("桥接插件定义", "bridge_ready = true")
+        machine.load("bridge plugin definitions", "bridge_ready = true")
     }
 }
 
@@ -213,40 +213,40 @@ fn external_macros_and_closures_use_only_controlled_bridge_operations() {
         assert(select('#', api.noop()) == 0)
         assert(type(api.empty({})) == 'table')
         assert(not pcall(api.empty, 'bad'))
-        assert(api.borrowed('同步借用') == '同步借用')
+        assert(api.borrowed('\229\144\140\230\173\165\229\128\159\231\148\168') == '\229\144\140\230\173\165\229\128\159\231\148\168')
         assert(api.passthrough('a\0b') == 'a\0b')
-        assert(api.structured({text='表字段借用'}) == '表字段借用')
-        assert(api.borrowed_identity('原样返回借用') == '原样返回借用')
-        assert(api.borrowed_options({text='结构体借用'}) == '结构体借用')
-        local target = {text=string.rep('持有',8192), data=string.rep('\0\255binary',8192)}
+        assert(api.structured({text='\232\161\168\229\173\151\230\174\181\229\128\159\231\148\168'}) == '\232\161\168\229\173\151\230\174\181\229\128\159\231\148\168')
+        assert(api.borrowed_identity('\229\142\159\230\160\183\232\191\148\229\155\158\229\128\159\231\148\168') == '\229\142\159\230\160\183\232\191\148\229\155\158\229\128\159\231\148\168')
+        assert(api.borrowed_options({text='\231\187\147\230\158\132\228\189\147\229\128\159\231\148\168'}) == '\231\187\147\230\158\132\228\189\147\229\128\159\231\148\168')
+        local target = {text=string.rep('\230\140\129\230\156\137',8192), data=string.rep('\0\255binary',8192)}
         local retained, binary = api.borrowed_after_callback(target, function()
             target.text = nil
             target.data = nil
             collectgarbage('collect')
-            for i=1,32 do string.rep('覆写',8192) end
+            for i=1,32 do string.rep('\232\166\134\229\134\153',8192) end
             collectgarbage('collect')
         end)
-        assert(retained == string.rep('持有',8192), '重入删除字段并 GC 后借用仍应有效')
-        assert(binary == string.rep('\0\255binary',8192), '二进制字段借用也应跨重入和 GC 保活，长度=' .. tostring(binary and #binary))
-        local meta = {text=string.rep('元表借用',8192)}
+        assert(retained == string.rep('\230\140\129\230\156\137',8192), 'borrow must remain valid after reentrant field deletion and GC')
+        assert(binary == string.rep('\0\255binary',8192), 'binary field borrow must survive reentry and GC; length=' .. tostring(binary and #binary))
+        local meta = {text=string.rep('\229\133\131\232\161\168\229\128\159\231\148\168',8192)}
         local container = setmetatable({}, meta)
         local retained_meta = api.borrowed_metatable_after_callback(container, function()
             meta.text = nil
             collectgarbage('collect')
-            for i=1,32 do string.rep('覆写',8192) end
+            for i=1,32 do string.rep('\232\166\134\229\134\153',8192) end
         end)
-        assert(retained_meta == string.rep('元表借用',8192))
+        assert(retained_meta == string.rep('\229\133\131\232\161\168\229\128\159\231\148\168',8192))
         local gc = cosmos.thread.spawn(function()
             for i=1,10 do collectgarbage('collect'); cosmos.time.sleep(0) end
         end)
         for _, n in ipairs({8,4096,4097,8192}) do
             local binary = string.rep(string.char(0,128,255), math.floor(n/3)) .. string.rep(string.char(255), n%3)
-            assert(api.binary_echo(binary) == binary, '异步二进制参数不能进行文本解码')
-            local reply = api.echo(string.rep('a',n)..'\0tail', {prefix='前缀', ignored=true, [1]=false})
+            assert(api.binary_echo(binary) == binary, 'async binary arguments must not undergo text decoding')
+            local reply = api.echo(string.rep('a',n)..'\0tail', {prefix='\229\137\141\231\188\128', ignored=true, [1]=false})
             assert(reply.len == n+5)
-            assert(reply.text == '前缀'..string.rep('a',n)..'\0tail')
+            assert(reply.text == '\229\137\141\231\188\128'..string.rep('a',n)..'\0tail')
         end
-        assert(api.echo('默认').text == '默认')
+        assert(api.echo('\233\187\152\232\174\164').text == '\233\187\152\232\174\164')
         assert(gc:join() == nil)
         local next = api.cursor(2)
         assert(next() == string.char(0,255,1))
@@ -254,11 +254,11 @@ fn external_macros_and_closures_use_only_controlled_bridge_operations() {
         assert(next() == string.char(0,255,0))
         assert(select('#', next()) == 1 and next() == nil)
         local ok, err = pcall(api.invalid_field)
-        assert(not ok and err:find('表字段必须恰好输出一个值', 1, true))
+        assert(not ok and err:find('table fields must produce exactly one value', 1, true))
         local ok, err = pcall(api.invalid_container, true)
-        assert(not ok and err:find('数组元素必须恰好输出一个值', 1, true))
+        assert(not ok and err:find('array elements must produce exactly one value', 1, true))
         local ok, err = pcall(api.invalid_container, false)
-        assert(not ok and err:find('元表必须是 table 或 nil', 1, true))
-        assert(api.borrowed('失败后可继续调用') == '失败后可继续调用')
+        assert(not ok and err:find('metatable must be a table or nil', 1, true))
+        assert(api.borrowed('\229\164\177\232\180\165\229\144\142\229\143\175\231\187\167\231\187\173\232\176\131\231\148\168') == '\229\164\177\232\180\165\229\144\142\229\143\175\231\187\167\231\187\173\232\176\131\231\148\168')
     "#)).unwrap();
 }

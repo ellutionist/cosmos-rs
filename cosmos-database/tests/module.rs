@@ -18,7 +18,7 @@ fn database_registration_and_url_options_are_isolated() {
         assert(mysql == cosmos.database.mysql and mysql.null == cosmos.null)
         local options = assert(mysql.parse_url('mysql://u%40ser:p%3Ass@[::1]:3307/%E6%B5%8B%E8%AF%95?charset=utf8mb4&ssl=true&ssl_verify=false'))
         assert(options.host == '::1' and options.port == 3307)
-        assert(options.user == 'u@ser' and options.password == 'p:ss' and options.database == '测试')
+        assert(options.user == 'u@ser' and options.password == 'p:ss' and options.database == '\230\181\139\232\175\149')
         assert(options.ssl and not options.ssl_verify and options.charset == 'utf8mb4')
         assert(mysql.parse_url('mysql://localhost').port == 3306)
         for _, url in ipairs({'http://localhost/db', 'mysql:///db', 'mysql://localhost/a/b',
@@ -60,9 +60,9 @@ fn database_registration_and_url_options_are_isolated() {
 }
 
 #[test]
-#[ignore = "需要显式设置 COSMOS_MYSQL_URL，脚本只操作会话临时表"]
+#[ignore = "requires COSMOS_MYSQL_URL; the script only modifies session temporary tables"]
 fn mysql_example_against_explicit_database() {
-    let url = std::env::var("COSMOS_MYSQL_URL").expect("请设置 COSMOS_MYSQL_URL");
+    let url = std::env::var("COSMOS_MYSQL_URL").expect("set COSMOS_MYSQL_URL");
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()

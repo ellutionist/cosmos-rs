@@ -20,20 +20,22 @@ use cosmos_network::Network;
 #[command(
     name = "cosmos-cli",
     version,
-    about = "使用 cosmos Machine 运行 Lua 脚本"
+    about = "Run Lua scripts with a cosmos Machine"
 )]
 struct Args {
     /// 前置 Lua 模块搜索模板（如 ./lib/?.lua;./lib/?/init.lua），可重复指定
-    #[arg(long, value_name = "PATH")]
+    #[arg(long, value_name = "PATH", help = "Prepend Lua module search templates (e.g. ./lib/?.lua;./lib/?/init.lua); may be repeated", long_help = None)]
     path: Vec<String>,
 
     /// 前置 C 扩展搜索模板（如 ./lib/?.so），可重复指定或用分号分隔
-    #[arg(long, value_name = "PATH")]
+    #[arg(long, value_name = "PATH", help = "Prepend C module search templates (e.g. ./lib/?.so); repeat or separate with semicolons", long_help = None)]
     cpath: Vec<String>,
 
     /// Lua 脚本路径（- 表示标准输入），后续参数通过 ... 传给脚本
     #[arg(
         value_names = ["SCRIPT", "ARG"],
+        help = "Lua script path (- for stdin); remaining arguments are passed to the script via ...",
+        long_help = None,
         required = true,
         num_args = 1..,
         trailing_var_arg = true
@@ -49,7 +51,7 @@ fn main() -> ExitCode {
         .map(|arg| arg.to_str().map(str::to_owned))
         .collect::<Option<Vec<_>>>();
     let Some(script_args) = script_args else {
-        eprintln!("脚本参数必须是有效的 UTF-8 字符串");
+        eprintln!("script arguments must be valid UTF-8 strings");
         return ExitCode::from(2);
     };
     let source = if script == Path::new("-") {
@@ -60,14 +62,14 @@ fn main() -> ExitCode {
     let source = match source {
         Ok(source) => source,
         Err(error) => {
-            eprintln!("无法读取 {}: {error}", script.display());
+            eprintln!("failed to read {}: {error}", script.display());
             return ExitCode::from(2);
         }
     };
     match run(&script, &source, &script_args, &args.path, &args.cpath) {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
-            eprintln!("执行失败: {error}");
+            eprintln!("execution failed: {error}");
             ExitCode::FAILURE
         }
     }
@@ -83,7 +85,7 @@ fn run(
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
-        .map_err(|error| format!("无法创建 Tokio runtime: {error}"))?;
+        .map_err(|error| format!("failed to create Tokio runtime: {error}"))?;
     let mut machine = Machine::new(runtime.handle().clone())?;
     machine.prepend_path(&path.join(";"))?;
     machine.prepend_cpath(&cpath.join(";"))?;

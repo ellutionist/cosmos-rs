@@ -27,10 +27,13 @@ pub struct Call<'lua> {
 
 impl Call<'_> {
     pub fn argument(&self, index: usize) -> Value<'_> {
-        assert!(index > 0, "参数编号从一开始");
+        assert!(index > 0, "argument indices start at 1");
         unsafe {
-            Value::new(self.lua_state, i32::try_from(index).expect("参数编号过大"))
-                .scoped(&self.scope)
+            Value::new(
+                self.lua_state,
+                i32::try_from(index).expect("argument index is too large"),
+            )
+            .scoped(&self.scope)
         }
     }
 
@@ -50,7 +53,10 @@ impl Call<'_> {
         F: Future + 'static,
         F::Output: PushLua,
     {
-        assert!(self.pending.is_none(), "一次调用只能挂起一个操作");
+        assert!(
+            self.pending.is_none(),
+            "a call can only suspend one operation"
+        );
         self.pending = Some(Box::pin(future));
         0
     }

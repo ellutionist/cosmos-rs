@@ -154,7 +154,7 @@ mod tests {
     #[test]
     #[allow(
         clippy::await_holding_refcell_ref,
-        reason = "此回归专门验证 userdata 借用跨 await 保活，并在完成后释放"
+        reason = "this regression verifies userdata borrows survive await and are released on completion"
     )]
     fn pending_operation_pushes_only_when_ready_and_releases_borrow() {
         unsafe {
@@ -208,7 +208,7 @@ mod tests {
             let mut operations: Vec<PendingFuture> = vec![
                 Box::pin(async {}),
                 Box::pin(async { None::<i64> }),
-                Box::pin(async { Err::<(), _>("失败") }),
+                Box::pin(async { Err::<(), _>("failure") }),
             ];
             for (op, expected) in operations.iter_mut().zip([0, 1, 2]) {
                 lua_settop(lua_state, 0);
@@ -223,7 +223,7 @@ mod tests {
             }
             assert_eq!(
                 String::from_lua(crate::userdata::Value::new(lua_state, 2)).unwrap(),
-                "失败"
+                "failure"
             );
             drop(operations);
             lua_close(lua_state);

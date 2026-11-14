@@ -49,7 +49,7 @@ fn tcp_iterator_survives_binary_data_timeout_and_cancelled_calls() {
             local waiting = cosmos.thread.spawn(function()
                 started = true
                 iter()
-                error("已取消的迭代调用不能恢复")
+                error("cancelled iterator calls must not resume")
             end)
             while not started do cosmos.time.sleep(0) end
             waiting:kill()
@@ -57,7 +57,7 @@ fn tcp_iterator_survives_binary_data_timeout_and_cancelled_calls() {
             assert(cancelled:find("cancelled", 1, true))
             collectgarbage("collect")
             assert(writer:write("N") == 1)
-            assert(iter() == "after", "取消后应已释放迭代器的独占借用")
+            assert(iter() == "after", "cancellation must release the exclusive iterator borrow")
             local tail, closed, rest = iter()
             assert(tail == nil and closed == "closed" and rest == "tail")
             writer:close()

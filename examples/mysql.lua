@@ -1,7 +1,7 @@
 -- 从环境变量或脚本参数读取连接 URL，不在仓库中保存数据库凭据。
 local mysql = require("cosmos.database.mysql")
 local url = (...) or os.getenv("COSMOS_MYSQL_URL")
-assert(url, "请设置 COSMOS_MYSQL_URL 或传入 mysql:// URL")
+assert(url, "set COSMOS_MYSQL_URL or pass a mysql:// URL")
 assert(require("cosmos.database").mysql == mysql and mysql.null == cosmos.null)
 local opts = assert(mysql.parse_url(url))
 opts.timeout, opts.pool_size, opts.idle_timeout = 2000, 2, 60000
@@ -11,9 +11,9 @@ assert(db:get_reused_times() == 0)
 local info = assert(db:query("SELECT VERSION() AS version, DATABASE() AS name, CONNECTION_ID() AS id"))[1]
 assert(info.name == opts.database)
 local id = info.id
-local row = assert(db:query("SELECT NULL AS null_value, CAST(18446744073709551615 AS UNSIGNED) AS big, '中文' AS text"))[1]
-assert(row.null_value == cosmos.null and row.big == "18446744073709551615" and row.text == "中文")
-local binary = "引号'反斜线\\换行\n\0\255"
+local row = assert(db:query("SELECT NULL AS null_value, CAST(18446744073709551615 AS UNSIGNED) AS big, '\228\184\173\230\150\135' AS text"))[1]
+assert(row.null_value == cosmos.null and row.big == "18446744073709551615" and row.text == "\228\184\173\230\150\135")
+local binary = "\229\188\149\229\143\183'\229\143\141\230\150\156\231\186\191\\\230\141\162\232\161\140\n\0\255"
 assert(assert(db:query("SELECT " .. mysql.quote_sql_str(binary) .. " AS value"))[1].value == binary)
 
 -- 只创建会话临时表，不修改现有业务表。
@@ -40,7 +40,7 @@ assert(db:send_query("SELECT 3 AS n"))
 assert(client:release(db) == nil)
 assert(tonumber(db:read_result()[1].n) == 3)
 assert(db:set_keepalive())
-assert(db:query("SELECT 99") == nil, "归还后的旧句柄必须失效")
+assert(db:query("SELECT 99") == nil, "returned handles must be invalidated")
 local reused = assert(client:connect())
 assert(reused:get_reused_times() == 1)
 assert(assert(reused:query("SELECT CONNECTION_ID() AS id"))[1].id == id)
@@ -116,4 +116,4 @@ assert(after:get_reused_times() == 0)
 assert(assert(after:query("SELECT CONNECTION_ID() AS id"))[1].id ~= before_id)
 assert(after:close())
 expiring:close()
-print("MySQL 认证、查询、NULL、大整数、多结果集、事务、连接池、超时与取消验证通过：", info.version, info.name)
+print("MySQL authentication, queries, NULL, large integers, results, transactions, pools, timeouts and cancellation passed: ", info.version, info.name)

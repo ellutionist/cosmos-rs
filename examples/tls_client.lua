@@ -38,7 +38,7 @@ local c3 = assert(Tls.connect("localhost", port, 2000, pctx))
 local r3, w3 = c3:split()
 local payload = string.rep(string.char(0,128,255,1), 2048) .. "\0tail"
 w3:write(payload .. "\n")
-assert(r3:receive("*l") == payload, "reload 后的二进制长包应原样回显")
+assert(r3:receive("*l") == payload, "binary long-packet echo after reload must remain unchanged")
 w3:close()
 print("reload client ok")
 

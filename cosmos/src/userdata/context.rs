@@ -51,9 +51,9 @@ impl<'lua> Value<'lua> {
     /// 表字段可能在重入回调中被删除；借出的字符串必须独立保活到调用结束。
     pub(super) unsafe fn anchor_borrow(self) -> Result<(), String> {
         if self.temporary {
-            let scope = self
-                .scope
-                .ok_or_else(|| "表字段借用需要有效的调用作用域".to_string())?;
+            let scope = self.scope.ok_or_else(|| {
+                "borrowing a table field requires an active call scope".to_string()
+            })?;
             lua_pushvalue(self.lua_state, self.index);
             scope
                 .anchors
@@ -84,12 +84,15 @@ impl<'lua> Value<'lua> {
 
     /// 读取相邻返回值，偏移从零开始；不向调用方暴露实际栈索引。
     pub fn offset(self, offset: usize) -> Self {
-        assert!(self.index > 0 || offset == 0, "捕获状态不能读取相邻值");
+        assert!(
+            self.index > 0 || offset == 0,
+            "captured state cannot read adjacent values"
+        );
         Self {
             index: self
                 .index
-                .checked_add(i32::try_from(offset).expect("返回值偏移过大"))
-                .expect("返回值偏移溢出"),
+                .checked_add(i32::try_from(offset).expect("return value offset is too large"))
+                .expect("return value offset overflow"),
             ..self
         }
     }
@@ -165,7 +168,7 @@ impl<'lua> TableReader<'lua> {
         let lua_state = self.value.lua_state;
         let _restore = StackRestore::new(lua_state);
         if lua_checkstack(lua_state, 3) == 0 {
-            return Err("Lua 栈空间不足".into());
+            return Err("insufficient Lua stack space".into());
         }
         if lua_getmetatable(lua_state, self.value.index) == 0 {
             return Ok(None);
@@ -216,7 +219,7 @@ impl<'lua> TableReader<'lua> {
         let lua_state = self.value.lua_state;
         let _restore = StackRestore::new(lua_state);
         if lua_checkstack(lua_state, 3) == 0 {
-            return Err("Lua 栈空间不足".into());
+            return Err("insufficient Lua stack space".into());
         }
         lua_pushnil(lua_state);
         while lua_next(lua_state, self.value.index) != 0 {
@@ -273,11 +276,15 @@ impl<'lua> Output<'lua> {
     fn new_table(&mut self, elements: usize, fields: usize) -> TableWriter<'_, 'lua> {
         unsafe {
             let restore = StackRestore::new(self.lua_state);
-            assert_ne!(lua_checkstack(self.lua_state, 4), 0, "Lua 栈空间不足");
+            assert_ne!(
+                lua_checkstack(self.lua_state, 4),
+                0,
+                "insufficient Lua stack space"
+            );
             lua_createtable(
                 self.lua_state,
-                i32::try_from(elements).expect("数组元素过多"),
-                i32::try_from(fields).expect("表字段过多"),
+                i32::try_from(elements).expect("too many array elements"),
+                i32::try_from(fields).expect("too many table fields"),
             );
             TableWriter {
                 output: self,
@@ -297,19 +304,27 @@ impl TableWriter<'_, '_> {
     /// # Safety
     /// value 遵守 PushLua 契约，输出一个值；下标从 1 开始。
     pub unsafe fn index<T: PushLua>(&mut self, index: usize, value: T) {
-        let index = i32::try_from(index).expect("数组下标过大");
-        assert!(index > 0, "数组下标从 1 开始");
-        assert_eq!(self.output.push(value), 1, "数组元素必须恰好输出一个值");
+        let index = i32::try_from(index).expect("array index is too large");
+        assert!(index > 0, "array indices start at 1");
+        assert_eq!(
+            self.output.push(value),
+            1,
+            "array elements must produce exactly one value"
+        );
         lua_rawseti(self.output.lua_state, -2, index);
     }
 
     /// # Safety
     /// value 遵守 PushLua 契约，输出一张元表或 nil。设置元表后立即结束构造，避免触发字段元方法。
     pub unsafe fn finish_with_metatable<T: PushLua>(self, value: T) -> i32 {
-        assert_eq!(self.output.push(value), 1, "元表必须恰好输出一个值");
+        assert_eq!(
+            self.output.push(value),
+            1,
+            "metatables must produce exactly one value"
+        );
         assert!(
             matches!(lua_type(self.output.lua_state, -1), LUA_TTABLE | LUA_TNIL),
-            "元表必须是 table 或 nil"
+            "metatable must be a table or nil"
         );
         lua_setmetatable(self.output.lua_state, -2);
         self.finish()
@@ -318,7 +333,7 @@ impl TableWriter<'_, '_> {
     /// value 遵守 PushLua 契约；非单值输出会被拒绝并撤销表构造。
     pub unsafe fn field<T: PushLua>(&mut self, name: &CStr, value: T) {
         let count = self.output.push(value);
-        assert_eq!(count, 1, "表字段必须恰好输出一个值");
+        assert_eq!(count, 1, "table fields must produce exactly one value");
         lua_setfield(self.output.lua_state, -2, name.as_ptr());
     }
 
@@ -329,7 +344,11 @@ impl TableWriter<'_, '_> {
     pub unsafe fn entry<T: PushLua>(&mut self, name: &str, value: T) {
         let lua_state = self.output.lua_state;
         lua_pushlstring(lua_state, name.as_ptr().cast(), name.len());
-        assert_eq!(self.output.push(value), 1, "表字段必须恰好输出一个值");
+        assert_eq!(
+            self.output.push(value),
+            1,
+            "table fields must produce exactly one value"
+        );
         lua_settable(lua_state, -3);
     }
 

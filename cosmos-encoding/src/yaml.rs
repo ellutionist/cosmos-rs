@@ -68,7 +68,7 @@ fn check_scalars(text: &str) -> Result<(), String> {
             Event::Scalar(text, style, anchor, tag) => {
                 nodes += 1;
                 if nodes > MAX_NODES || anchor > 10_000 {
-                    return Err("YAML 节点或锚点数量超限".into());
+                    return Err("YAML node or anchor limit exceeded".into());
                 }
                 let typed = tag.as_ref().is_some_and(|tag| {
                     tag.suffix_in_namespace("tag:yaml.org,2002:")
@@ -101,28 +101,32 @@ fn check_scalars(text: &str) -> Result<(), String> {
                         .split('_')
                         .all(|part| !part.is_empty() && part.chars().all(|ch| ch.is_digit(radix)))
                 {
-                    let magnitude = u128::from_str_radix(&digits.replace('_', ""), radix)
-                        .map_err(|_| "YAML 整数超出 i64/u64 范围，请使用字符串")?;
+                    let magnitude =
+                        u128::from_str_radix(&digits.replace('_', ""), radix).map_err(|_| {
+                            "YAML integer is out of i64/u64 range; use a string instead"
+                        })?;
                     let maximum = if negative {
                         (i64::MAX as u128) + 1
                     } else {
                         u64::MAX as u128
                     };
                     if magnitude > maximum {
-                        return Err("YAML 整数超出 i64/u64 范围，请使用字符串".into());
+                        return Err(
+                            "YAML integer is out of i64/u64 range; use a string instead".into()
+                        );
                     }
                 }
             }
             Event::SequenceStart(_, anchor, _) | Event::MappingStart(_, anchor, _) => {
                 nodes += 1;
                 if anchor > 10_000 {
-                    return Err("YAML 锚点数量超限".into());
+                    return Err("YAML anchor limit exceeded".into());
                 }
             }
             _ => {}
         }
         if nodes > MAX_NODES {
-            return Err("YAML 节点数超限".into());
+            return Err("YAML node limit exceeded".into());
         }
     }
     Ok(())
@@ -139,7 +143,9 @@ impl Serialize for YamlValue<'_> {
             DocumentValue::Unsigned(value) => serializer.serialize_u64(*value),
             DocumentValue::Float(value) => {
                 if !value.is_finite() {
-                    return Err(serde::ser::Error::custom("YAML 不支持非有限浮点数"));
+                    return Err(serde::ser::Error::custom(
+                        "YAML does not support non-finite floats",
+                    ));
                 }
                 serializer.serialize_f64(*value)
             }
@@ -196,7 +202,7 @@ impl<'de> DeserializeSeed<'de> for Seed<'_> {
 impl<'de> Visitor<'de> for Seed<'_> {
     type Value = DocumentValue;
     fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("Lua 可表示的 YAML 值")
+        formatter.write_str("a YAML value representable in Lua")
     }
     fn visit_unit<E: de::Error>(self) -> Result<Self::Value, E> {
         Ok(DocumentValue::Null)
@@ -240,7 +246,7 @@ impl<'de> Visitor<'de> for Seed<'_> {
     }
     fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Self::Value, A::Error> {
         if self.depth >= MAX_DEPTH {
-            return Err(de::Error::custom("文档嵌套深度超限"));
+            return Err(de::Error::custom("document nesting depth limit exceeded"));
         }
         let mut values = Vec::new();
         while let Some(value) = seq.next_element_seed(Seed {
@@ -253,7 +259,7 @@ impl<'de> Visitor<'de> for Seed<'_> {
     }
     fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
         if self.depth >= MAX_DEPTH {
-            return Err(de::Error::custom("文档嵌套深度超限"));
+            return Err(de::Error::custom("document nesting depth limit exceeded"));
         }
         let mut values = Vec::new();
         while let Some(key) = map.next_key_seed(Key(self.budget))? {
@@ -277,7 +283,7 @@ impl<'de> DeserializeSeed<'de> for Key<'_> {
 impl Visitor<'_> for Key<'_> {
     type Value = String;
     fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("字符串映射键")
+        formatter.write_str("a string mapping key")
     }
     fn visit_str<E: de::Error>(self, value: &str) -> Result<String, E> {
         self.0.bytes(value.len()).map_err(E::custom)?;

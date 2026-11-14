@@ -61,7 +61,7 @@ impl Module for ProbeModule {
             MODULE_TASK_READY.with(|ready| ready.set(true));
         }));
         machine.register::<Probe>();
-        machine.load("测试插件", "plugin_ready = true")
+        machine.load("test plugin", "plugin_ready = true")
     }
 }
 
@@ -152,7 +152,7 @@ fn machines_are_isolated_and_closing_one_does_not_leak_anothers_lua_values() {
         local function take() assert(queue:recv() == weak[1]) end
         take()
         collectgarbage("collect")
-        assert(weak[1] == nil, "关闭另一个 VM 后 registry 引用泄漏")
+        assert(weak[1] == nil, "registry reference leaked after closing another VM")
     "#,
         ))
         .unwrap();
@@ -193,8 +193,8 @@ fn execution_recovers_after_errors_and_background_tasks_survive_between_calls() 
     runtime
         .block_on(machine.exec_with_args(
             "=args",
-            "local a,b=...; assert(a=='中文' and b=='a\\0b')",
-            &["中文".into(), "a\0b".into()],
+            "local a,b=...; assert(a=='\\228\\184\\173\\230\\150\\135' and b=='a\\0b')",
+            &["\u{4e2d}\u{6587}".into(), "a\0b".into()],
         ))
         .unwrap();
     runtime.block_on(async {
@@ -358,7 +358,7 @@ fn drop_cancels_borrowing_tasks_before_vm_finalizers_and_old_callbacks_stay_clos
     assert!(runtime
         .block_on(callback.call::<_, ()>(()))
         .unwrap_err()
-        .contains("已关闭"));
+        .contains("closed"));
     drop(callback);
     runtime
         .block_on(another.exec("cosmos.time.sleep(0)"))
