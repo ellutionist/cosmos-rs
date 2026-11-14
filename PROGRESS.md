@@ -956,3 +956,22 @@
 - 按用户明确要求，将 TCP/UDP 的客户端、服务端文档整理、TCP 正确 split 调用说明、独立 UDP 示例及交接记录一并提交，提交信息使用英文，不 push。
 - 提交前核对全部差异与新增脚本，差异检查通过；沿用已完成的 README TCP/UDP 双进程验证、新 UDP 示例及原 TCP 并发脚本验证结果，没有新的行为修改，不重复执行已通过的检查。
 - 后续能力继续按既有待做记录安排，本次不扩展实现范围。
+
+## 2026-11-14 Encoding 支持 TOML / YAML
+
+- 按用户要求新增 cosmos.encoding.toml / cosmos.encoding.yaml，随 Encoding 与 CLI 的 encoding feature 安装，不新增默认插件或格式开关。使用 Rust toml 1.2.1 与 serde-saphyr 1.3.0，新增依赖不包含 C YAML 库；依据依赖要求明确 Encoding 需要 Rust 1.89+。
+- 将 JSON 中已有的 Lua 输入、表形状识别、循环引用检查、UTF-8 与预算、容器输出提到私有 value 模块，由三种文本格式复用；JSON 保留 sonic-rs、lossless_numbers 与原 number 路径。未修改 cosmos 核心、FFI 或过程宏，也没有向宿主公开中间表示。
+- TOML 支持嵌套表、数组、表数组和四类日期时间。根必须是字符串键表，不支持 null；日期时间用 toml.datetime userdata 保持类型，text / tostring 读取，new 构造。普通字符串不隐式变成日期。整数限制 i64，普通小数为 f64，支持 TOML 的 inf / nan。
+- YAML 支持字符串键映射、数组、NULL、锚点/别名与合并键，布尔值使用严格模式，yes / off 保持字符串；重复键、非字符串键、自定义标签、多文档、循环别名和非有限数返回 nil+err。不启用文件包含或环境替换。普通小数使用 f64，整数限 i64/u64。
+- 三种格式共享空数组/空对象元表与精确整数 userdata，安全整数返回 Lua number，大整数保留原值；toml.number / yaml.number 为 json.number 的显式类型表别名，父表字段、require 入口和清除缓存后的 require 保持一致。新格式的精确数字 userdata 仅接受受支持范围内的整数，不静默舍入 JSON 精确小数。
+- 解析测试暴露两个库的边界：TOML 通过 Serde Value 读取时会把普通 $__toml_private_datetime 键当成日期时间，改用原生 DeTable / DeValue；YAML 在 deserialize_any 中可能将超范围整数回退到 f64，改为先以 granit 事件检查原始整数字面量及显式 int 标签，再执行受限 Serde 读取。原生 AST 与事件均不经过 JSON 文本中转。
+- 保持 64 层容器、100 万节点、64 MiB 输入/输出与转换字节预算，YAML 另限制锚点/别名各 10000、重放事件 100 万；保留 TOML 原生递归保护。普通线程栈验证最深有效容器、超限与万层输入拒绝、循环/超限别名，以及错误后原 VM 继续可用，没有扩大测试线程栈。
+- 新增 examples/toml.lua / yaml.lua，覆盖配置往返、UTF-8 / 控制字符、空值/空容器、大整数、日期时间、锚点合并、特殊键、资源限制和重复安装。抽取 README 两段代码并实际执行；JSON、encoding、null 实际示例回归通过。
+- 工作区 63 项普通测试、5 项编译失败文档检查与严格 Clippy 通过；仅 encoding / 仅 Redis / 全关 CLI 分别通过 9 / 10 / 9 项测试，新增格式入口随 feature 正确启停。仅 encoding CLI 实际运行 TOML / YAML 通过，仅 Redis 的普通依赖树不含 Encoding、sonic、toml、serde-saphyr，已恢复默认 CLI 构建；新增 require 别名重载回归与 Encoding 严格 Clippy 通过。
+- 根 README 按既有格式添加带注释用法，类型范围和限制放 Encoding README，HANDOFF 同步更新。输出重新生成文本，不保留注释和原排版；性能基准仍待后续安排。本轮不自动提交或推送。
+
+## 2026-11-14 提交 TOML / YAML 支持
+
+- 按用户明确要求，将 TOML/YAML 模块、公共文档值转换、依赖与 Rust 版本要求、示例、回归和文档一并提交，提交信息使用英文，不 push。
+- 提交前核对全部差异和新增文件，差异检查通过；沿用已通过的工作区 63 项测试、5 项编译失败检查、严格 Clippy、CLI feature 及依赖隔离、实际示例与 README 代码验证。本轮没有行为修改，不重复执行已通过的回归。
+- 后续保持现有类型与资源边界，性能测量及其他待做按用户安排推进。

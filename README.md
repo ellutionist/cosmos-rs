@@ -20,6 +20,8 @@
   - [WebSocket：cosmos.network.websocket](#websocketcosmosnetworkwebsocket)
 - [编解码插件](#编解码插件)
   - [JSON：cosmos.encoding.json](#jsoncosmosencodingjson)
+  - [TOML：cosmos.encoding.toml](#tomlcosmosencodingtoml)
+  - [YAML：cosmos.encoding.yaml](#yamlcosmosencodingyaml)
 - [加密插件](#加密插件)
 - [数据库插件](#数据库插件)
   - [MySQL：cosmos.database.mysql](#mysqlcosmosdatabasemysql)
@@ -61,7 +63,7 @@ cosmos.sync.notify.new():wait() -- 常驻：主协程等待，请求协程在后
 
 ## 快速开始
 
-需要 Rust / Cargo、C 编译器和 `make`（LuaJIT 在构建时自动编译）：
+默认配置需要 Rust 1.89+ / Cargo、C 编译器和 `make`（LuaJIT 在构建时自动编译）：
 
 ```sh
 cargo build --release
@@ -403,7 +405,7 @@ wss 使用 `ctx` 指定 TLS 上下文（缺省公有根，ALPN 强制 http/1.1�
 
 ## 编解码插件
 
-`cosmos-encoding` 提供 `cosmos.encoding.*`，输入输出均支持二进制字符串：
+`cosmos-encoding` 提供 `cosmos.encoding.*`，支持二进制编解码和 JSON、TOML、YAML 文本转换：
 
 ```lua
 local hex    = require("cosmos.encoding.hex")
@@ -419,7 +421,7 @@ assert(uri.encode("a b+c/\0") == "a%20b%2Bc%2F%00")
 
 ### JSON：cosmos.encoding.json
 
-基于 sonic-rs，二进制安全。解码的 `null` 是 `cosmos.null`；空容器与精确数字可以显式指定：
+基于 sonic-rs，文本与字符串值使用 UTF-8。解码的 `null` 是 `cosmos.null`；空容器与精确数字可以显式指定：
 
 ```lua
 local json = require("cosmos.encoding.json")
@@ -442,6 +444,47 @@ local precise = assert(json.decode('[1,1.2300,1e+03]', { lossless_numbers = true
 ```
 
 编码失败（循环引用、函数值、非法 UTF-8 等）返回 `nil, 错误串`；解码非法输入同样返回 `nil, err`。读取元表标签和表字段都不会执行用户元方法。
+
+### TOML：cosmos.encoding.toml
+
+用于配置文档，支持嵌套表、数组、表数组与日期时间：
+
+```lua
+local toml = require("cosmos.encoding.toml")
+
+local config = assert(toml.decode([=[
+name = "cosmos"
+ports = [8080, 8081]
+updated = 2026-11-14T12:34:56+08:00
+[database]
+host = "localhost"
+]=]))
+config.database.port = 3306
+print(config.updated:text())        -- 日期时间保留类型，再次编码仍为日期时间
+print(assert(toml.encode(config)))
+```
+
+根值必须是字符串键表，TOML 不支持 `cosmos.null`。大整数以精确数字 userdata 返回，可用 `toml.number.new(text)` 构造；日期时间可用 `toml.datetime.new(text)` 构造。空数组与空表使用 `toml.array()` / `toml.object()`，失败返回 `nil, err`。完整示例见 [toml.lua](examples/toml.lua)。
+
+### YAML：cosmos.encoding.yaml
+
+支持配置映射、数组、空值、锚点与合并键：
+
+```lua
+local yaml = require("cosmos.encoding.yaml")
+
+local config = assert(yaml.decode([[
+name: cosmos
+enabled: true
+ports: [8080, 8081]
+optional: null
+]]))
+assert(config.optional == cosmos.null)
+config.workers = 4
+print(assert(yaml.encode(config)))
+```
+
+每次解码一份文档，映射键必须是字符串；`yaml.array()` / `yaml.object()` 标记空容器。大整数保留为精确数字，`yes` / `off` 等保持字符串；重复键、不支持的标签、循环别名与超限输入返回 `nil, err`。完整用法见 [yaml.lua](examples/yaml.lua)，类型范围与限制见 [encoding 文档](cosmos-encoding/README.md)。
 
 ## 加密插件
 
@@ -674,7 +717,7 @@ C 扩展的调用是同步的：阻塞操作会阻塞 `Machine` 所在线程，�
 | Feature | 插件 | 依赖 |
 | --- | --- | --- |
 | `network` | 网络（TCP / UDP / TLS / socket / HTTP / WebSocket） | — |
-| `encoding` | 编解码（hex / base64 / uri / json） | — |
+| `encoding` | 编解码（hex / base64 / uri / json / toml / yaml） | — |
 | `encryption` | 加密（sha1 / sha256 / sha512 / ed25519 / rsa） | — |
 | `database` | 数据库（MySQL + Redis） | `mysql` + `redis` |
 | `mysql` | 仅 MySQL | `network` + `encoding` + `encryption` |

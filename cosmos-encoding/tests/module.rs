@@ -35,3 +35,22 @@ fn json_preserves_shapes_null_and_numbers_and_recovers_after_errors() {
     machine.add_module(Encoding).unwrap();
     runtime.block_on(machine.exec("assert(cosmos.encoding.json.encode(saved_json_array) == '[]'); assert(cosmos.encoding.json.encode(saved_json_number) == '18446744073709551615')")).unwrap();
 }
+
+#[test]
+fn toml_preserves_types_and_yaml_handles_bounded_documents() {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let mut machine = Machine::new(runtime.handle().clone()).unwrap();
+    machine.add_module(Encoding).unwrap();
+    runtime
+        .block_on(machine.exec(include_str!("../../examples/toml.lua")))
+        .unwrap();
+    runtime
+        .block_on(machine.exec(include_str!("../../examples/yaml.lua")))
+        .unwrap();
+    runtime.block_on(machine.exec("saved_toml = cosmos.encoding.toml.decode('array=[]\\nwhen=2026-11-14'); saved_yaml = cosmos.encoding.yaml.decode('[null, {}, []]')")).unwrap();
+    machine.add_module(Encoding).unwrap();
+    runtime.block_on(machine.exec("assert(cosmos.encoding.toml.encode(saved_toml)); assert(cosmos.encoding.yaml.encode(saved_yaml)); assert(cosmos.encoding.json.encode(saved_yaml) == '[null,{},[]]')")).unwrap();
+}

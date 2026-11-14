@@ -1,7 +1,10 @@
-//! 编解码插件，通过 Machine 注入，输入输出均支持二进制字符串。
+//! 二进制编解码与结构化文本转换插件，通过 Machine 注入。
 #![warn(unreachable_pub)]
 
 mod json;
+mod toml;
+mod value;
+mod yaml;
 
 use base64::engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD};
 use base64::Engine;
@@ -22,7 +25,14 @@ impl Module for Encoding {
         machine.register::<Hex>();
         machine.register::<Base64>();
         machine.register::<Uri>();
-        json::register(machine)
+        json::register(machine)?;
+        machine.register::<toml::Toml>();
+        machine.register::<toml::Datetime>();
+        machine.register::<yaml::Yaml>();
+        machine.load(
+            "cosmos.encoding 文本格式",
+            include_str!("../lua/formats.lua"),
+        )
     }
 }
 

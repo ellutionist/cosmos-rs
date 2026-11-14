@@ -290,10 +290,18 @@ fn codec_and_encryption_registration_follow_features() {
             assert(json == encoding.json and json.null == cosmos.null)
             assert(json.encode(json.decode('[]')) == '[]')
             assert(json.encode(json.decode('[1.2300]', {{lossless_numbers=true}})) == '[1.2300]')
+            local toml = require("cosmos.encoding.toml")
+            local yaml = require("cosmos.encoding.yaml")
+            assert(toml == encoding.toml and yaml == encoding.yaml)
+            assert(toml.decode("enabled=true").enabled)
+            assert(yaml.decode("value: null").value == cosmos.null)
+            assert(toml.number == json.number and yaml.number == json.number)
         else
             assert(cosmos.encoding == nil)
             assert(not pcall(require, "cosmos.encoding"))
             assert(not pcall(require, "cosmos.encoding.json"))
+            assert(not pcall(require, "cosmos.encoding.toml"))
+            assert(not pcall(require, "cosmos.encoding.yaml"))
         end
         if {encryption} then
             local encryption = require("cosmos.encryption")

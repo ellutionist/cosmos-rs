@@ -24,7 +24,7 @@ cosmos-rs/
   cosmos/            # 运行时 + 桥接层：machine / ffi / userdata / light_thread / stack / libs / builtin
   cosmos-macros/     # #[userdata]、#[derive(FromLua/PushLua)]，只生成 Rust 调用/转换组合
   cosmos-network/    # 功能模块：tcp/{stream,tls} / udp / http / websocket + bridge.rs（叶子转换）
-  cosmos-encoding/   # Encoding 插件：Hex、Base64、URI、sonic-rs JSON
+  cosmos-encoding/   # Encoding 插件：Hex、Base64、URI、JSON / TOML / YAML
   cosmos-encryption/ # Encryption 插件：SHA、RSA-OAEP、Ed25519
   cosmos-database/   # Database 插件：按 feature 选择 mysql / redis，内嵌 Lua 协议与 client 池
   Cargo.toml         # 虚拟 workspace，默认成员为 cosmos-cli
@@ -73,6 +73,16 @@ cosmos-rs/
 
 ## 4. 最近完成的工作
 
+### TOML / YAML（2026-11-14）
+
+- Encoding 新增 cosmos.encoding.toml 与 cosmos.encoding.yaml，CLI 沿用 encoding feature，无需新插件。依赖 Rust toml 1.2 与 serde-saphyr 1.3，不使用 C YAML 库；不改 Machine、宏或裸栈接口。
+- JSON 原有 Lua 输入/输出抽到私有 value 模块，与新格式共用文档值、容器标记、循环检查、UTF-8、节点/字节/深度预算和元表输出。JSON 继续使用 sonic 验证与编解码，原 encode/decode、lossless_numbers、number 路径不变。新增 formats.lua 只提供容器与数字类型别名和 decode 元表参数适配，初始化幂等。
+- TOML 根必须是字符串键表，不支持 null，日期时间使用 toml.datetime userdata 保持类型，text / tostring 读取，new 构造。使用原生 DeTable / DeValue，避免 Serde 的 $__toml_private_datetime 私有键与普通配置冲突；整数限 i64，小数为 f64，支持 inf/nan。
+- YAML 支持字符串键映射、数组、null、锚点、别名及合并键。重复键、非字符串键、自定义标签、多文档、循环别名与非有限数返回 nil+err；yes/off 保持字符串。不启用文件包含或环境替换。Serde 对超范围整数可能转 f64，先用 granit 事件读取原始标量并验证 i64/u64 范围，再反序列化，不能只在 visit_f64 后判断是否丢精度。
+- toml.number / yaml.number 与 json.number 是同一张 userdata 类型表，对应 require 入口为显式别名。安全整数为 Lua number，其他受支持整数保留精确 userdata；新格式只接受范围内的精确整数 userdata，JSON 精确小数需明确改用 Lua number。YAML 编码 TOML 日期时间时输出字符串。
+- 三种格式最多 64 层容器、100 万节点、64 MiB 输入/输出；YAML 再限制锚点/别名各 10000、别名重放事件 100 万，展开后继续计入值预算。TOML 原生解析器保留默认递归限制，转换时再执行公共限制，不启用 unbounded。保留普通线程栈上的深层与万层输入拒绝回归。
+- 新增 examples/toml.lua、yaml.lua 与插件/CLI feature 回归，文档采用与现有格式一致的短说明和可运行代码，详细类型与限制放 encoding README。本轮不自动提交或推送；性能测量、配置格式原文保留仍未安排。
+
 ### UDP（2026-11-14）
 
 - 单一 Udp userdata 同时提供静态 bind / connect 与实例收发，不新增聚合空壳或 Lua 包装。通过 Network 注册为 cosmos.network.udp，CLI 沿用 network feature；Rust 类型仅 crate 内可见。
@@ -118,7 +128,7 @@ cosmos-rs/
 - `cosmos.network.socket` 提供顺序 `connect/send/receive/close`、Unix domain socket 和 `starttls/starttls_server`；TLS 在已有流上升级，回放 BufReader 的预读字节。该接口的 I/O 失败、超时和取消均丢弃连接，旧 split 接口继续保留原有超时语义。
 - `tcp/transport.rs` 的 PlainIo 组合 TCP/Unix 与预读前缀，`stream.rs` 的私有表示 Duplex 复用旧读写状态机。TLS 写入完成前须在同一 deadline 内 flush，避免已接收明文但仍未发完密文导致停滞；重复 split 返回 nil+错误。
 - `cosmos-encoding` 与 `cosmos-encryption` 仅公开 Module 插件类型，功能通过受控转换与宏注册。同步二进制参数复用新增的 `&[u8]: FromLua`；异步参数仍须拥有数据或独立锚点。
-- Encoding 提供 Hex、标准/URL-safe Base64、严格 URI 百分号编解码及 sonic-rs JSON。Encryption 提供二进制 SHA-1/256/512、SPKI/PKCS#1 公钥的 RSA-OAEP-SHA1/256、标准 Ed25519 与 MariaDB 密码材料派生。算法实现均为 Rust，不引入 OpenSSL。
+- Encoding 提供 Hex、标准/URL-safe Base64、严格 URI 百分号编解码及 JSON/TOML/YAML 文本转换。Encryption 提供二进制 SHA-1/256/512、SPKI/PKCS#1 公钥的 RSA-OAEP-SHA1/256、标准 Ed25519 与 MariaDB 密码材料派生。算法实现均为 Rust，不引入 OpenSSL。
 - 示例见 `examples/null.lua`、`network_socket.lua`、`encoding.lua`、`encryption.lua`；各插件使用说明见各自 README。MySQL 驱动的后续进度见上一节，不重新引入全局 ngx 兼容层。
 
 ### 4.1 WebSocket（服务端复用 HTTP 端口）
@@ -410,8 +420,12 @@ assert(err == nil, err)
 | `cosmos-network/src/tcp/transport.rs` | TCP/Unix 明文传输与 TLS 升级前的预读回放 |
 | `cosmos-network/src/socket.rs` | 顺序 socket、监听、TLS 原地升级与失败/取消时关闭 |
 | `cosmos-encoding/src/lib.rs` | Encoding 插件及 Hex、Base64、URI 编解码 |
-| `cosmos-encoding/src/json.rs` | sonic-rs JSON、容器转换、精确数字及资源限制 |
+| `cosmos-encoding/src/json.rs` | sonic-rs JSON 与共享精确数字 userdata |
+| `cosmos-encoding/src/value.rs` | JSON/TOML/YAML 共用文档值、Lua 容器读写与资源预算 |
+| `cosmos-encoding/src/toml.rs` | TOML 原生解析树转换与日期时间 userdata |
+| `cosmos-encoding/src/yaml.rs` | YAML 原始标量检查、受限 Serde 转换与别名策略 |
 | `cosmos-encoding/lua/json.lua` | JSON 共享元表、容器标记与 decode 参数适配 |
+| `cosmos-encoding/lua/formats.lua` | TOML/YAML 容器标记、数字类型别名与 decode 参数适配 |
 | `cosmos-encryption/src/lib.rs` | Encryption 插件及摘要、RSA、Ed25519 |
 | `cosmos-database/src/lib.rs` | 按 mysql / redis feature 注册 Database 插件及依赖 |
 | `cosmos-database/src/options.rs` | 两种数据库的 URL 百分号、主机、布尔值叶子转换 |
