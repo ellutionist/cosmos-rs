@@ -11,6 +11,8 @@
 - 异步边界采用 `PendingOp::poll_push`，只保留 `PushLua` 转换协议；不采用返回值闭包装箱方案（见 §5）。
 - HTTP/WebSocket 回调已改用 `LuaFunction::call<A, R>`；userdata 借用失败只返回 Err，最外层 trampoline 统一抛 Lua 错误。
 - 外部嵌入使用 `Machine::new(tokio_handle)`，插件实现 `Module` 并通过 add_module 注入；插件包括 `Network`、`Encoding`、`Encryption`、`Database`，CLI 默认启用四个对应 feature。
+- WebSocket 已改成独立读写：后台完整解析帧，接收超时/取消不丢半帧，写入开始后取消会关闭连接；最后一个句柄或 Machine 销毁时取消读任务。并发与取消回归见 `examples/websocket_concurrent.lua`。
+- 用户已撤销 CDP/browser 插件，浏览器控制逻辑留给应用层通过现有 WebSocket、JSON 和协程能力组合；不再增加通用库中的浏览器高层 API。
 - UDP 已作为 `cosmos.network.udp` 接入 Network，支持 IPv4 / IPv6、报文边界、二进制、域名、并发收发、超时/取消与关闭唤醒；不再属于待做。
 - `cosmos.database.mysql` 已完成 lua-resty-mysql 适配与按 client 隔离的空闲连接池；真实 MySQL 8.4.5 的明文 TCP / TLS 回归通过。认证异常与大包另有离线协议测试；尚未用真实 MariaDB 验证，不支持服务端预编译语句。
 - `cosmos.database.redis` 已适配 lua-resty-redis 0.34，提供 RESP2、pipeline、事务、Pub/Sub 与 client 池。数据库 crate 的 `mysql` / `redis` feature 默认全开；CLI 的 `database` 是两者合集，也可单独选择，依赖随数据库关闭。Redis 8.10.3 的真实回归通过，配置用 COSMOS_REDIS_URL。

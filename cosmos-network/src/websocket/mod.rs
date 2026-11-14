@@ -17,7 +17,7 @@
 //!
 //! 收发都是协程内非阻塞操作：send/receive 挂起当前 Lua 协程，
 //! 由同一 LocalSet 上的 poll 侧推进（与 tcp/http 一致）。
-//! ping 由 fastwebsockets 自动回 pong、close 自动回 close（不暴露给 Lua）。
+//! 后台读任务持续完整收帧，独立写半串行化消息与 pong/close；同一连接可并发收发。
 
 pub(crate) mod conn;
 

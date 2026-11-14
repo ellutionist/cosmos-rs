@@ -761,6 +761,7 @@ cargo test --workspace
 | `network_socket.lua` | 顺序协议 socket 与 STARTTLS |
 | `http.lua` | HTTP 客户端 + 服务端（单进程，含重定向、超时、h2） |
 | `websocket.lua` | WebSocket 客户端 + 服务端升级（单进程） |
+| [websocket_concurrent.lua](examples/websocket_concurrent.lua) | 并发收发、取消与关闭 |
 | `encoding.lua` / `json.lua` | 编解码与 JSON |
 | `encryption.lua` | 哈希与签名 |
 | `mysql.lua` / `redis.lua` | 数据库端到端（需本地服务） |

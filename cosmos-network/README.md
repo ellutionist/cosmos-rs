@@ -9,7 +9,7 @@ cosmos-rs 的网络插件，为 Lua 提供 TCP、UDP、TLS、HTTP 和 WebSocket�
 - **TLS**：TLS 连接与监听、自定义证书、双向认证和服务端证书热重载。
 - **顺序协议 socket**：统一收发、TCP / Unix domain socket、同一连接内升级 TLS；收发失败或取消时关闭连接。
 - **HTTP**：HTTP / HTTPS 客户端与服务端，支持 HTTP/1.1、HTTP/2；客户端提供实例独立的连接池、重定向与请求超时。
-- **WebSocket**：支持 ws / wss，文本与二进制消息、ping / pong；服务端通过 HTTP handler 升级连接。
+- **WebSocket**：支持 ws / wss，文本与二进制消息、ping / pong、同一连接并发收发；服务端通过 HTTP handler 升级连接。
 
 ## 启用
 
@@ -37,7 +37,7 @@ machine.add_module(cosmos_network::Network)?;
 | `cosmos.network.udp` | [UDP 服务端](../examples/udp_server.lua)、[客户端](../examples/udp_client.lua)、[报文边界、并发与取消](../examples/udp.lua) |
 | `cosmos.network.tcp.tls`、`cosmos.network.tcp.tls.context` | [TLS 服务端](../examples/tls_server.lua)、[客户端](../examples/tls_client.lua) |
 | `cosmos.network.http.client`、`cosmos.network.http.server` | [HTTP / HTTPS 与 HTTP/2](../examples/http.lua) |
-| `cosmos.network.websocket` | [WebSocket 客户端与服务端](../examples/websocket.lua) |
+| `cosmos.network.websocket` | [WebSocket 客户端与服务端](../examples/websocket.lua)、[并发、取消与关闭](../examples/websocket_concurrent.lua) |
 
 示例从项目根目录用 `cosmos-cli` 运行。TCP、UDP、TLS 双进程用例需先启动服务端，再启动客户端，并传入相同端口；HTTP、WebSocket 用例会自行启动本地服务。TLS 示例使用 [examples/certs](../examples/certs/) 中的测试证书。
 
@@ -54,3 +54,9 @@ machine.add_module(cosmos_network::Network)?;
 `settimeout(ms)` 设置之后开始的操作的超时，`<= 0` 清除；构造时传入的超时也作为收发的初始配置，缺省不超时。失败返回 `nil, err`，超时为 `"timeout"`、关闭为 `"closed"`。同一句柄可跨协程收发，超时或取消等待不关闭 socket；`close()` 幂等，并唤醒所有等待者。`localaddr()` / `peeraddr()` 返回本地与默认对端的 `host, port`，`state()` 为 `0` 开启、`1` 关闭，`setbroadcast(enabled)` / `broadcast()` 设置与读取广播开关。
 
 收发示例见[项目 README](../README.md#udpcosmosnetworkudp)，独立脚本见[服务端](../examples/udp_server.lua)和[客户端](../examples/udp_client.lua)。[udp.lua](../examples/udp.lua) 覆盖报文边界、并发与取消，传入 `::1` 可运行 IPv6 回归。
+
+## WebSocket 并发与生命周期
+
+同一连接可由一个协程持续 `receive()`，其他协程同时 `send()` / `send_binary()`；写入按连接串行化，多个接收者依次消费完整消息。后台收帧队列最多缓存 8 条消息，满时反压读取。`state()` 在接收等待期间仍为 `0`，对端关闭或错误后为 `1`。
+
+`settimeout(ms)` 只作用于之后开始的操作。接收超时或取消不会丢弃半帧，也不会关闭连接；写入开始后超时或取消会关闭连接，避免复用不完整的帧。`close()` 幂等，结束连接并唤醒等待者；无操作超时时，close 帧最多等待 5 秒。服务端 handler 结束或取消后关闭连接，最后一个句柄释放时取消后台读任务。
