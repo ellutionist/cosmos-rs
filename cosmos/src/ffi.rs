@@ -29,7 +29,33 @@ pub(crate) const LUA_GLOBALSINDEX: c_int = -10002;
 pub(crate) const LUA_REGISTRYINDEX: c_int = -10000;
 pub(crate) const LUA_REFNIL: c_int = -1;
 
+// 与随 crate 构建的 LuaJIT lua.h 一致，LUA_IDSIZE 固定为 60。
+#[repr(C)]
+pub(crate) struct lua_Debug {
+    event: c_int,
+    name: *const c_char,
+    namewhat: *const c_char,
+    pub(crate) what: *const c_char,
+    pub(crate) source: *const c_char,
+    pub(crate) currentline: c_int,
+    nups: c_int,
+    linedefined: c_int,
+    lastlinedefined: c_int,
+    pub(crate) short_src: [c_char; 60],
+    i_ci: c_int,
+}
+
 extern "C" {
+    pub(crate) fn lua_getstack(
+        lua_state: *mut lua_State,
+        level: c_int,
+        debug: *mut lua_Debug,
+    ) -> c_int;
+    pub(crate) fn lua_getinfo(
+        lua_state: *mut lua_State,
+        what: *const c_char,
+        debug: *mut lua_Debug,
+    ) -> c_int;
     pub(crate) fn luaL_newstate() -> *mut lua_State;
     pub(crate) fn luaL_openlibs(lua_state: *mut lua_State);
     #[cfg(test)]

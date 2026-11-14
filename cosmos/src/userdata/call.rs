@@ -18,6 +18,22 @@ pub unsafe trait LuaCallable {
     fn call(call: &mut Call<'_>) -> Result<i32, String>;
 }
 
+/// 调用时复制的 Lua 源位置；可安全随异步值移动，不持有 Lua 引用。
+#[derive(Clone, Debug)]
+pub struct CallerLocation {
+    source: String,
+    line: u32,
+}
+impl CallerLocation {
+    pub fn source(&self) -> &str {
+        &self.source
+    }
+    /// 缺失调试行信息时为 0。
+    pub fn line(&self) -> u32 {
+        self.line
+    }
+}
+
 pub struct Call<'lua> {
     lua_state: *mut lua_State,
     pending: Option<PendingFuture>,
@@ -26,6 +42,48 @@ pub struct Call<'lua> {
 }
 
 impl Call<'_> {
+    /// 返回最近的 Lua 调用帧，跳过 C/桥接帧；文件源保留路径，字符串源使用短标签。
+    pub fn caller_location(&self) -> CallerLocation {
+        unsafe {
+            for level in 0..64 {
+                let mut debug = std::mem::MaybeUninit::<lua_Debug>::zeroed();
+                if lua_getstack(self.lua_state, level, debug.as_mut_ptr()) == 0 {
+                    break;
+                }
+                if lua_getinfo(self.lua_state, c"Sl".as_ptr(), debug.as_mut_ptr()) == 0 {
+                    continue;
+                }
+                let debug = debug.assume_init();
+                if debug.what.is_null()
+                    || !matches!(
+                        std::ffi::CStr::from_ptr(debug.what).to_bytes(),
+                        b"Lua" | b"main"
+                    )
+                {
+                    continue;
+                }
+                let bytes = if !debug.source.is_null() && matches!(*debug.source as u8, b'@' | b'=')
+                {
+                    let source = std::ffi::CStr::from_ptr(debug.source).to_bytes();
+                    &source[1..source.len().min(4097)]
+                } else {
+                    std::ffi::CStr::from_ptr(debug.short_src.as_ptr()).to_bytes()
+                };
+                let source = match std::str::from_utf8(bytes) {
+                    Ok(text) => text.to_owned(),
+                    Err(_) => bytes.escape_ascii().to_string(),
+                };
+                return CallerLocation {
+                    source,
+                    line: debug.currentline.max(0) as u32,
+                };
+            }
+        }
+        CallerLocation {
+            source: "<native>".into(),
+            line: 0,
+        }
+    }
     pub fn argument(&self, index: usize) -> Value<'_> {
         assert!(index > 0, "argument indices start at 1");
         unsafe {

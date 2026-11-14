@@ -10,8 +10,11 @@
 //! 默认路径取类型短名，name 指定相对 cosmos 的模块路径。
 //!
 //! 每个方法生成一个 Rust LuaCallable 适配，负责组合参数和返回值转换；
-//! C ABI、panic 捕获及异步挂起由 cosmos 内部的共用 trampoline 处理，并生成
-//! `impl cosmos::userdata::UserData` 把它们注册进 MethodTable。
+//! C ABI、panic 捕获及异步挂起由 cosmos 内部的共用 trampoline 处理。
+//! 参数 `#[lua(caller)] site: cosmos::userdata::CallerLocation` 注入当前 Lua 源位置，
+//! 不占 Lua 实参位置，异步挂起前复制为拥有型数据。
+//!
+//! 生成的 `impl cosmos::userdata::UserData` 把它们注册进 MethodTable。
 //! `__gc` 不需要宏处理：运行时用 `ptr::drop_in_place` 统一生成，
 //! 对没有 Drop 的类型同样是合法空操作。
 
@@ -31,7 +34,7 @@ pub fn userdata(attr: TokenStream, item: TokenStream) -> TokenStream {
         Ok(v) => v,
         Err(e) => return e.to_compile_error().into(),
     };
-    let imp = parse_macro_input!(item as ItemImpl);
+    let mut imp = parse_macro_input!(item as ItemImpl);
 
     let mut errors: Vec<syn::Error> = Vec::new();
 
@@ -78,6 +81,16 @@ pub fn userdata(attr: TokenStream, item: TokenStream) -> TokenStream {
             .into();
     }
 
+    // 参数级桥接标记不能留给 Rust 编译器；其余属性保持原样。
+    for item in &mut imp.items {
+        if let ImplItem::Fn(method) = item {
+            for arg in &mut method.sig.inputs {
+                if let FnArg::Typed(arg) = arg {
+                    arg.attrs.retain(|attr| !attr.path().is_ident("lua"));
+                }
+            }
+        }
+    }
     let expanded = quote! {
         #imp
 
@@ -191,8 +204,12 @@ fn gen_method(
     if !is_static {
         inputs.next(); // 跳过 receiver
     }
+    let mut stack_idx = stack_base;
     for (arg_n, arg) in inputs.enumerate() {
-        let FnArg::Typed(PatType { ty: arg_ty, .. }) = arg else {
+        let FnArg::Typed(PatType {
+            ty: arg_ty, attrs, ..
+        }) = arg
+        else {
             return err(arg, "self must be the first argument");
         };
         if is_async && matches!(arg_ty.as_ref(), Type::Reference(_)) {
@@ -202,12 +219,27 @@ fn gen_method(
                      use owned types (e.g. String instead of &str)",
             );
         }
-        let stack_idx = stack_base + arg_n as i32;
+        let mut caller = false;
+        for attr in attrs.iter().filter(|attr| attr.path().is_ident("lua")) {
+            attr.parse_nested_meta(|meta| {
+                if meta.path.is_ident("caller") && !caller {
+                    caller = true;
+                    Ok(())
+                } else {
+                    Err(meta.error("expected a single caller context marker"))
+                }
+            })?;
+        }
         let ident = format_ident!("arg{arg_n}");
         arg_idents.push(ident.clone());
-        arg_conversions.push(quote! {
-            let #ident = invocation.argument(#stack_idx as usize).read::<#arg_ty>()?;
-        });
+        if caller {
+            arg_conversions.push(quote! {let #ident:#arg_ty=invocation.caller_location();});
+        } else {
+            arg_conversions.push(
+                quote! {let #ident = invocation.argument(#stack_idx as usize).read::<#arg_ty>()?;},
+            );
+            stack_idx += 1;
+        }
     }
 
     // 静态方法按关联函数调用 Type::method(...)，实例方法走 this.method(...)

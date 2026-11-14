@@ -118,6 +118,20 @@ struct Api;
 
 #[cosmos::userdata(name = "test.bridge")]
 impl Api {
+    async fn caller(
+        #[lua(caller)] site: cosmos::userdata::CallerLocation,
+        value: String,
+    ) -> (String, u32, String) {
+        tokio::task::yield_now().await;
+        (site.source().to_owned(), site.line(), value)
+    }
+    fn caller_middle(
+        left: String,
+        #[lua(caller)] site: cosmos::userdata::CallerLocation,
+        right: String,
+    ) -> (String, u32, String) {
+        (site.source().to_owned(), site.line(), left + &right)
+    }
     async fn noop() {}
     fn unsigned_fields() -> UnsignedReply {
         UnsignedReply {
@@ -222,6 +236,7 @@ fn external_macros_and_closures_use_only_controlled_bridge_operations() {
         .unwrap();
     let mut machine = Machine::new(runtime.handle().clone()).unwrap();
     machine.add_module(Plugin).unwrap();
+    runtime.block_on(machine.exec_with_args("@caller_probe.lua", "local api=cosmos.test.bridge\nlocal source,line,value=api.caller('value')\nassert(source=='caller_probe.lua' and line==2 and value=='value')\nsource,line,value=api.caller_middle('a','b')\nassert(source=='caller_probe.lua' and line==4 and value=='ab')", &[])).unwrap();
     runtime.block_on(machine.exec(r#"
         assert(bridge_ready)
         local api = require('cosmos.test.bridge')

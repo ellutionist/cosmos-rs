@@ -34,7 +34,7 @@ use crate::ffi::*;
 mod call;
 mod context;
 
-pub use call::{Call, LuaCallable, LuaClosure};
+pub use call::{Call, CallerLocation, LuaCallable, LuaClosure};
 pub use context::{Output, TableIdentity, TableReader, TableWriter, Value, ValueKind};
 
 /// `#[cosmos::userdata]` 宏为每个类型生成该 impl

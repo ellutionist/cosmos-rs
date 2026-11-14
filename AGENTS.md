@@ -70,9 +70,10 @@
 - 插件实现 `Module` 并通过 `Machine::add_module` 注入；注册在该 Machine 的 Runtime/LocalSet 上下文同步执行。
 - 不做死抽象：公共层只在有明确复用点（至少两个使用方）时抽取，
   避免无意义的包装函数。
+- 日志只输出纯文本，禁止 JSON 输出；每条日志自动包含 Lua 文件名和行号，位置在异步挂起前由核心桥接读取。
 - Lua 状态指针统一命名为 `lua_state`，未使用时为 `_lua_state`；宏生成代码同样遵守。
 - 文件系统（`cosmos.fs`）和时间/日期（`cosmos.time`）属于 builtin，随 Machine 自动安装，不拆为可选插件；其他生态模块按 `ROADMAP.md` 推进，业务策略保留在应用层。
-- Lua 模块命名统一 `cosmos.network.*`、`cosmos.encoding.*`、`cosmos.encryption.*`、`cosmos.database.*`、`cosmos.image`、`cosmos.text.*`、`cosmos.system.*`、`cosmos.fs`、`cosmos.time`、`cosmos.thread`、`cosmos.sync`；
+- Lua 模块命名统一 `cosmos.network.*`、`cosmos.encoding.*`、`cosmos.encryption.*`、`cosmos.database.*`、`cosmos.image`、`cosmos.text.*`、`cosmos.system.*`、`cosmos.log`、`cosmos.fs`、`cosmos.time`、`cosmos.thread`、`cosmos.sync`；
   userdata 用 `#[cosmos::userdata(name = "…")]` 指定相对 `cosmos` 的路径，注册层自动组装父模块表，
   父表字段与对应 `require` 入口复用同一张类型表。
 

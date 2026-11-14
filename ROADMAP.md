@@ -59,7 +59,7 @@ FS、datetime 不新增插件 crate 或 CLI feature。其他新增插件独立�
 | 背压、取消与资源回收 | 容量 1 的发送队列、慢接收者、显式关闭、读取取消、原生短体/尾部字段、Machine 销毁；两种注入 Runtime 通过 |
 | 通用边界 | 条件请求与弱/强 ETag；不引入播放会话、下载票据、站点规则或业务路由 |
 
-单 Range 与文件响应已满足本阶段迁移需要；多范围请求回退完整响应，日期 If-Range 因无法保证强验证而回退完整响应。一次性上传遇到要求重放 body 的重定向会明确报错。当前不新增自动解压、HTTP/SOCKS 代理或服务排空；后两者仍按第 5、6 阶段推进，不能把本阶段完成视为整个后端已可迁移。文件读取与取消沿用 builtin FS 语义，尚未进行真实 NAS/SMB 联调。
+单 Range 与文件响应已满足本阶段迁移需要；多范围请求回退完整响应，日期 If-Range 因无法保证强验证而回退完整响应。一次性上传遇到要求重放 body 的重定向会明确报错。本阶段不新增自动解压；HTTP/SOCKS 代理和服务排空分别由第 5、6 阶段补齐，不能把本阶段完成视为整个后端已可迁移。文件读取与取消沿用 builtin FS 语义，尚未进行真实 NAS/SMB 联调。
 
 ### 3. 密码与随机数（迁移核对通过）
 
@@ -110,7 +110,7 @@ XML 本阶段扩展 Encoding 插件，接口见 [XML 文档](cosmos-encoding/xml
 
 本阶段已覆盖原后端需要的图像基础能力，不移入海报比例、站点选择、徽标模板或水印判定策略。内部使用 RGBA8，不保留原始位深/元数据或动画；WebP 仅无损编码。原生编解码器分配预算属于其支持范围内的限制，不承诺进程 RSS 硬上限；大图像及应用保留的多个版本仍由应用控制。
 
-### 5. 文本、URL 与时间进阶
+### 5. 文本、URL 与时间进阶（迁移核对通过）
 
 - [x] 编译型正则、Unicode normalization 与大小写、繁简转换（迁移核对通过）。
 - [x] URL 解析、合并、查询参数，与已有 URI 百分号编码区分职责（迁移核对通过）。
@@ -127,7 +127,7 @@ XML 本阶段扩展 Encoding 插件，接口见 [XML 文档](cosmos-encoding/xml
 | `actor_names.rs` 等繁简处理 | 沿用 ferrous-opencc 0.4 的内嵌 t2s/s2t 词典并按方向缓存，词组、歧义字和 NUL 原生结果对照通过 |
 | 资源与运行模型 | UTF-8/输入输出/捕获/分段预算、2 个计算/16 个已接纳作业；两种 Runtime、取消、VM 销毁与回调挂起通过 |
 
-本批已满足原后端的文本基础能力；Rust regex 不支持环视/反向引用，现有迁移模式不依赖它们。len/truncate 按 Unicode scalar 计数，不提供字形簇或 locale case folding；繁简转换不承诺可逆。已开始的单次原生搜索/OpenCC 转换不能强制中断，仍持有计算预算到结束；OpenCC 另限 1 MiB 输入并保留词组上下文。URL 由下面的独立批次补齐；代理与日历进阶尚未实现，不把文本完成视为第 5 阶段全部完成。
+本批已满足原后端的文本基础能力；Rust regex 不支持环视/反向引用，现有迁移模式不依赖它们。len/truncate 按 Unicode scalar 计数，不提供字形簇或 locale case folding；繁简转换不承诺可逆。已开始的单次原生搜索/OpenCC 转换不能强制中断，仍持有计算预算到结束；OpenCC 另限 1 MiB 输入并保留词组上下文。URL、代理与日历进阶已由下面的独立批次补齐。
 
 URL 本批扩展 Network，不新增插件或 feature。接口见 [URL 文档](cosmos-network/url.md)，完整用法及真实 HTTP 重定向见 [url.lua](examples/url.lua)。
 
@@ -139,24 +139,28 @@ URL 本批扩展 Network，不新增插件或 feature。接口见 [URL 文档](c
 | `verification.rs` / WebSocket 地址处理 | 标准 origin 比较、主机与端口重写、IDNA 和 IPv4/IPv6；不增加 CDP 或业务 URL 规则 |
 | HTTP 集成与资源 | 删除手写重定向拼接；真实多跳点段/query/fragment/协议相对跳转、跨源凭证剥离、拒绝隐式 userinfo、64 KiB/1024 项边界、GC 后持有及错误恢复通过 |
 
-本批已覆盖原后端使用的 URL 基础能力，并在两种 Runtime 和默认/full/无插件 CLI 上验证。解析沿用 WHATWG 规范化和非规范百分号处理，不提供站点验证策略；URL 与组件长度最多 64 KiB，列表最多 1024 项。HTTP 只接受 http/https，不发送 fragment，不把 userinfo 自动变为认证头。代理由后续批次补齐；日期日历继续按本轮连续授权推进。
+本批已覆盖原后端使用的 URL 基础能力，并在两种 Runtime 和默认/full/无插件 CLI 上验证。解析沿用 WHATWG 规范化和非规范百分号处理，不提供站点验证策略；URL 与组件长度最多 64 KiB，列表最多 1024 项。HTTP 只接受 http/https，不发送 fragment，不把 userinfo 自动变为认证头。代理与日期日历由下面的独立批次补齐。
 
 代理作为 Network 的一部分，接口见 [proxy.md](cosmos-network/proxy.md)、实际用例见 [proxy.lua](examples/proxy.lua)。已对照原后端 archiver/network.rs、settings.rs、images.rs 和云端翻译请求：四种代理协议、HTTP Basic/SOCKS 用户名密码、本地/远端 DNS、独立代理/来源 TLS、逐跳直连回调、client 路由池隔离、流式和 HTTP/2 均覆盖；私网/LAN/LLM 是否绕过由应用回调实现，不移入库。WebSocket 复用代理隧道；错误响应、预读字节、边界、超时、Machine 销毁及两种 Runtime 验证通过。
 
 日期日历继续属于 builtin time。已对照归档日志的按日窗口、重试时刻及 NFO 日期格式：既有 RFC3339/strftime 覆盖原格式，新增日历偏移与期间起点、ISO 周及 RFC2822；月末/闰年、正负移动、纳秒保持、23/25 小时 DST、重叠显式选择、缺失日期拒绝和两种 Runtime 验证通过。文档见 [time.md](cosmos/time.md)，实际用例见 [datetime.lua](examples/datetime.lua)，不加入节假日或业务到期策略。
 
-### 6. 数据库、服务生命周期与日志
+### 6. 数据库、服务生命周期与日志（迁移核对通过）
 
 - [x] MySQL 服务端预编译/类型参数绑定、MySQL/Redis 有界租借与队列/获取超时、连接/事务作用域（迁移核对通过）。
 - [x] 显式信号订阅/进程信息、HTTP/1.1/HTTP/2 停止接收与排空，应用组织任务停止顺序（迁移核对通过）。
-- [ ] 结构化日志、输出轮转、flush；不抢占宿主 Runtime 或全局日志配置。
-- [ ] 迁移、路由和请求校验优先作为 Lua 工具层按实际复用需求补充，不引入 ORM 或业务服务框架。
+- [x] 纯文本结构化日志、自动 Lua 源文件/行号、输出轮转、flush；不抢占宿主 Runtime 或全局日志配置（迁移核对通过）。
+- [x] 核对 Lua 工具层：迁移、路由和请求校验可组合现有原语；当前没有需要抽取的共同业务实现，不引入 ORM 或服务框架。
 
 数据库批次已对照原后端 SQLx 的绑定查询、连接获取和事务操作核对：MySQL 支持真实服务端 prepare/typed execute/CALL 多结果，BIGINT/预编译 DECIMAL 保留精度；MySQL/Redis 有界等待、超时、作用域、client 隔离、单调闲置时钟、取消及失效重连均覆盖。接口见 [MySQL](cosmos-database/mysql.md)、[Redis](cosmos-database/redis.md)，实机验收见 [database_resources.lua](examples/database_resources.lua)。不引入 ORM、业务重试、自动 schema 或 session 策略；Lua 取消不执行 finally，已发送 SQL 的服务端效果不能保证撤销。
 
+日志已对照原后端控制台/文件输出、分类上下文、级别、大小/日期轮转与保留需求核对：独立 Logging 插件，全部为纯文本，固定带 Lua 源文件与行号；支持有界异步写入、child、flush/sync、close 及显式宿主 tracing 接入，不安装全局 subscriber。接口见 [Logging 文档](cosmos-logging/README.md)，实机用例见 [logging.lua](examples/logging.lua)。分类文件、请求 ID 与停止顺序属于应用；不提供 JSON 日志。
+
+最后的工具层已核对：SQL 文件可由 FS 读取并通过 MySQL 预编译/事务执行，HTTP 回调可组合 URL/正则完成路由，Lua 类型检查可组合文本与数据转换完成请求校验。迁移版本、路由声明和业务字段规则缺乏当前跨应用复用点，不为勾选路线图而新增框架。原后端媒体探测依赖 FFmpeg FFI，当前没有子进程使用需求；进程执行仍待实际需求，不把媒体能力或完整后端业务复刻列为已完成。
+
 ## 每阶段验收
 
-按 module 分批交付，每个模块先逐项核对迁移/功能需求并完成验证，再停下来让用户检查，收到用户提交指令后再提交，不自动连续实现下一模块。
+默认按 module 分批交付、核对验证后等待用户检查和提交指令。本轮用户明确授权一次完成剩余项并逐模块提交，按该授权连续推进，不 push。
 
 - 实际运行对应 `examples/`，覆盖取消、错误后继续使用及相关回归。
 - 工作区测试、外部宏展开、严格 Clippy、格式、feature 裁剪与文档链接检查。

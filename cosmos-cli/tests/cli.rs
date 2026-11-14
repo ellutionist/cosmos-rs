@@ -321,6 +321,14 @@ fn codec_and_encryption_registration_follow_features() {
             assert(not pcall(require, "cosmos.encoding.yaml"))
             assert(not pcall(require, "cosmos.encoding.xml"))
         end
+        if {logging} then
+            assert(require("cosmos.log")==cosmos.log)
+            assert(cosmos.log.new({{format="json"}})==nil)
+            local logger=assert(cosmos.log.new({{console="stderr",level="off"}}))
+            assert(logger:info("filtered")==false and logger:close())
+        else
+            assert(cosmos.log==nil and not pcall(require,"cosmos.log"))
+        end
         if {system} then
             local process=require("cosmos.system.process")
             assert(process==cosmos.system.process and process.pid()>0)
@@ -363,6 +371,7 @@ fn codec_and_encryption_registration_follow_features() {
             assert(not pcall(require, "cosmos.encryption"))
         end
     "#,
+        logging = cfg!(feature = "logging"),
         system = cfg!(feature = "system"),
         text = cfg!(feature = "text"),
         image = cfg!(feature = "image"),

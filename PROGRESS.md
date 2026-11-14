@@ -1195,3 +1195,27 @@
 - 已验证两种 Runtime、真实信号（独立子进程）、超时/关闭/VM 销毁、HTTP1/H2 流式排空、强制超时、GC、TLS 半握手、取消排空等待者后继续等待；工作区和 feature/实际示例收尾后按授权提交并继续日志。
 
 - 收尾通过：工作区 114 项常规测试与 5 项编译失败文档检查、严格 Clippy，system-only CLI 9 项/full 10 项、实际 system.lua/http_shutdown.lua，默认构建恢复及非注释中文 0。按连续授权单独提交服务生命周期，接着实现结构化日志和剩余路线图评估。
+
+
+## 2026-11-14 纯文本日志与路线图收尾（按连续授权）
+
+### 核心逻辑
+
+- 新增独立 cosmos-logging/Logging，通过 cosmos.log 提供纯文本结构化字段、级别/child、文件/控制台/显式宿主 tracing、UTC 日/大小轮转及保留、flush/sync/close。CLI logging 默认关闭，full 纳入；不依赖 Network/Encoding/System，不安装全局 subscriber。
+- 按用户新增要求禁止 JSON 输出，format/console_format 仅允许 text；每条包含 Lua 文件名与行号，控制字符转义保持单行。调用位置由核心 Call::caller_location 及拥有型 CallerLocation 提供，宏 #[lua(caller)] 在进入桥接时注入，不占 Lua 实参且先于挂起；日志功能层不触碰裸 FFI。
+- 每个 logger 接纳 128 个未完成写入，原生文件 I/O 在 blocking 工作线程串行；输入 64 KiB、字段 4096 节点/16 层、编码字段 128 KiB/记录 256 KiB。运行中取消仍持有写入预算到真正完成；VM 销毁不把 Lua 带入工作线程。I/O 故障持续报告，输入错误可以恢复。
+- 最后工具层按实际复用需求核对：现有 FS/SQL 事务、HTTP 回调/URL/正则和 Lua 类型检查可组合迁移、路由、校验；无真实复用点不抽业务框架。路线图通用基础项完成，不把 FFmpeg 媒体能力或整个后端业务视为已复刻。
+
+### 踩坑与专项验证
+
+- 源位置必须在 C 入口同步读取并复制，不能等异步恢复或在原生输出线程读取；显式跳过非 Lua 帧，宿主 tracing 的 scoped Dispatch 也必须从调用线程复制到工作任务。
+- 不能用 JSON 序列化模拟 key=value：字段树直接输出文本；编码超限先于 I/O 故障标记，错误输入不能毒化 logger。64 KiB NUL 的 Rust 转义仍小于记录上限，超限测试改用展开更长的控制字符。
+- 轮转按整条记录，单条可超过 max_bytes，避免拆行；清理只匹配模板精确文件名，不能靠前缀删除。Linux 保留无效 UTF-8 名字覆盖，macOS EILSEQ 属于文件系统限制，保留 Unicode 原生路径测试。
+- 专项 5 项通过：两种 Runtime 下完整 logging.lua、真实 Lua 调用行、宿主 scoped subscriber、大小/日期保留、字段/过滤/错误后恢复、队列饱和及原生输出阻塞时 Machine 释放。全工作区与 CLI feature 验证继续记录在下方。
+
+### 最终验证与后续
+
+- cargo test --workspace：119 项常规测试、5 项编译失败文档检查通过；需真实数据库环境的用例仍保持显式 ignored，本轮数据库模块此前已在用户指定 MySQL/Redis 实机验证并清理对象。
+- cargo clippy --workspace --all-targets --all-features -- -D warnings、cargo fmt --all -- --check、git diff --check 通过；Logging 只公开插件，内部可见性按真实调用方收窄。
+- CLI logging-only 9 项、full/default 各 10 项通过；实际 examples/logging.lua 在 logging-only 与 full 均通过且临时文件清理完成，examples/http.lua/websocket.lua 回归通过。CLI 默认仍仅 network，默认构建已恢复。
+- 文档链接、非注释中文字符串 0 检查通过。按本轮明确授权提交日志模块及路线图核对，不 push；路线图通用基础能力已完成，后续仅按实际应用复用需求增加工具层。

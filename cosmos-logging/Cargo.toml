@@ -1,0 +1,15 @@
+[package]
+name = "cosmos-logging"
+version = "0.1.0"
+edition = "2021"
+description = "Structured logging, rotation and explicit flushing for cosmos"
+
+[dependencies]
+cosmos = { path = "../cosmos" }
+chrono = { version = "0.4", default-features = false, features = ["std"] }
+tokio = { version = "1.49", features = ["rt", "sync"] }
+tracing = "0.1"
+
+[dev-dependencies]
+tempfile = "3"
+tokio = { version = "1.49", features = ["rt-multi-thread", "time"] }

@@ -15,6 +15,8 @@ use cosmos_encoding::Encoding;
 use cosmos_encryption::Encryption;
 #[cfg(feature = "image")]
 use cosmos_image::Image;
+#[cfg(feature = "logging")]
+use cosmos_logging::Logging;
 #[cfg(feature = "network")]
 use cosmos_network::Network;
 #[cfg(feature = "system")]
@@ -107,6 +109,8 @@ fn run(
     machine.add_module(Network)?;
     #[cfg(feature = "system")]
     machine.add_module(System)?;
+    #[cfg(feature = "logging")]
+    machine.add_module(Logging)?;
     #[cfg(any(feature = "mysql", feature = "redis"))]
     machine.add_module(Database)?;
 
