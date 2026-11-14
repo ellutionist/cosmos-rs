@@ -1,13 +1,20 @@
 use std::io::Write;
+#[cfg(feature = "network")]
 use std::path::Path;
 use std::process::{Command, Output, Stdio};
 
 fn command() -> Command {
-    Command::new(env!("CARGO_BIN_EXE_cosmos-cli"))
+    let mut command = Command::new(env!("CARGO_BIN_EXE_cosmos-cli"));
+    command.env_remove("LUA_PATH").env_remove("LUA_CPATH");
+    command
 }
 
 fn stdin(args: &[&str], source: &str) -> Output {
-    let mut child = command()
+    stdin_command(command(), args, source)
+}
+
+fn stdin_command(mut command: Command, args: &[&str], source: &str) -> Output {
+    let mut child = command
         .args(args)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -55,7 +62,6 @@ fn stdin_runs_with_builtins_and_forwards_flag_like_unicode_and_empty_args() {
         local a,b,c,d,e = ...
         assert(select("#", ...) == 5)
         assert(a == "--help" and b == "--version" and c == "-42" and d == "中文" and e == "")
-        assert(cosmos.network.http.client.new())
         assert(cosmos.test == nil and cosmos.example == nil)
         cosmos.time.sleep(0)
         print("stdin arguments ok")
@@ -84,8 +90,189 @@ fn stdin_runs_with_builtins_and_forwards_flag_like_unicode_and_empty_args() {
         "{}",
         String::from_utf8_lossy(&leading_separator.stderr)
     );
+    let path_arguments = stdin(
+        &["-", "--cpath", "./argument/?.so", "--path", "./argument/?.lua"],
+        "local a,b,c,d = ...; assert(a == '--cpath' and b == './argument/?.so' and c == '--path' and d == './argument/?.lua')",
+    );
+    assert!(
+        path_arguments.status.success(),
+        "{}",
+        String::from_utf8_lossy(&path_arguments.stderr)
+    );
 }
 
+#[test]
+fn search_paths_preserve_native_defaults_and_order_cli_before_environment() {
+    for (field, option, environment, extension) in [
+        ("path", "--path", "LUA_PATH", "lua"),
+        ("cpath", "--cpath", "LUA_CPATH", "so"),
+    ] {
+        let read = format!("io.write(package.{field})");
+        let defaults = stdin(&["-"], &read);
+        assert!(defaults.status.success());
+        let defaults = String::from_utf8(defaults.stdout).unwrap();
+        assert!(!defaults.is_empty());
+        #[cfg(unix)]
+        assert!(defaults
+            .split(';')
+            .any(|path| path == format!("./?.{extension}")));
+
+        let mut command = command();
+        command.env(
+            environment,
+            format!("./env/?.{extension};;./env-last/?.{extension}"),
+        );
+        let result = stdin_command(
+            command,
+            &[
+                option,
+                &format!("./cli/?.{extension};./quo'te\\目录/?.{extension}"),
+                option,
+                &format!("./cli-last/?.{extension}"),
+                "-",
+            ],
+            &read,
+        );
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        assert_eq!(
+            String::from_utf8(result.stdout).unwrap(),
+            format!("./cli/?.{extension};./quo'te\\目录/?.{extension};./cli-last/?.{extension};./env/?.{extension};{defaults};./env-last/?.{extension}")
+        );
+    }
+}
+
+#[test]
+fn require_loads_lua_files_and_init_files_from_cli_environment_and_defaults() {
+    let root = std::env::temp_dir().join(format!(
+        "cosmos-lua-path-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    for (directory, origin) in [
+        (root.clone(), "default"),
+        (root.join("environment"), "environment"),
+        (root.join("first'中文"), "first"),
+        (root.join("second"), "second"),
+    ] {
+        std::fs::create_dir_all(directory.join("probe")).unwrap();
+        std::fs::create_dir_all(directory.join("bundle")).unwrap();
+        std::fs::write(
+            directory.join("probe/value.lua"),
+            format!("return '{origin}'"),
+        )
+        .unwrap();
+        std::fs::write(
+            directory.join("bundle/init.lua"),
+            format!("return '{origin}'"),
+        )
+        .unwrap();
+    }
+    let environment = format!("{}/environment/?.lua;;", root.display());
+    let first = format!("{}/first'中文/?.lua", root.display());
+    let second = format!("{}/second/?.lua", root.display());
+    let init = format!("{}/first'中文/?/init.lua", root.display());
+    let missing = format!("{}/missing/?.lua", root.display());
+    let mut results = Vec::new();
+    for (paths, environment, module, expected) in [
+        (vec![], environment.as_str(), "probe.value", "environment"),
+        (
+            vec![first.as_str(), second.as_str()],
+            environment.as_str(),
+            "probe.value",
+            "first",
+        ),
+        (
+            vec![second.as_str(), first.as_str()],
+            environment.as_str(),
+            "probe.value",
+            "second",
+        ),
+        (
+            vec![missing.as_str()],
+            environment.as_str(),
+            "probe.value",
+            "environment",
+        ),
+        (vec![missing.as_str()], ";;", "probe.value", "default"),
+        (vec![init.as_str()], environment.as_str(), "bundle", "first"),
+    ] {
+        let mut command = command();
+        command.current_dir(&root).env("LUA_PATH", environment);
+        for path in paths {
+            command.args(["--path", path]);
+        }
+        results.push((
+            stdin_command(command, &["-"], &format!("print(require('{module}'))")),
+            expected,
+        ));
+    }
+    std::fs::remove_dir_all(root).unwrap();
+    for (result, expected) in results {
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        assert_eq!(String::from_utf8(result.stdout).unwrap().trim(), expected);
+    }
+}
+
+#[test]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+fn executable_exports_lua_c_api_for_native_modules() {
+    let result = stdin(
+        &["-"],
+        r#"
+        local ffi = require("ffi")
+        ffi.cdef[[
+            int lua_gettop(void *lua_state);
+            int luaL_checkoption(void *lua_state, int index, const char *default_value, const char *const options[]);
+            char *luaL_prepbuffer(void *buffer);
+            int luaopen_string(void *lua_state);
+            int luaJIT_setmode(void *lua_state, int index, int mode);
+        ]]
+        for _, name in ipairs({"lua_gettop", "luaL_checkoption", "luaL_prepbuffer", "luaopen_string", "luaJIT_setmode"}) do
+            assert(ffi.C[name] ~= nil, name .. " 未从 CLI 导出")
+        end
+        "#,
+    );
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+}
+
+#[test]
+fn network_registration_follows_feature() {
+    let source = if cfg!(feature = "network") {
+        r#"
+        local HttpClient = require("cosmos.network.http.client")
+        assert(HttpClient == cosmos.network.http.client)
+        assert(HttpClient.new())
+        "#
+    } else {
+        r#"
+        assert(cosmos.network == nil)
+        assert(not pcall(require, "cosmos.network.http.client"))
+        "#
+    };
+    let result = stdin(&["-"], source);
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+}
+
+#[cfg(feature = "network")]
 #[test]
 fn script_files_receive_arguments_and_load_network_lua_definitions() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();

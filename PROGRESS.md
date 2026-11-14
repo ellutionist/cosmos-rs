@@ -703,3 +703,86 @@
 - 按用户要求，将私有 FFI、受控读写/调用上下文、宏与 network bridge 迁移、借用生命周期及锚点、回归与文档一并提交，包含 StringPairs 重命名。
 - 提交前差异与遗留引用检查通过，沿用已完成的 36 项测试、5 项编译失败检查、严格 Clippy/rustdoc、外部边界与 examples 验证结果，不 push。
 - 后续外部模块继续通过受控上下文组合值，字符串键值对列表统一使用 StringPairs。
+
+## 2026-11-14 补充项目使用说明
+
+- 新增根目录 README.md，简要介绍构建、CLI 脚本与参数、标准输入、HTTP 服务、Rust Machine 嵌入和现有示例入口，以使用为主。
+- 明确 CLI 在主协程结束后退出、常驻服务需保持主协程运行；区分 Machine 默认内建模块与显式注入的 Network，说明 Runtime Handle 的使用要求。
+- cargo build --locked 通过；从 README 提取 Lua 与 Rust 代码，在临时目录验证参数、标准输入、HTTP 响应和独立宿主项目，全部通过；文档相对链接均有效。HTTP、WebSocket、TCP 双进程与 Rust Machine 嵌入示例实际运行通过，差异检查无空白问题。
+- 本轮只修改文档，不自动提交；后续新增使用方式时同步维护 README 和可运行示例。
+
+## 2026-11-14 将 CLI 网络支持改为默认 feature
+
+- cosmos-cli 新增默认启用的 network feature，以 dep:cosmos-network 控制可选依赖；导入与插件注入统一按 feature 编译，关闭后仅保留内建模块。
+- 同步 README 构建说明与 HANDOFF 入口说明。现有 CLI 参数测试原先无条件创建网络客户端，改为独立验证 feature 对注册结果的影响；依赖网络的脚本测试仅在启用时运行。
+- 默认构建及 cargo test --workspace --locked 通过（37 项测试、5 项编译失败检查）；无默认 feature 构建、CLI 的 4 项集成测试及严格 Clippy 通过，依赖树确认不包含 cosmos-network；格式与差异检查通过。
+- 实际运行默认构建的 HTTP、WebSocket 示例，以及无网络构建的 sleep、spawn、sync 示例全部通过；禁用网络时 require 网络模块按预期失败。
+- 未自动提交；后续 CLI 可选插件沿用显式 feature 与条件注入方式。
+
+## 2026-11-14 按项目定位精简并拆分 README
+
+- 主 README 改为项目用途、特点、CLI 和 Machine 两个使用入口；删除展开的 Lua 服务示例、重复依赖配置和 cargo run 命令，示例直接链接现有文件。
+- 新增 cosmos-network/README.md，集中说明网络能力、CLI feature、宿主插件注入及各协议的示例链接；根文档仅保留插件入口。
+- 两份 README 的相对链接与命令检查通过；提取精简后的 Machine 代码，在临时宿主中实际执行 Lua 文件通过；差异检查通过。
+- 本轮只调整文档；沿用上一轮网络 feature 与 examples 验证结果，后续协议使用说明维护在 network README，主文档保持简洁。不自动提交。
+
+## 2026-11-14 补充 README 异步运行模型
+
+- 主 README 增加简短的异步模型说明：每个受管理的 Lua 协程绑定 Rust Future，由 Tokio 驱动；异步操作挂起、就绪后返回结果并恢复 Lua。
+- 说明 LocalSet 下的单线程协作式调度及多线程 Runtime 中的线程亲和性；不将每个 Lua 协程描述为必须独立 spawn 的 Tokio task，主脚本与回调也可由调用方直接 await 对应 Future。
+- 对照 LightThread::run、Execution::poll_step 与 Machine::exec_with_args 核对描述，文档差异检查通过；仅修改文字，未重复运行行为测试。后续保持主 README 的设计说明简短，不自动提交。
+
+## 2026-11-14 支持 CLI 与宿主注入 C 扩展搜索路径
+
+- CLI 新增可重复的 --cpath，接受分号分隔的搜索模板，按出现顺序前置到已有 package.cpath；参数必须在脚本路径前，脚本后的同名参数仍原样透传。
+- Machine 新增 prepend_cpath，复用同步加载流程并以 Lua chunk 参数传入路径，避免拼接 Lua 源码与转义问题；空字符串保持原值，CLI 不接触裸 Lua 栈。
+- 核对 LuaJIT 自带初始化：默认搜索 ./?.so、/usr/local/lib/lua/5.1/?.so 与 loadall.so；LUA_CPATH 原生支持，;; 在指定位置展开默认路径。保留原生替换语义，不硬编码另一份默认表，不更改进程环境；LUA_PATH 保持原样。README 与 HANDOFF 同步说明。
+- 新增默认路径、环境变量展开、重复 CLI 顺序、分号模板、中文/引号/反斜杠与脚本参数边界回归。工作区 38 项测试与 5 项编译失败检查通过，无默认 feature 的 CLI 5 项测试通过；工作区严格 Clippy 通过。
+- 在 macOS ARM64 上临时编译 4 份可辨认来源的 C 扩展，验证原生当前目录、LUA_CPATH、CLI 优先级与两级回退共 6 种实际加载场景，并验证二进制字符串；HTTP、WebSocket、spawn、sleep、sync 示例全部通过。
+- 本轮未增加 C 依赖或异步 C 桥接协议，未自动提交；后续继续验证其他平台与发布构建的动态符号导出。
+
+## 2026-11-14 配套支持 Lua 文件模块搜索路径
+
+- CLI 新增可重复的 --path，对应 package.path；Machine 新增 prepend_path，与 prepend_cpath 共用私有的搜索路径前置实现，保留已有模板并通过 chunk 参数传值。
+- LUA_PATH 延续 LuaJIT 原生初始化及 ;; 默认路径展开，CLI 模板按出现顺序优先搜索；--path 和 --cpath 独立配置，脚本路径后的同名参数继续透传。README 合并为 Lua / C 模块路径对照，HANDOFF 同步更新。
+- 将路径顺序、环境展开、特殊字符与默认路径回归扩展到两种模块；新增真实 require 回归，覆盖普通文件、点号模块、?/init.lua、重复 CLI 顺序、环境与当前目录回退，共 6 种加载场景。子进程单独配置环境与工作目录，避免影响并行测试。
+- 工作区 39 项测试与 5 项编译失败检查通过，无默认 feature 的 CLI 6 项测试通过；工作区严格 Clippy、格式与差异检查通过。带 --path / --cpath 实际运行 HTTP、WebSocket、spawn、sleep、sync 示例均通过。
+- 本轮未自动提交；后续 Lua 与 C 模块路径配置保持配套，继续沿用链接的 LuaJIT 原生默认值。
+
+## 2026-11-14 实测 LuaRocks 生态兼容性
+
+- 在临时目录构建 LuaRocks 3.13.0，以 Lua 5.1 / LuaJIT 配置实际安装 dkjson 2.11-1 与 LuaFileSystem 1.9.0-1，C 包使用当前 cosmos 构建产物的 LuaJIT 头文件；未向项目引入依赖。
+- dkjson 通过 LuaRocks path 导出的 LUA_PATH / LUA_CPATH 以及 CLI --path / --cpath 两种方式加载，中文、NUL 字符串 JSON 编解码及异步挂起后继续调用均通过。
+- LuaFileSystem 在当前 macOS ARM64 debug CLI 中加载失败：缺失 _luaL_checkoption。nm 确认模块所需的 Lua API 中仅该符号缺失，且定义确实存在于 LuaJIT 静态库，最终可执行文件未导出；路径查找与包安装本身正常。
+- 修正前序最小 C 扩展验证的适用范围：部分 API 可用不代表完整 LuaRocks C 包生态兼容。后续需统一处理 LuaJIT C API 在最终链接产物中的保留与导出，并覆盖真实 C rocks 及不同平台/发布配置。
+- 临时 LuaRocks 工具、rocks tree 与缓存已清理。本轮仅调查并记录结果，未修改实现，未自动提交。
+
+## 2026-11-14 核对并验证 C API 符号导出修复方向
+
+- nm 确认 luaL_checkoption 位于已参与链接的 lj_api.o，不能仅靠 whole-archive 解决目标文件内部的符号裁剪；还须在最终宿主显式保留并动态导出 Lua C ABI。
+- 在当前 macOS CLI 临时使用 -exported_symbol 匹配 _lua_*、_luaL_*、_luaopen_*、_luaJIT_* 链接，确认 luaL_checkoption 出现在最终导出表；实际编译并加载调用该 API 的 C 扩展，正常分支与参数错误均通过。
+- 正式方案需配套处理静态库完整链接及最终宿主的平台导出配置，覆盖 CLI 和外部 Machine 宿主；依赖库的 rustc-link-arg 不能作为宿主自动获得最终链接配置的保证。Rust ffi 可见性保持私有。
+- 本轮仅验证方案，未修改构建实现；临时 C 模块已清理，CLI 恢复默认构建。后续正式实现需用真实 C rocks、release/LTO 与各目标平台回归，不自动提交。
+
+## 2026-11-14 本地验证依赖库链接配置向外部宿主传播
+
+- 使用当前 cosmos / cosmos-macros 的隔离副本及工作区外的独立 Machine 宿主，在 macOS ARM64 / Rust 1.94.1 debug 构建下做四组对照：默认、库侧 rustc-link-arg、库侧 whole-archive 加 link-arg、再由宿主显式设置导出参数。
+- 库侧构建日志确认实际输出四个导出参数，但 rustc --print link-args 显示它们没有进入外部宿主的最终链接命令；nm 仍无 luaL_checkoption，真实 C 模块加载仍报缺符号。
+- rustc-link-lib=static:+whole-archive 的元数据确实传播：最终命令出现 -force_load。不过仍不保留/导出该函数，实际加载继续失败。宿主 build.rs 输出相同导出参数后，最终命令、符号表、C 模块正常调用及参数错误测试全部通过。
+- 结论从文档推断收敛为本地实测：原生库链接修饰符会传播，依赖库的 rustc-link-arg 不会；仅修改 cosmos/build.rs 不能完成外部宿主的导出配置。
+- 报告、四组原始日志、结果 JSON 与临时验证脚本保存在 target/cosmos-link-propagation-g4xxxqeo/；隔离源码与编译目录已清理。项目实现与原 CLI 二进制保持原样，未自动提交；后续正式方案据此处理宿主链接边界。
+
+## 2026-11-14 为 CLI 配置 C API 导出并记录 Machine 宿主要求
+
+- 新增 cosmos-cli/build.rs，以目标平台而非构建主机选择参数；仅对 cosmos-cli 最终二进制导出 lua_*、luaL_*、luaopen_*、luaJIT_*，macOS 使用 -exported_symbol，Linux 使用 --export-dynamic-symbol，不公开 Rust ffi 或增加 C 依赖。
+- 当前 LuaJIT 静态库的 148 个相关 API 在 macOS debug 及 release / fat LTO CLI 中均完整保留并导出，无需额外 whole-archive 或改动 cosmos/build.rs。release 验证使用 profile.release.lto="fat"、codegen-units=1。
+- README 新增 C 扩展节，说明 Lua 5.1 / LuaJIT ABI、LuaRocks 路径配置，以及外部 Machine 宿主必须自行设置最终链接参数；提供 CLI build.rs 参考，提醒替换宿主二进制名并合并已有导出配置。HANDOFF 同步更新。
+- 新增最终 CLI 动态符号查找回归，覆盖四个 API 符号族与之前缺失的 luaL_checkoption。工作区 40 项测试与 5 项编译失败检查、无默认 feature 的 CLI 7 项测试通过；工作区严格 Clippy、格式与差异检查通过。
+- 从 LuaRocks 的 LuaFileSystem 1.9.0-1 源码包编译真实 lfs.so，debug、release / fat LTO 及无 network 构建均通过文件属性、目录迭代、参数错误及异步挂起后再次调用验证。HTTP、WebSocket、spawn、sleep、sync 示例实际运行全部通过。
+- 临时源码包及 C 扩展已清理。Linux 导出参数已配置，本轮未在 Linux 上构建或运行；本机验证为 macOS ARM64。不自动提交，后续平台回归仍需覆盖实际 Linux 环境。
+
+## 2026-11-14 提交 CLI 模块配置、C 扩展支持与使用文档
+
+- 按用户要求，将默认 network feature、Lua / C 搜索路径参数与 Machine 配置 API、CLI C ABI 导出及回归、项目与网络 README、交接和进度记录一并提交，不 push。
+- 提交前核对完整差异与新增文件，沿用已通过的工作区 40 项测试、5 项编译失败检查、无默认 feature 回归、严格 Clippy、examples 和 macOS debug / release-LTO 真实 C 扩展验证结果。
+- 后续保留外部 Machine 宿主自行配置最终链接的边界；Linux 配置仍待实际环境回归。

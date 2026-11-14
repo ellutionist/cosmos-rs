@@ -66,7 +66,34 @@ impl Machine {
 
     /// 同步加载模块的 Lua 定义；需要异步等待时返回错误，用户脚本应通过 exec 执行。
     pub fn load(&mut self, name: &str, source: &str) -> Result<(), String> {
-        let thread = self.prepare(name, source, &[])?;
+        self.load_with_args(name, source, &[])
+    }
+
+    /// 前置 Lua 模块搜索模板，以分号分隔，保留已有 package.path；空字符串不改变路径。
+    /// LUA_PATH 及其中 ;; 展开默认路径的规则由 LuaJIT 在创建 VM 时处理。
+    pub fn prepend_path(&mut self, paths: &str) -> Result<(), String> {
+        self.prepend_search_path("path", paths)
+    }
+
+    /// 前置 C 扩展搜索模板，以分号分隔，保留已有 package.cpath；空字符串不改变路径。
+    /// LUA_CPATH 及其中 ;; 展开默认路径的规则由 LuaJIT 在创建 VM 时处理。
+    pub fn prepend_cpath(&mut self, paths: &str) -> Result<(), String> {
+        self.prepend_search_path("cpath", paths)
+    }
+
+    fn prepend_search_path(&mut self, field: &str, paths: &str) -> Result<(), String> {
+        if paths.is_empty() {
+            return Ok(());
+        }
+        self.load_with_args(
+            "模块搜索路径",
+            "local field, paths = ...; package[field] = paths .. ';' .. package[field]",
+            &[field.to_owned(), paths.to_owned()],
+        )
+    }
+
+    fn load_with_args(&mut self, name: &str, source: &str, args: &[String]) -> Result<(), String> {
+        let thread = self.prepare(name, source, args)?;
         let mut run = std::pin::pin!(thread.run::<()>());
         let _entered = self.runtime.enter();
         let _local = self.local.as_ref().unwrap().enter();

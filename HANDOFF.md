@@ -10,6 +10,8 @@
 - 异步边界采用 `PendingOp::poll_push`，只保留 `PushLua` 转换协议；不采用返回值闭包装箱方案（见 §5）。
 - HTTP/WebSocket 回调已改用 `LuaFunction::call<A, R>`；userdata 借用失败只返回 Err，最外层 trampoline 统一抛 Lua 错误。
 - 外部嵌入使用 `Machine::new(tokio_handle)`，插件实现 `Module` 并通过 add_module 注入；网络插件为 `Network`。
+- Lua / C 模块路径分别沿用 LuaJIT 的 `LUA_PATH` / `LUA_CPATH` 与原生默认值（`;;` 展开默认路径）；CLI 可重复传入 `--path` / `--cpath` 前置模板，宿主使用 `Machine::prepend_path` / `prepend_cpath`，不修改进程环境变量。
+- CLI 的 build.rs 为 macOS / Linux 最终二进制保留并导出 Lua C API；该链接参数不会传播给外部 Machine 宿主。宿主需自行配置，见 README 的 C 扩展节；cosmos 的 Rust ffi 仍私有。
 - 交流、注释、文档一律**中文**；**不要自动 commit / push**。
 
 ## 1. 环境与结构
@@ -20,7 +22,7 @@ cosmos-rs/
   cosmos-macros/     # #[userdata]、#[derive(FromLua/PushLua)]，只生成 Rust 调用/转换组合
   cosmos-network/    # 功能模块：tcp/{stream,tls} / http / websocket + bridge.rs（叶子转换）
   Cargo.toml         # 虚拟 workspace，默认成员为 cosmos-cli
-  cosmos-cli/        # clap 命令行入口，注入 Runtime Handle/Network
+  cosmos-cli/        # clap 命令行入口，注入 Runtime Handle，默认 network feature 注入 Network
   cosmos-network/examples/machine.rs # Rust 嵌入示例，根 examples/machine.lua 验证参数与模块入口
   examples/*.lua     # 全部端到端用例
   cosmos-network/lua/ # 内嵌 Lua 源码（include_str! 随二进制编译）

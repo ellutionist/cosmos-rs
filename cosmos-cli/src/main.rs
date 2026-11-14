@@ -7,6 +7,7 @@ use std::process::ExitCode;
 
 use clap::Parser;
 use cosmos::Machine;
+#[cfg(feature = "network")]
 use cosmos_network::Network;
 
 #[derive(Parser)]
@@ -16,6 +17,14 @@ use cosmos_network::Network;
     about = "使用 cosmos Machine 运行 Lua 脚本"
 )]
 struct Args {
+    /// 前置 Lua 模块搜索模板（如 ./lib/?.lua;./lib/?/init.lua），可重复指定
+    #[arg(long, value_name = "PATH")]
+    path: Vec<String>,
+
+    /// 前置 C 扩展搜索模板（如 ./lib/?.so），可重复指定或用分号分隔
+    #[arg(long, value_name = "PATH")]
+    cpath: Vec<String>,
+
     /// Lua 脚本路径（- 表示标准输入），后续参数通过 ... 传给脚本
     #[arg(
         value_names = ["SCRIPT", "ARG"],
@@ -49,7 +58,7 @@ fn main() -> ExitCode {
             return ExitCode::from(2);
         }
     };
-    match run(&script, &source, &script_args) {
+    match run(&script, &source, &script_args, &args.path, &args.cpath) {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
             eprintln!("执行失败: {error}");
@@ -58,12 +67,21 @@ fn main() -> ExitCode {
     }
 }
 
-fn run(script: &Path, source: &str, script_args: &[String]) -> Result<(), String> {
+fn run(
+    script: &Path,
+    source: &str,
+    script_args: &[String],
+    path: &[String],
+    cpath: &[String],
+) -> Result<(), String> {
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
         .map_err(|error| format!("无法创建 Tokio runtime: {error}"))?;
     let mut machine = Machine::new(runtime.handle().clone())?;
+    machine.prepend_path(&path.join(";"))?;
+    machine.prepend_cpath(&cpath.join(";"))?;
+    #[cfg(feature = "network")]
     machine.add_module(Network)?;
 
     let name = if script == Path::new("-") {
