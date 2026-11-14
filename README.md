@@ -184,35 +184,80 @@ assert(row.field == cosmos.null)  -- 判断空值
 
 ### TCP：cosmos.network.tcp.stream
 
+`connect` 建立客户端连接，`listen` / `accept` 接受服务端连接。连接通过 `split()` 拆成 reader 和 writer，可以分别交给不同协程读写。
+
+客户端：
+
 ```lua
 local Tcp = require("cosmos.network.tcp.stream")
-local net  = require("cosmos.network.tcp") -- { stream, tls }
 
-local conn = assert(Tcp.connect("127.0.0.1", 8080, 3000)) -- 第三参超时可选
+local conn = assert(Tcp.connect("127.0.0.1", 9001, 3000)) -- 第三参为连接超时（毫秒），可省略
 conn:settimeout(1000)     -- 毫秒；<= 0 清除超时，超时不关闭连接
-conn:setbufsize(65536)    -- 限制累积读入字节；n <= 0 解除
+conn:setbufsize(65536)    -- 限制按行、分隔符或 EOF 读取的累积大小；<= 0 解除
+local reader, writer = conn:split()
 
-conn:write("GET / HTTP/1.1\r\nHost: x\r\n\r\n") -- write_all 保证整块写完
-print(conn:receive("*l"))                       -- 读一行（去行尾）
-print(conn:receive(4))                          -- 读精确 4 字节
-print(conn:receive("*a"))                       -- 读到 EOF
-
--- receiveuntil(delim) 返回迭代器：每次调用读到分隔符（不含，已消费）
-for chunk in conn:receiveuntil("\r\n") do
-    print(chunk)
-end
-
-local reader, writer = conn:split() -- 拆成两个独立 userdata，可同时读写
-conn:close()
+local payload = "hello\0tcp"
+assert(writer:write(payload .. "\n"))    -- 返回发送字节数，保证整块写完
+local data, err = reader:receive("*l")  -- 读一行，去掉行尾换行符
+assert(data == payload, err)
+writer:close()
+reader:close()
 ```
 
-`receive` 的三值协议：`data, err, partial`，`err` 取 `"closed"` / `"timeout"` / `"buffer overflow"`。服务端 `Tcp.listen(port, timeout?)` 返回监听器，`listener:accept()` 挂起直到新连接。
+服务端（先启动，等待客户端连接）：
+
+```lua
+local Tcp = require("cosmos.network.tcp.stream")
+
+local server = assert(Tcp.listen(9001, 3000)) -- 监听 0.0.0.0:9001，第二参为 accept 超时
+local conn = assert(server:accept())
+conn:settimeout(1000)
+local reader, writer = conn:split()
+
+local data, err = reader:receive("*l")
+assert(data, err)
+assert(writer:write(data .. "\n")) -- 回显收到的内容
+writer:close()
+reader:close()
+server:close()
+```
+
+`reader:receive()` 缺省按行读取；`receive(n)` 读精确 n 字节，`receive("*a")` 读到 EOF，`receive("*L")` 保留行尾换行符。`receiveuntil(delim)` 返回按分隔符读取的迭代器，每次返回分隔符前的内容并消费分隔符。
+
+读取失败返回 `nil, err, partial`，常见错误为 `"closed"` / `"timeout"` / `"buffer overflow"`；`partial` 是本次已读取的内容。可分别运行[服务端](examples/tcp_server.lua)和[客户端](examples/tcp_client.lua)，传入相同端口；脚本还演示多连接并发与二进制回显。
 
 ### UDP：cosmos.network.udp
 
-`Udp.bind(host, port[, timeout_ms])` 创建绑定本地端口的 socket，`Udp.connect(host, port[, timeout_ms])` 自动绑定并设置默认目标。`send` / `sendto` 每次发送一份报文，`receive` 返回报文内容，`receivefrom` 返回 `data, host, port`；支持 IPv4、IPv6、空报文和任意二进制。
+支持 IPv4 / IPv6、二进制和空报文。`bind` 用于接收任意来源的报文，`connect` 设置默认对端，之后用 `send` / `receive` 收发：
 
-同一句柄可跨协程收发，超时和取消等待后仍能继续使用，关闭会唤醒所有等待者。接收超限返回错误并丢弃整份报文，不返回截断内容。详细接口见 [UDP 文档](cosmos-network/README.md#udp)，实际用法见 [udp.lua](examples/udp.lua)。
+客户端：
+
+```lua
+local Udp = require("cosmos.network.udp")
+
+local client = assert(Udp.connect("127.0.0.1", 9000, 3000)) -- 自动绑定本地端口，设置默认对端
+client:settimeout(1000)             -- 后续收发超时；<= 0 清除
+assert(client:send("hello\0udp"))   -- 一次发送一份报文，返回字节数
+local data, err = client:receive()  -- 一次接收一份报文，可传 max_size 限制大小
+assert(data == "hello\0udp", err)
+client:close()
+```
+
+服务端（先启动，等待客户端发包）：
+
+```lua
+local Udp = require("cosmos.network.udp")
+
+local server = assert(Udp.bind("127.0.0.1", 9000, 3000)) -- 绑定本地端口，第三参为初始超时
+local data, host, port = server:receivefrom() -- 报文内容、来源 IP、来源端口
+assert(data, host)                          -- 失败时返回 nil, 错误串
+assert(server:sendto(data, host, port))      -- 向来源地址回包
+server:close()
+```
+
+失败返回 `nil, 错误串`，超时为 `"timeout"`、关闭为 `"closed"`。收发上限均为 65507 字节；接收超过 `max_size` 的报文时返回 `nil, "buffer overflow"`，丢弃该报文，下一份仍可继续接收。空报文返回 `""`，不会被当作关闭。
+
+同一句柄可跨协程收发，超时或取消等待后仍能继续使用；`close()` 唤醒所有等待者。`localaddr()` / `peeraddr()` 查询本地与默认对端地址，`setbroadcast(true)` 开启广播发送。可分别运行[服务端](examples/udp_server.lua)和[客户端](examples/udp_client.lua)，传入相同端口；报文边界、并发与取消用法见 [udp.lua](examples/udp.lua)。
 
 ### TLS：cosmos.network.tcp.tls
 

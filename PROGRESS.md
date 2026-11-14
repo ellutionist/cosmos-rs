@@ -932,3 +932,27 @@
 - 按用户明确要求，将 UDP 收发与生命周期、网络公共超时工具、三元组桥接、回归用例和文档一并提交，提交信息使用英文，不 push。
 - 提交前核对全部改动和新增文件，差异检查通过；沿用已通过的工作区 62 项测试、5 项编译失败检查、严格 Clippy、CLI feature 组合及实际 UDP/TCP/TLS/socket/HTTP/WebSocket 用例结果。本轮没有行为修改，不重复执行完整回归。
 - 后续按需求补充多播、高级 socket 选项或压力验证；ClickHouse 仍为待做。
+
+## 2026-11-14 调整 UDP 文档风格
+
+- 按用户反馈，对照根 README 中 TCP、TLS、HTTP 等既有章节，将 UDP 改为简短介绍、带中文注释的 Lua 用法和必要语义说明。新增可直接运行的单进程回显示例，展示 bind / connect、receivefrom / sendto、超时与关闭，完整回归仍链接 examples/udp.lua。
+- 精简 network README 的 UDP 章节，移除单独的接口清单和底层引用、初始化实现等细节，沿用相邻内容的接口说明方式；保留错误返回、报文上限和丢弃、空报文与超时/取消等使用时需要的信息。
+- 从 README 提取新增 Lua 代码，实际通过 cosmos-cli 运行；本地链接和差异检查通过。仅修改文档，没有行为变更，不重复运行工作区测试，未提交或推送。
+
+## 2026-11-14 拆分 UDP 客户端与服务端示例
+
+- 根据用户反馈，将原来混在同一段单进程回显代码中的客户端和服务端拆成两个独立代码块；客户端先展示 Udp.connect / send / receive，服务端单独展示 bind / receivefrom / sendto，两端不再依赖同一段代码里的变量。
+- 新增 examples/udp_client.lua 与 udp_server.lua，按现有 TCP/TLS 示例方式传入相同端口并分别运行，验证包含 NUL 和非 UTF-8 字节的回显。原 examples/udp.lua 继续作为完整单进程回归，README、network README 和 HANDOFF 同步补充双进程入口。
+- 分别提取 README 两端代码及运行新 examples 脚本，两组双进程收发验证均通过；本地链接与差异检查通过。没有修改 Rust 实现，不重复运行工作区测试，未提交或推送。
+
+## 2026-11-14 统一 TCP 客户端与服务端文档
+
+- 按用户要求，将根 README 的 TCP 章节也拆成独立客户端、服务端代码块，两端使用相同端口完成一次二进制行回显，分别展示 connect 与 listen / accept；链接已有 tcp_client.lua / tcp_server.lua 的多连接并发回归。
+- 核对源码发现旧文档直接在 conn 上调用 write / receive / receiveuntil，但实际连接须先 split，再通过 reader / writer 操作。已修正文档调用顺序，读取模式和三值错误协议保留为简短说明，不再在同一数据流上串联互不配套的读取示例。
+- 从 README 提取两端代码并实际运行双进程收发，同时运行原有 TCP 客户端/服务端脚本，两组均通过；network README 补充入口，本地链接和差异检查通过。仅修改文档，没有改动 Rust 或现有 Lua 脚本，不重复执行工作区测试，未提交或推送。
+
+## 2026-11-14 提交 TCP/UDP 文档与独立示例
+
+- 按用户明确要求，将 TCP/UDP 的客户端、服务端文档整理、TCP 正确 split 调用说明、独立 UDP 示例及交接记录一并提交，提交信息使用英文，不 push。
+- 提交前核对全部差异与新增脚本，差异检查通过；沿用已完成的 README TCP/UDP 双进程验证、新 UDP 示例及原 TCP 并发脚本验证结果，没有新的行为修改，不重复执行已通过的检查。
+- 后续能力继续按既有待做记录安排，本次不扩展实现范围。

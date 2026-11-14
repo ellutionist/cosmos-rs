@@ -81,6 +81,7 @@ cosmos-rs/
 - bind / connect 的初始超时同时覆盖解析/初始化和之后的收发；sendto 在单个期限内解析并发送。connect 不保证对端可达，也不做应用握手；send 用默认目标，sendto 仅用于未连接 socket，并筛选与本地地址族相同的解析结果。settimeout 只影响之后的操作，<=0 清除。
 - 将原 TCP 中的 with_deadline / timeout_from_ms 移到私有 deadline 模块，现有 TCP/TLS/socket/HTTP/WebSocket 行为不变，UDP 不依赖 TCP 实现。核心仅补三元组 PushLua，复用二元组组合来返回 data/host/port；没有新增裸 FFI 或开放运行时实现。
 - examples/udp.lua 与集成测试覆盖 IPv4 / IPv6、两种 Tokio 宿主、来源过滤、边界/空包/二进制、超限后恢复、非法参数/地址、并发收发、多等待者关闭和取消/GC/VM 销毁。后续按需补多播、socket 高级选项及长时间压力验证；本轮不自动提交或推送。
+- examples/udp_server.lua / udp_client.lua 提供独立的双进程回显示例，先启动服务端，再用相同端口运行客户端；根 README 分别展示两端代码，udp.lua 继续保留为完整单进程回归。
 
 ### sonic-rs JSON（2026-11-14）
 
