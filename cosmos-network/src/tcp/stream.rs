@@ -25,7 +25,6 @@
 //! 关闭后的 reader/writer 再调用不 panic：receive 返回 nil,"closed"，write 返回 nil,"closed"。
 
 use std::cell::Cell;
-use std::future::Future;
 use std::pin::Pin;
 use std::rc::Rc;
 use std::task::{Context, Poll};
@@ -41,24 +40,8 @@ use tokio::time::Instant;
 use cosmos::userdata::{LuaBytes, Nil};
 
 use super::tls::TlsIo;
+use crate::deadline::{timeout_from_ms, with_deadline};
 use crate::error::classify_io;
-
-/// 可选 deadline 包裹一个 future：Some 时到点返回 Err(())（调用方转成 "timeout"），
-/// None 时无限等待。用于 settimeout 生效后的各读写点。
-pub(crate) async fn with_deadline<F, T>(deadline: Option<Instant>, fut: F) -> Result<T, ()>
-where
-    F: Future<Output = T>,
-{
-    match deadline {
-        Some(d) => tokio::time::timeout_at(d, fut).await.map_err(|_| ()),
-        None => Ok(fut.await),
-    }
-}
-
-/// settimeout 的毫秒参数：<= 0 表示清除超时（None）
-pub(crate) fn timeout_from_ms(ms: i64) -> Option<Duration> {
-    (ms > 0).then(|| Duration::from_millis(ms as u64))
-}
 
 /// setbufsize 的字节参数：<= 0 表示不限（None）
 pub(super) fn size_limit(n: i64) -> Option<usize> {

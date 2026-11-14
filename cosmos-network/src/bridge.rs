@@ -21,6 +21,7 @@ use crate::tcp::stream::{
     ReceivePattern, Tcp, TcpConn, TcpListener, TcpReader, TcpUntil, TcpWriter, UntilIter,
 };
 use crate::tcp::tls::{ClientCfg, ServerCfg, Tls, TlsConn, TlsContext, TlsListener};
+use crate::udp::Udp;
 use crate::websocket::conn::WsConn;
 use crate::websocket::Ws;
 
@@ -132,6 +133,7 @@ impl<'lua> FromLua<'lua> for ServerCfg {
 
 /// 注册全部网络 userdata 类型。
 pub(crate) fn register(machine: &mut cosmos::Machine) {
+    machine.register::<Udp>();
     machine.register::<Socket>();
     machine.register::<SocketListener>();
     machine.register::<Tcp>();

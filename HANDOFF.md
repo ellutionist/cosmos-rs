@@ -10,6 +10,7 @@
 - 异步边界采用 `PendingOp::poll_push`，只保留 `PushLua` 转换协议；不采用返回值闭包装箱方案（见 §5）。
 - HTTP/WebSocket 回调已改用 `LuaFunction::call<A, R>`；userdata 借用失败只返回 Err，最外层 trampoline 统一抛 Lua 错误。
 - 外部嵌入使用 `Machine::new(tokio_handle)`，插件实现 `Module` 并通过 add_module 注入；插件包括 `Network`、`Encoding`、`Encryption`、`Database`，CLI 默认启用四个对应 feature。
+- UDP 已作为 `cosmos.network.udp` 接入 Network，支持 IPv4 / IPv6、报文边界、二进制、域名、并发收发、超时/取消与关闭唤醒；不再属于待做。
 - `cosmos.database.mysql` 已完成 lua-resty-mysql 适配与按 client 隔离的空闲连接池；真实 MySQL 8.4.5 的明文 TCP / TLS 回归通过。认证异常与大包另有离线协议测试；尚未用真实 MariaDB 验证，不支持服务端预编译语句。
 - `cosmos.database.redis` 已适配 lua-resty-redis 0.34，提供 RESP2、pipeline、事务、Pub/Sub 与 client 池。数据库 crate 的 `mysql` / `redis` feature 默认全开；CLI 的 `database` 是两者合集，也可单独选择，依赖随数据库关闭。Redis 8.10.3 的真实回归通过，配置用 COSMOS_REDIS_URL。
 - Lua / C 模块路径分别沿用 LuaJIT 的 `LUA_PATH` / `LUA_CPATH` 与原生默认值（`;;` 展开默认路径）；CLI 可重复传入 `--path` / `--cpath` 前置模板，宿主使用 `Machine::prepend_path` / `prepend_cpath`，不修改进程环境变量。
@@ -22,7 +23,7 @@
 cosmos-rs/
   cosmos/            # 运行时 + 桥接层：machine / ffi / userdata / light_thread / stack / libs / builtin
   cosmos-macros/     # #[userdata]、#[derive(FromLua/PushLua)]，只生成 Rust 调用/转换组合
-  cosmos-network/    # 功能模块：tcp/{stream,tls} / http / websocket + bridge.rs（叶子转换）
+  cosmos-network/    # 功能模块：tcp/{stream,tls} / udp / http / websocket + bridge.rs（叶子转换）
   cosmos-encoding/   # Encoding 插件：Hex、Base64、URI、sonic-rs JSON
   cosmos-encryption/ # Encryption 插件：SHA、RSA-OAEP、Ed25519
   cosmos-database/   # Database 插件：按 feature 选择 mysql / redis，内嵌 Lua 协议与 client 池
@@ -40,7 +41,7 @@ cosmos-rs/
 
 ## 2. 硬性约定（详见 `AGENTS.md`）
 
-1. **功能模块零 FFI**：tcp / tls / http / websocket 里不出现 `cosmos::ffi`、不直接调 `lua_*`、不做裸栈操作。
+1. **功能模块零 FFI**：tcp / udp / tls / http / websocket 里不出现 `cosmos::ffi`、不直接调 `lua_*`、不做裸栈操作。
 2. **桥接 = 组合**：基层类型各实现 `PushLua` / `FromLua`，结构体靠 derive，枚举靠 derive，
    多返回值靠元组/枚举字段顺序。**禁止**把命令式栈操作换个文件存放（用户明确说过那是"马甲"，没有意义）。
 3. 裸 FFI 仅限 cosmos 运行时/桥接层；network bridge 与宏生成代码均只能使用受控上下文，不能引用 ffi。
@@ -71,6 +72,15 @@ cosmos-rs/
 - HTTP client 已改为实例独占连接池，构造时固定 TLS 配置，调用迁移为 new + 冒号 request。
 
 ## 4. 最近完成的工作
+
+### UDP（2026-11-14）
+
+- 单一 Udp userdata 同时提供静态 bind / connect 与实例收发，不新增聚合空壳或 Lua 包装。通过 Network 注册为 cosmos.network.udp，CLI 沿用 network feature；Rust 类型仅 crate 内可见。
+- 支持 IPv4 / IPv6、域名、二进制与空报文、来源地址和广播开关；发送最多 65507 字节，接收缺省上限相同。接收使用完整普通 IP 报文缓冲，再检查调用者上限，超限丢弃整份并返回 nil+buffer overflow，不返回截断内容或 TCP 式 partial。IPv6 地址保留 scope ID。
+- Udp 是 Rc 共享句柄，异步 self 通过 Clone 转换，RefCell 只在取底层 Rc 或关闭时短暂借用。收发可跨协程并行，超时和取消保留 socket；close 幂等、优先通知所有挂起操作返回 closed，等待者退出后释放最后的底层引用。无等待时 GC 直接关闭，Machine 销毁时取消在途操作并回收端口。
+- bind / connect 的初始超时同时覆盖解析/初始化和之后的收发；sendto 在单个期限内解析并发送。connect 不保证对端可达，也不做应用握手；send 用默认目标，sendto 仅用于未连接 socket，并筛选与本地地址族相同的解析结果。settimeout 只影响之后的操作，<=0 清除。
+- 将原 TCP 中的 with_deadline / timeout_from_ms 移到私有 deadline 模块，现有 TCP/TLS/socket/HTTP/WebSocket 行为不变，UDP 不依赖 TCP 实现。核心仅补三元组 PushLua，复用二元组组合来返回 data/host/port；没有新增裸 FFI 或开放运行时实现。
+- examples/udp.lua 与集成测试覆盖 IPv4 / IPv6、两种 Tokio 宿主、来源过滤、边界/空包/二进制、超限后恢复、非法参数/地址、并发收发、多等待者关闭和取消/GC/VM 销毁。后续按需补多播、socket 高级选项及长时间压力验证；本轮不自动提交或推送。
 
 ### sonic-rs JSON（2026-11-14）
 
@@ -370,7 +380,6 @@ assert(err == nil, err)
 ### 尚未排期
 
 - ClickHouse 原生 TCP 接入：用户明确放到待做；候选 Rust 原生客户端需评估协议版本、列式类型、流式结果与取消/回池、压缩依赖，不在当前 JSON 工作中启动。
-- UDP：优先级待用户确认；Unix domain socket 已包含在顺序 socket 接口。
 - HTTP/3：用户明确暂缓。
 - 压测脚本：`examples/http_bench.lua` / `examples/http_bench_client.lua`。
 
@@ -392,6 +401,8 @@ assert(err == nil, err)
 | `cosmos/src/stack.rs` | 私有栈辅助，不通过 userdata 公开重导出 |
 | `cosmos-macros/src/lib.rs` | `#[userdata]`、`FromLua`/`PushLua` derive |
 | `cosmos-network/src/bridge.rs` | 只组合受控上下文的叶子转换、until Rust 调用适配及类型注册 |
+| `cosmos-network/src/deadline.rs` | 网络协议共用的私有截止时间与毫秒转换 |
+| `cosmos-network/src/udp.rs` | UDP 报文、共享句柄、地址与超时/关闭语义 |
 | `cosmos-network/src/tcp/mod.rs` | TCP 协议族模块声明：stream 与 tls |
 | `cosmos-network/src/tcp/stream.rs` | TCP 状态机、`ReceivePattern`/`ReceiveOutcome`、`receiveuntil` |
 | `cosmos-network/src/tcp/tls.rs` | rustls 客户端/服务端、`TlsContext`（证书/信任根/ALPN/mTLS） |

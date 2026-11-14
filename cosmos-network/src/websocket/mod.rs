@@ -31,10 +31,10 @@ use tokio::net::TcpStream;
 use tokio::time::Instant;
 
 use self::conn::WsConn;
+use crate::deadline::{timeout_from_ms, with_deadline};
 use crate::error::classify_io;
 use crate::http::client::default_tls_config;
 use crate::http::Headers;
-use crate::tcp::stream::{timeout_from_ms, with_deadline};
 use crate::tcp::tls::{connect_tls_io, with_alpn_client, ClientCfg};
 
 const DEFAULT_MAX_MESSAGE: usize = 64 * 1024 * 1024;

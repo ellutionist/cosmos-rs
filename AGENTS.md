@@ -6,7 +6,7 @@
 
 ## 分层与桥接（核心约束）
 
-功能模块（cosmos-network 的 tcp / tls / http / websocket）只描述协议与状态机，
+功能模块（cosmos-network 的 tcp / udp / tls / http / websocket）只描述协议与状态机，
 **不允许出现任何裸 Lua 栈操作**：不写 `cosmos::ffi::*`、不直接调用 `lua_*`、
 不持有 `*mut lua_State` 做 gettop/type/push 之类的操作。
 

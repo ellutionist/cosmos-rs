@@ -12,6 +12,7 @@
   - [cosmos.null：可存储的空值](#cosmosnull可存储的空值)
 - [网络插件](#网络插件)
   - [TCP：cosmos.network.tcp.stream](#tcpcosmosnetworktcpstream)
+  - [UDP：cosmos.network.udp](#udpcosmosnetworkudp)
   - [TLS：cosmos.network.tcp.tls](#tlscosmosnetworktcptls)
   - [顺序协议 socket：cosmos.network.socket](#顺序协议-socketcosmosnetworksocket)
   - [HTTP 客户端：cosmos.network.http.client](#http-客户端cosmosnetworkhttpclient)
@@ -206,6 +207,12 @@ conn:close()
 ```
 
 `receive` 的三值协议：`data, err, partial`，`err` 取 `"closed"` / `"timeout"` / `"buffer overflow"`。服务端 `Tcp.listen(port, timeout?)` 返回监听器，`listener:accept()` 挂起直到新连接。
+
+### UDP：cosmos.network.udp
+
+`Udp.bind(host, port[, timeout_ms])` 创建绑定本地端口的 socket，`Udp.connect(host, port[, timeout_ms])` 自动绑定并设置默认目标。`send` / `sendto` 每次发送一份报文，`receive` 返回报文内容，`receivefrom` 返回 `data, host, port`；支持 IPv4、IPv6、空报文和任意二进制。
+
+同一句柄可跨协程收发，超时和取消等待后仍能继续使用，关闭会唤醒所有等待者。接收超限返回错误并丢弃整份报文，不返回截断内容。详细接口见 [UDP 文档](cosmos-network/README.md#udp)，实际用法见 [udp.lua](examples/udp.lua)。
 
 ### TLS：cosmos.network.tcp.tls
 
@@ -621,7 +628,7 @@ C 扩展的调用是同步的：阻塞操作会阻塞 `Machine` 所在线程，�
 
 | Feature | 插件 | 依赖 |
 | --- | --- | --- |
-| `network` | 网络（TCP / TLS / socket / HTTP / WebSocket） | — |
+| `network` | 网络（TCP / UDP / TLS / socket / HTTP / WebSocket） | — |
 | `encoding` | 编解码（hex / base64 / uri / json） | — |
 | `encryption` | 加密（sha1 / sha256 / sha512 / ed25519 / rsa） | — |
 | `database` | 数据库（MySQL + Redis） | `mysql` + `redis` |

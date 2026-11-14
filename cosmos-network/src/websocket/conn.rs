@@ -12,9 +12,9 @@ use tokio::time::Instant;
 
 use cosmos::userdata::LuaFunction;
 
+use crate::deadline::{timeout_from_ms, with_deadline};
 use crate::http::server::HttpRequest;
 use crate::http::LuaBytes;
-use crate::tcp::stream::{timeout_from_ms, with_deadline};
 
 /// 握手完成后的连接统一类型（服务端 Upgraded / 客户端 Upgraded 相同）
 type WsStream = FragmentCollector<TokioIo<Upgraded>>;

@@ -30,10 +30,9 @@ use tokio_rustls::client::TlsStream as ClientTlsStream;
 use tokio_rustls::server::TlsStream as ServerTlsStream;
 use tokio_rustls::{TlsAcceptor, TlsConnector};
 
-use super::stream::{
-    size_limit, timeout_from_ms, with_deadline, Duplex, State, TcpReader, TcpWriter,
-};
+use super::stream::{size_limit, Duplex, State, TcpReader, TcpWriter};
 use super::transport::PlainIo;
+use crate::deadline::{timeout_from_ms, with_deadline};
 use crate::error::classify_io;
 
 /// 客户端的默认配置只构建一次（webpki 根证书 ~150 个锚点）

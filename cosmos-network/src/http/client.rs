@@ -34,8 +34,8 @@ use tokio::net::TcpStream;
 use tokio::time::Instant;
 
 use super::{version_num, Conn, Headers, LuaBytes};
+use crate::deadline::{timeout_from_ms, with_deadline};
 use crate::error::classify_io;
-use crate::tcp::stream::{timeout_from_ms, with_deadline};
 use crate::tcp::tls::{connect_tls_io, ClientCfg};
 
 type BoxErr = Box<dyn StdError + Send + Sync>;

@@ -914,3 +914,21 @@
 - 文档中所有 API 名称、参数顺序、返回值协议均已对照源码/examples 核实；无代码修改，
   未运行测试，未提交。
 - 下一步由用户安排；UDP / unix socket 与 ClickHouse 仍在待做清单。
+
+## 2026-11-14 接入 UDP 网络模块
+
+- 按用户要求新增 cosmos.network.udp，随 Network 插件和 CLI 的 network feature 注册，无需额外插件或 feature。单一 Udp userdata 提供静态 bind / connect 和实例收发，Rust 类型及内部表示保持最小可见性，没有额外的工厂/连接双层句柄，也没有新增 C 库或裸 Lua FFI。
+- 支持 IPv4 / IPv6、域名解析、任意二进制与空报文、来源与本地/对端地址、广播开关、超时及关闭。bind 的端口 0 由系统分配；connect 自动绑定同族地址，只设置默认目标与内核来源过滤，不保证远端可达。sendto 用于未连接 socket，域名解析后选择与本地地址族匹配的目标，IPv6 来源保留 scope ID。
+- 每次调用只收发一份报文，发送最多 65507 字节，不拆包重试或拼接；接收缺省上限相同，可指定更小上限。先用完整普通 IP 报文缓冲接收，再检查用户上限，超限整份丢弃并返回 nil+buffer overflow，不返回截断内容或 TCP 式 partial，下一报文仍可正常读取。空报文返回空字符串或发送长度 0，不能当作关闭。
+- 异步方法使用拥有型 Clone 句柄，Rc 内共享底层 socket 与配置，RefCell 只在取引用或关闭时短暂借用，不跨 await 持有 userdata 借用。同一句柄支持并发收发和多个接收者；超时或取消当前等待保留 socket。close 幂等并优先通知所有等待者返回 closed，退出后释放其底层引用；无在途操作时 GC 自动回收，Machine 销毁取消挂起操作并释放端口。
+- 构造时的毫秒超时同时覆盖 DNS/地址初始化与后续收发的初始设置，sendto 的解析和发送共用一个超时；settimeout 只影响之后开始的操作，有限的非正值均可清除。严格校验端口、接收大小和非有限超时，小数端口与小数接收大小直接拒绝，不截断成整数；非法接收参数不能提前消费报文。
+- 原 with_deadline / timeout_from_ms 位于 TCP stream，直接复用会让 UDP 依赖 TCP 实现；将它们平移到私有 deadline 模块，TCP/TLS/socket/HTTP/WebSocket 的语义保持原样。Tokio 的 sync / macros feature 显式声明，不依赖其他插件间接启用。首次编译发现核心仅有二元组 PushLua，按分层约定补充组合二元组的三元组实现，receivefrom 直接返回 data/host/port，不在功能模块手写栈操作。
+- 新增 examples/udp.lua 与独立集成测试，实际覆盖 IPv4 / IPv6、单线程 / 多线程 Tokio 宿主、短长二进制/空包、报文边界、来源过滤、DNS 地址族、超限与错误后恢复、超时、并发、取消、多个等待者关闭、GC 与 VM 销毁。CLI 注册测试同时验证 require 与父表身份，以及 network 关闭时 UDP 不可用。
+- 工作区 62 项普通测试、5 项编译失败文档检查及严格 Clippy 通过；仅 network / 全关 CLI 分别通过 10 / 9 项测试，仅 network CLI 的 UDP 实际用例通过。默认 CLI 实际运行 IPv4/IPv6 UDP、顺序 socket、HTTP、WebSocket，以及 TCP/TLS 双进程二进制回归均通过，已恢复默认 CLI 构建。
+- 现有 README 增补 UDP 索引与入口，详细 API 与错误、超时、并发和资源语义放在 network README；HANDOFF 去除 UDP 待做条目，工程约定补齐 UDP 零 FFI 边界。格式、链接与差异检查通过。本轮不自动提交或推送；后续按需求考虑多播、高级 socket 选项和长期压力验证，ClickHouse 仍保持待做。
+
+## 2026-11-14 提交 UDP 网络模块
+
+- 按用户明确要求，将 UDP 收发与生命周期、网络公共超时工具、三元组桥接、回归用例和文档一并提交，提交信息使用英文，不 push。
+- 提交前核对全部改动和新增文件，差异检查通过；沿用已通过的工作区 62 项测试、5 项编译失败检查、严格 Clippy、CLI feature 组合及实际 UDP/TCP/TLS/socket/HTTP/WebSocket 用例结果。本轮没有行为修改，不重复执行完整回归。
+- 后续按需求补充多播、高级 socket 选项或压力验证；ClickHouse 仍为待做。

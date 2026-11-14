@@ -983,6 +983,13 @@ impl<A: PushLua, B: PushLua> PushLua for (A, B) {
     }
 }
 
+/// 三元组组合已有的二元组协议，按顺序输出三个成员。
+impl<A: PushLua, B: PushLua, C: PushLua> PushLua for (A, B, C) {
+    unsafe fn push_lua(self, output: &mut Output<'_>) -> i32 {
+        ((self.0, self.1), self.2).push_lua(output)
+    }
+}
+
 /// 字符串切片：避免为 &'static str 常量额外分配 String
 impl PushLua for &str {
     unsafe fn push_lua(self, output: &mut Output<'_>) -> i32 {

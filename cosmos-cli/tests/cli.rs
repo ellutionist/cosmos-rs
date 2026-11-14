@@ -257,11 +257,16 @@ fn network_registration_follows_feature() {
         local HttpClient = require("cosmos.network.http.client")
         assert(HttpClient == cosmos.network.http.client)
         assert(HttpClient.new())
+        local Udp = require("cosmos.network.udp")
+        assert(Udp == cosmos.network.udp)
+        local socket = assert(Udp.bind("127.0.0.1", 0, 1000))
+        socket:close()
         "#
     } else {
         r#"
         assert(cosmos.network == nil)
         assert(not pcall(require, "cosmos.network.http.client"))
+        assert(not pcall(require, "cosmos.network.udp"))
         "#
     };
     let result = stdin(&["-"], source);

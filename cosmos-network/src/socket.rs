@@ -9,10 +9,9 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::time::Instant;
 use tokio_rustls::TlsAcceptor;
 
+use crate::deadline::{timeout_from_ms, with_deadline};
 use crate::error::classify_io;
-use crate::tcp::stream::{
-    timeout_from_ms, with_deadline, Duplex, ReceiveOutcome, ReceivePattern, State,
-};
+use crate::tcp::stream::{Duplex, ReceiveOutcome, ReceivePattern, State};
 use crate::tcp::tls::{client_server_name, handshake_client, ClientCfg, ServerCfg, TlsIo};
 
 pub(crate) struct Socket {
