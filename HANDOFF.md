@@ -11,6 +11,7 @@
 - HTTP/WebSocket 回调已改用 `LuaFunction::call<A, R>`；userdata 借用失败只返回 Err，最外层 trampoline 统一抛 Lua 错误。
 - 外部嵌入使用 `Machine::new(tokio_handle)`，插件实现 `Module` 并通过 add_module 注入；插件包括 `Network`、`Encoding`、`Encryption`、`Database`，CLI 默认启用四个对应 feature。
 - `cosmos.database.mysql` 已完成 lua-resty-mysql 适配与按 client 隔离的空闲连接池；真实 MySQL 8.4.5 的明文 TCP / TLS 回归通过。认证异常与大包另有离线协议测试；尚未用真实 MariaDB 验证，不支持服务端预编译语句。
+- `cosmos.database.redis` 已适配 lua-resty-redis 0.34，提供 RESP2、pipeline、事务、Pub/Sub 与 client 池。数据库 crate 的 `mysql` / `redis` feature 默认全开；CLI 的 `database` 是两者合集，也可单独选择，依赖随数据库关闭。Redis 8.10.3 的真实回归通过，配置用 COSMOS_REDIS_URL。
 - Lua / C 模块路径分别沿用 LuaJIT 的 `LUA_PATH` / `LUA_CPATH` 与原生默认值（`;;` 展开默认路径）；CLI 可重复传入 `--path` / `--cpath` 前置模板，宿主使用 `Machine::prepend_path` / `prepend_cpath`，不修改进程环境变量。
 - CLI 的 build.rs 为 macOS / Linux 最终二进制保留并导出 Lua C API；该链接参数不会传播给外部 Machine 宿主。宿主需自行配置，见 README 的 C 扩展节；cosmos 的 Rust ffi 仍私有。
 - 交流、注释、文档一律**中文**；**不要自动 commit / push**。
@@ -24,7 +25,7 @@ cosmos-rs/
   cosmos-network/    # 功能模块：tcp/{stream,tls} / http / websocket + bridge.rs（叶子转换）
   cosmos-encoding/   # Encoding 插件：Hex、Base64、URI 组件编解码
   cosmos-encryption/ # Encryption 插件：SHA、RSA-OAEP、Ed25519
-  cosmos-database/   # Database 插件：mysql、内嵌 Lua 协议与 client 连接池
+  cosmos-database/   # Database 插件：按 feature 选择 mysql / redis，内嵌 Lua 协议与 client 池
   Cargo.toml         # 虚拟 workspace，默认成员为 cosmos-cli
   cosmos-cli/        # clap 命令行入口，注入 Runtime Handle，默认 network/encoding/encryption/database
   cosmos-network/examples/machine.rs # Rust 嵌入示例，根 examples/machine.lua 验证参数与模块入口
@@ -70,6 +71,16 @@ cosmos-rs/
 - HTTP client 已改为实例独占连接池，构造时固定 TLS 配置，调用迁移为 new + 冒号 request。
 
 ## 4. 最近完成的工作
+
+### Redis 与按数据库划分的 feature（2026-11-14）
+
+- 基于本地 lua-resty-redis 0.34 / 74d0c11 适配到 `cosmos.database.redis`，保留 BSD 许可。协议、pipeline、事务和 Pub/Sub 用 Lua；Rust 只装配插件、解析 URL，共用 mysql / redis 的 URL 叶子转换。无 ngx / resty 注入或 Lua FFI。
+- `mysql` / `redis` feature 同时控制代码、注册、内嵌源码和专用依赖，默认全开；只有 Redis 时只安装 Network，不安装 Encoding / Encryption，全关时 Database 注册为空操作。CLI 的 `database` feature 展开为 mysql + redis，依赖声明关闭 crate 默认 feature，避免单库选择被默认值重新开启。
+- Redis 连接采用已有 Socket，支持 TCP / Unix / TLS、AUTH 与 ACL、SELECT、三段超时、RESP2 嵌套错误与 null。超过 Lua 精确整数范围的 int64 回复使用字符串；限制请求/回复字节、数组长度、嵌套、pipeline 数量和 Pub/Sub 缓冲，pipeline 共用回复预算。
+- 池为 client 级，空闲数量与过期语义和 MySQL 一致，租借先 PING，归还后旧句柄失效。拒绝未完成 pipeline、订阅、MULTI、WATCH、改变会话及失败/取消连接回池。HELLO 3、MONITOR、复制流、分片订阅和改变回复模式的 CLIENT 子命令明确拒绝。
+- 兼容 Redis 原生命令命名：`redis.client(opts)` 是池工厂，`conn:client(...)` 是 CLIENT 命令；通用显式调用用 `execute`，保留 `conn:command(...)` 为 Redis COMMAND。订阅按频道集合跟踪，重复订阅不多算，取消订阅按请求数读完 ACK；RESET 清理本地订阅/事务状态，但该连接不再回池。
+- Redis 示例在独立前缀下配置 TTL、结束清理，并创建/删除自己的临时 ACL 用户；用户允许使用测试服务器，仍不修改现有用户或清空数据库。默认测试只连本地协议服务端，真实回归显式使用 COSMOS_REDIS_URL 与 --ignored。
+- 数据库 README 改为总览和 feature 说明，MySQL / Redis 细节分别在 mysql.md / redis.md；示例为 examples/mysql.lua 与 examples/redis.lua。后续优先保持两种池的语义一致，RESP3、分片订阅及全局/有界活跃池不在本轮范围；不自动提交。
 
 ### MySQL 驱动与插件（2026-11-14）
 
@@ -378,10 +389,15 @@ assert(err == nil, err)
 | `cosmos-network/src/socket.rs` | 顺序 socket、监听、TLS 原地升级与失败/取消时关闭 |
 | `cosmos-encoding/src/lib.rs` | Encoding 插件及 Hex、Base64、URI 编解码 |
 | `cosmos-encryption/src/lib.rs` | Encryption 插件及摘要、RSA、Ed25519 |
-| `cosmos-database/src/lib.rs` | Database 插件、依赖注入与 Lua 协议加载 |
+| `cosmos-database/src/lib.rs` | 按 mysql / redis feature 注册 Database 插件及依赖 |
+| `cosmos-database/src/options.rs` | 两种数据库的 URL 百分号、主机、布尔值叶子转换 |
 | `cosmos-database/src/mysql.rs` | MySQL URL 转为受控连接选项 |
+| `cosmos-database/src/redis.rs` | Redis / Rediss URL 转为受控连接选项 |
 | `cosmos-database/lua/mysql.lua` | MySQL 文本协议、认证及按 client 隔离的空闲连接池 |
+| `cosmos-database/lua/redis.lua` | RESP2、命令生成、pipeline、事务、Pub/Sub 和 client 空闲池 |
 | `cosmos-database/tests/protocol.rs` | 认证、异常包和 16 MiB 分帧离线回归 |
+| `cosmos-database/tests/redis.rs` | Redis 协议/限额/TLS/Unix 与显式真实服务器回归 |
+| `cosmos-database/tests/features.rs` | 分数据库的模块与依赖注册隔离 |
 | `cosmos-network/src/http/mod.rs` | `Conn`（明文/TLS 统一流）、`Headers`、`LuaBytes` |
 | `cosmos-network/src/http/client.rs` | hyper legacy client、连接池、重定向、整体超时 |
 | `cosmos-network/src/http/server.rs` | hyper auto server、请求 DTO、handler 协程、WebSocket 升级入口 |

@@ -1,4 +1,5 @@
 //! 用受控服务端覆盖认证分支、错误边界和 MySQL 物理包分帧。
+#![cfg(feature = "mysql")]
 
 use cosmos::Machine;
 use cosmos_database::Database;

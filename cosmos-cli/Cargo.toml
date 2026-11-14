@@ -9,7 +9,9 @@ default = ["network", "encoding", "encryption", "database"]
 network = ["dep:cosmos-network"]
 encoding = ["dep:cosmos-encoding"]
 encryption = ["dep:cosmos-encryption"]
-database = ["dep:cosmos-database", "network", "encoding", "encryption"]
+database = ["mysql", "redis"]
+mysql = ["dep:cosmos-database", "cosmos-database/mysql", "network", "encoding", "encryption"]
+redis = ["dep:cosmos-database", "cosmos-database/redis", "network"]
 
 [dependencies]
 clap = { version = "4.6", features = ["derive"] }
@@ -17,5 +19,5 @@ cosmos = { path = "../cosmos" }
 cosmos-network = { path = "../cosmos-network", optional = true }
 cosmos-encoding = { path = "../cosmos-encoding", optional = true }
 cosmos-encryption = { path = "../cosmos-encryption", optional = true }
-cosmos-database = { path = "../cosmos-database", optional = true }
+cosmos-database = { path = "../cosmos-database", default-features = false, optional = true }
 tokio = { version = "1.49", features = ["rt"] }

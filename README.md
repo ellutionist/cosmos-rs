@@ -7,7 +7,7 @@ cosmos-rs 是一个基于 LuaJIT 和 Tokio 的异步 Lua 运行环境，用于�
 - **同步写法，异步执行**：Lua 中直接调用异步接口，等待时挂起当前协程，其他协程继续运行。
 - **内建并发工具**：提供时间、协程，以及 Channel、Notify、Semaphore、Mutex 等同步原语。
 - **方便嵌入**：每个 `Machine` 拥有独立的 Lua 环境，复用宿主的 Tokio Runtime，支持多次执行脚本并保留状态。
-- **插件扩展**：Rust 插件实现 `Module` 后通过 API 注入。CLI 默认启用[网络](cosmos-network/README.md)、[编解码](cosmos-encoding/README.md)、[加密](cosmos-encryption/README.md)和[数据库（MySQL）](cosmos-database/README.md)插件，由同名 `network`、`encoding`、`encryption`、`database` feature 控制。
+- **插件扩展**：Rust 插件实现 `Module` 后通过 API 注入。CLI 默认启用[网络](cosmos-network/README.md)、[编解码](cosmos-encoding/README.md)、[加密](cosmos-encryption/README.md)和[数据库（MySQL / Redis）](cosmos-database/README.md)插件，由同名 `network`、`encoding`、`encryption`、`database` feature 控制；数据库可通过 `mysql`、`redis` 单独选择。
 
 ## 异步运行模型
 

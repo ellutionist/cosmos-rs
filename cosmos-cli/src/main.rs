@@ -7,7 +7,7 @@ use std::process::ExitCode;
 
 use clap::Parser;
 use cosmos::Machine;
-#[cfg(feature = "database")]
+#[cfg(any(feature = "mysql", feature = "redis"))]
 use cosmos_database::Database;
 #[cfg(feature = "encoding")]
 use cosmos_encoding::Encoding;
@@ -93,7 +93,7 @@ fn run(
     machine.add_module(Encryption)?;
     #[cfg(feature = "network")]
     machine.add_module(Network)?;
-    #[cfg(feature = "database")]
+    #[cfg(any(feature = "mysql", feature = "redis"))]
     machine.add_module(Database)?;
 
     let name = if script == Path::new("-") {

@@ -329,17 +329,30 @@ fn script_files_receive_arguments_and_load_network_lua_definitions() {
 
 #[test]
 fn database_registration_follows_feature() {
-    let source = if cfg!(feature = "database") {
+    let source = format!(
         r#"
-        local mysql = require('cosmos.database.mysql')
-        assert(require('cosmos.database').mysql == mysql)
-        assert(mysql.parse_url('mysql://localhost/example').database == 'example')
-        assert(mysql.quote_sql_str("a\0b") == "X'610062'")
-        "#
-    } else {
-        "assert(cosmos.database == nil); assert(not pcall(require, 'cosmos.database.mysql'))"
-    };
-    let result = stdin(&["-"], source);
+        if {mysql} then
+            local mysql = require('cosmos.database.mysql')
+            assert(require('cosmos.database').mysql == mysql)
+            assert(mysql.parse_url('mysql://localhost/example').database == 'example')
+            assert(mysql.quote_sql_str("a\0b") == "X'610062'")
+        else
+            assert(not pcall(require, 'cosmos.database.mysql'))
+        end
+        if {redis} then
+            local redis = require('cosmos.database.redis')
+            assert(require('cosmos.database').redis == redis)
+            assert(redis.parse_url('redis://localhost/2').db == 2)
+            assert(redis.null == cosmos.null)
+        else
+            assert(not pcall(require, 'cosmos.database.redis'))
+        end
+        if not {mysql} and not {redis} then assert(cosmos.database == nil) end
+        "#,
+        mysql = cfg!(feature = "mysql"),
+        redis = cfg!(feature = "redis"),
+    );
+    let result = stdin(&["-"], &source);
     assert!(
         result.status.success(),
         "{}",

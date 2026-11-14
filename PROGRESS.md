@@ -837,3 +837,23 @@
 - 按用户明确要求，将顺序 socket / TLS 升级、Null 与二进制桥接修复、Encoding / Encryption / Database 插件、CLI feature、用例与文档统一提交，不 push。
 - 提交前核对全部差异与新增文件、第三方许可和凭据配置方式，沿用本轮已完成的工作区 52 项测试、5 项编译失败检查、CLI feature 组合、严格 Clippy、实际 examples 与真实 MySQL 明文 / TLS 验证结果；没有行为变更，不重复执行已通过的完整回归。
 - 当前 MySQL 池为 client 级，pool_size 限制空闲连接数。后续优先考虑活跃连接上限与等待队列、会话状态重置、DECIMAL 精度、查询总超时，以及真实 MariaDB / Unix socket 和长期并发回归；本次只提交现有成果。
+
+## 2026-11-14 接入 Redis 并拆分数据库 feature
+
+- 按用户要求，将本地 lua-resty-redis 0.34 / 74d0c11 适配为 cosmos.database.redis，仍放在 cosmos-database；Lua 实现 RESP2、命令编码与动态生成、pipeline、事务、Pub/Sub 和 client 池，Rust 只负责 URL 转换与插件装配。保留原始版权和 BSD 全文，不修改上游仓库，不注入 ngx / resty 或引入裸 Lua FFI。
+- 数据库 crate 新增默认全开的 mysql / redis feature，控制对应代码、内嵌 Lua、类型注册和可选依赖；只有 Redis 时仅安装 Network，MySQL 才安装 Encoding / Encryption。两者共用 URL 百分号、主机与布尔转换；全关时 Database 注册为空操作。
+- CLI 的 database feature 改为 mysql + redis 合集，并提供单库开关；对 cosmos-database 显式 default-features=false，防止禁用的数据库被依赖默认值重新开启。实际验证全关、仅 MySQL、仅 Redis、两者同时开启的模块入口与普通依赖树，未启用的模块不能 require。
+- Redis 支持 TCP / Unix / TLS、URL、ACL AUTH、SELECT 和三段超时，字符串保持 NUL / 非 UTF-8 / CRLF。nil bulk / array 使用 cosmos.null，顶层 Redis 错误返回 false+err，嵌套与 pipeline 错误保留 {false, err}；超出 Lua 安全整数范围的 int64 回复返回十进制字符串。
+- 解析严格验证行结束、bulk 长度与终止符、int64 范围、数组和嵌套；默认请求/回复 64 MiB、数组 65536、深度 128，pipeline 最多 10000 条且请求与回复各共用字节预算，Pub/Sub 缓冲同时限制数量和字节。未知 RESP3 前缀、HELLO 3、MONITOR、复制流、分片订阅与改变回复模式的 CLIENT 子命令明确拒绝。
+- Redis 池继续按 client 隔离，pool_size 只限制空闲数，支持过期和 PING 检测失效；归还转移到底层连接的新句柄，旧句柄失效。pipeline 未读完、订阅、MULTI、WATCH、公开 AUTH / SELECT 等会话变更、收发失败或取消均禁止回池。事务解析覆盖 EXECABORT、WATCH 导致的空 EXEC 和 pipeline 内事务；RESET 清理本地状态，但不允许该连接重新入池。
+- 接入时处理原生名称冲突：redis.client(opts) 是池工厂，conn:client(...) 仍是 CLIENT 命令；通用调用使用 execute，保留 conn:command(...) 为 Redis COMMAND。重复订阅用频道集合跟踪，不累加错误计数；多参数 unsubscribe 必须读完全部 ACK，等待普通响应时缓冲频道消息。
+- 用户提供的 192.168.31.163:6379 实测为 Redis 8.10.3，且授权使用测试服务器。新增 examples/redis.lua，独立键前缀、TTL 和末尾清理，验证二进制/NULL/int64、哈希、pipeline/取消、事务/WATCH/EXECABORT、Pub/Sub、池复用/隔离/失效重建、超时/取消、并发、RESET，以及创建/删除本轮临时 ACL 用户并验证认证和 SELECT 隔离；未更改已有用户或清空数据库。
+- 新增 Redis 离线协议回归，覆盖 AUTH / SELECT 的二进制参数、分片接收、嵌套错误、异常长度/终止符/整数/深度/数组上限、pipeline 总回复预算、部分 pipeline 与 Pub/Sub 读超时关闭；本地 TCP / Unix 的 TLS 用可信 CA 和主机名校验。外部服务器用例仍须显式设置 COSMOS_REDIS_URL 并 --ignored。
+- 工作区 59 项测试与 5 项编译失败检查通过；数据库空 feature / mysql / redis 独立测试分别通过，CLI 空 feature / mysql / redis / database 组合测试通过；工作区与数据库/CLI 的单库、空配置严格 Clippy 通过。实际用仅 Redis 的 CLI 运行 Redis 示例、仅 MySQL 的 CLI 运行原 MySQL 示例均通过，已恢复默认 feature CLI；格式、文档链接与差异检查通过。
+- README 按总览、mysql.md、redis.md 拆分，根 README 与 HANDOFF 同步记录 feature、接口、验证范围和暂不支持的协议模式。不自动提交；后续仍可补有界活跃池、RESP3 / 分片订阅和长时间压力回归，未在本轮宣称完成。
+
+## 2026-11-14 提交 Redis 与数据库 feature 拆分
+
+- 按用户明确要求，将 Redis 驱动、独立数据库 feature、CLI 选择、回归用例、第三方许可和文档一并提交，不 push。
+- 提交前核对完整差异和新增文件，沿用已通过的工作区 59 项测试、5 项编译失败检查、feature 组合与依赖隔离、严格 Clippy，以及仅 Redis / 仅 MySQL CLI 的真实服务器回归；本轮没有行为修改，不重复执行完整回归。
+- 用户询问如果只再接一个数据库的建议：优先评估 PostgreSQL 与 pgmoon，复用现有异步网络、TLS 和 Lua 协议适配路径；后续需核对 SCRAM 认证、密码学依赖和类型转换。本轮只提交和调研建议，未开始接入新数据库。

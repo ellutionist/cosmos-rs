@@ -1,4 +1,5 @@
 //! 插件隔离、URL 转换与显式启用的真实数据库回归。
+#![cfg(feature = "mysql")]
 
 use cosmos::Machine;
 use cosmos_database::Database;
